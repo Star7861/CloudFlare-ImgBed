@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.29
+// @version      3.0.0-dev.30
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.29';
+  const SCRIPT_VERSION = '3.0.0-dev.30';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const MASK_LIBRARY_KEY = 'mufy-recovery-mask-library-v1';
   const MASK_LIBRARY_BACKUP_KEY = 'mufy-recovery-mask-library-backup-v1';
@@ -43,6 +43,7 @@
   const MANUAL_FAVORITE_CHAT_KEY = 'mufy-role-links-only-manual-favorite-chat-v1';
   const MANUAL_FAVORITE_CHAT_CURRENT_KEY = 'mufy-role-links-only-manual-favorite-chat-current-v1';
   const MANUAL_AUTO_CHAT_MESSAGE_KEY = 'mufy-role-links-only-manual-auto-chat-message-v1';
+  const MANUAL_AUTO_CHAT_DELAY_KEY = 'mufy-role-links-only-manual-auto-chat-delay-v1';
   const MANUAL_AUTO_CHAT_JOB_KEY = 'mufy-role-links-only-manual-auto-chat-job-v1';
   const CHAT_MODEL_CONFIG_KEY = 'mufy-role-links-only-chat-model-config-v1';
   const CHAT_JUMP_KEY = 'mufy-role-links-only-chat-jump-v1';
@@ -545,6 +546,21 @@
     return value;
   }
 
+  function loadManualAutoChatDelay() {
+    try {
+      const raw = loadAndMigrateScopedValue(MANUAL_AUTO_CHAT_DELAY_KEY);
+      if (raw == null || raw === '') return 10;
+      const value = Number(raw);
+      return Number.isFinite(value) ? Math.max(0, Math.min(300, Math.round(value))) : 10;
+    } catch (_) { return 10; }
+  }
+
+  function saveManualAutoChatDelay(seconds) {
+    const value = Math.max(0, Math.min(300, Math.round(Number(seconds) || 0)));
+    try { localStorage.setItem(accountStorageKey(MANUAL_AUTO_CHAT_DELAY_KEY), String(value)); } catch (_) {}
+    return value;
+  }
+
   function loadManualAutoChatJob() {
     try {
       const job = JSON.parse(loadAndMigrateScopedValue(MANUAL_AUTO_CHAT_JOB_KEY) || 'null');
@@ -676,6 +692,7 @@
     manualFavoriteChatCurrentId: (() => { try { return loadAndMigrateScopedValue(MANUAL_FAVORITE_CHAT_CURRENT_KEY) || ''; } catch (_) { return ''; } })(),
     manualFavoriteNextDismissed: false,
     manualAutoChatMessage: loadManualAutoChatMessage(),
+    manualAutoChatDelay: loadManualAutoChatDelay(),
     manualAutoChatRunning: Boolean(loadManualAutoChatJob() && !loadManualAutoChatJob()?.paused),
     manualAutoChatStopRequested: false,
     chatExportLoading: false,
@@ -809,6 +826,7 @@ roleStateReady = true;
     state.manualFavoriteChats = loadManualFavoriteChats();
     try { state.manualFavoriteChatCurrentId = loadAndMigrateScopedValue(MANUAL_FAVORITE_CHAT_CURRENT_KEY) || ''; } catch (_) { state.manualFavoriteChatCurrentId = ''; }
     state.manualAutoChatMessage = loadManualAutoChatMessage();
+    state.manualAutoChatDelay = loadManualAutoChatDelay();
     state.manualAutoChatRunning = Boolean(loadManualAutoChatJob() && !loadManualAutoChatJob()?.paused);
     state.manualAutoChatStopRequested = false;
     state.lastRoleReadIds = null;
@@ -1228,6 +1246,23 @@ roleStateReady = true;
     return true;
   }
 
+  async function waitManualAutoChatCooldown(job) {
+    const seconds = Math.max(0, Math.min(300, Number(job.delaySeconds ?? state.manualAutoChatDelay) || 0));
+    if (!seconds) return;
+    const endAt = Date.now() + seconds * 1000;
+    let lastShown = -1;
+    while (Date.now() < endAt) {
+      if (manualAutoChatWasStopped()) throw new ManualAutoChatPausedError('任务已暂停');
+      const remaining = Math.max(1, Math.ceil((endAt - Date.now()) / 1000));
+      if (remaining !== lastShown) {
+        lastShown = remaining;
+        state.status = `已完成 ${Number(job.completed || 0)}/${Number(job.total || 0)} 个；冷却 ${remaining} 秒后打开下一个角色……`;
+        render();
+      }
+      await wait(Math.min(500, Math.max(50, endAt - Date.now())));
+    }
+  }
+
   function finishManualAutoChatJob(job) {
     clearManualAutoChatJob();
     state.manualAutoChatRunning = false;
@@ -1340,9 +1375,9 @@ roleStateReady = true;
         return;
       }
       saveManualAutoChatJob(job);
-      state.status = `已完成 ${job.completed}/${job.total} 个，正在打开下一个普通收藏角色……`;
+      state.status = `已完成 ${job.completed}/${job.total} 个，准备打开下一个普通收藏角色……`;
       render();
-      await wait(800);
+      await waitManualAutoChatCooldown(job);
       navigateManualAutoChatToNext(job);
     } catch (error) {
       const persistedJob = loadManualAutoChatJob();
@@ -1396,14 +1431,16 @@ roleStateReady = true;
       return;
     }
     const message = saveManualAutoChatMessage(state.manualAutoChatMessage);
+    const delaySeconds = saveManualAutoChatDelay(state.manualAutoChatDelay);
     if (!message) return;
-    if (!pageWindow.confirm(`将依次给 ${state.manualFavoriteChats.length} 个普通收藏角色发送：\n\n${message}\n\n每个角色会等待完整回复后再进入下一个。确定开始吗？`)) return;
+    if (!pageWindow.confirm(`将依次给 ${state.manualFavoriteChats.length} 个普通收藏角色发送：\n\n${message}\n\n每个角色会等待完整回复，并额外冷却 ${delaySeconds} 秒后再进入下一个。确定开始吗？`)) return;
     const first = state.manualFavoriteChats[0];
     const job = {
       active: true,
       paused: false,
       phase: 'navigating',
       message,
+      delaySeconds,
       total: state.manualFavoriteChats.length,
       completed: 0,
       activeCharacterId: String(first?.characterId || ''),
@@ -8442,6 +8479,7 @@ roleStateReady = true;
     if (siteActions) siteActions.hidden = !(state.section === 'web' && (state.active === 'siteSearch' || state.active === 'siteAuthors'));
     const manualAutoActions = panel.querySelector('#mufy-recovery-manual-auto-actions');
     const manualAutoMessage = panel.querySelector('#mufy-recovery-manual-auto-message');
+    const manualAutoDelay = panel.querySelector('#mufy-recovery-manual-auto-delay');
     const manualAutoStart = panel.querySelector('#mufy-recovery-manual-auto-start');
     const manualAutoCancel = panel.querySelector('#mufy-recovery-manual-auto-cancel');
     const manualAutoJob = loadManualAutoChatJob();
@@ -8449,6 +8487,10 @@ roleStateReady = true;
     if (manualAutoMessage) {
       if (document.activeElement !== manualAutoMessage) manualAutoMessage.value = state.manualAutoChatMessage;
       manualAutoMessage.disabled = Boolean(manualAutoJob && !manualAutoJob.paused);
+    }
+    if (manualAutoDelay) {
+      if (document.activeElement !== manualAutoDelay) manualAutoDelay.value = String(state.manualAutoChatDelay);
+      manualAutoDelay.disabled = Boolean(manualAutoJob && !manualAutoJob.paused);
     }
     if (manualAutoStart) {
       manualAutoStart.disabled = !manualAutoJob && !state.manualFavoriteChats.length;
@@ -8815,8 +8857,9 @@ roleStateReady = true;
       #mufy-recovery-chat-search{width:auto!important;white-space:nowrap;background:#3a355d!important;border-color:#7569bd!important}
       #mufy-recovery-site-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin-top:6px}
       #mufy-recovery-site-actions button{min-width:0;padding:7px 6px;font-size:12px}
-      #mufy-recovery-manual-auto-actions{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:6px;margin-top:6px;padding:7px;border:1px solid #5d5575;border-radius:7px;background:#24222c}
+      #mufy-recovery-manual-auto-actions{display:grid;grid-template-columns:minmax(0,1fr) auto auto auto;gap:6px;margin-top:6px;padding:7px;border:1px solid #5d5575;border-radius:7px;background:#24222c}
       #mufy-recovery-manual-auto-message{box-sizing:border-box;min-width:0;width:100%;border:1px solid #555;border-radius:6px;background:#18181c;color:#fff;padding:7px 9px;font:inherit}
+      .mufy-recovery-auto-delay{display:flex;align-items:center;gap:4px;white-space:nowrap;color:#ccc;font-size:12px}.mufy-recovery-auto-delay input{box-sizing:border-box;width:58px;border:1px solid #555;border-radius:6px;background:#18181c;color:#fff;padding:7px 5px;font:inherit;text-align:center}
       #mufy-recovery-manual-auto-start{background:#5e4f91!important;border-color:#8373bb!important;color:#fff!important;font-weight:700}
       #mufy-recovery-manual-auto-cancel{background:#572b30!important;border-color:#945059!important;color:#ffc6cb!important}
       .mufy-recovery-site-select{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;gap:6px;min-width:72px;min-height:32px;margin:0;padding:5px 9px;border:1px solid #8b7440;border-radius:7px;background:#302a1d;color:#f8f0cb;white-space:nowrap;font-size:12px;font-weight:700;cursor:pointer;user-select:none}
@@ -9150,7 +9193,7 @@ roleStateReady = true;
         <div id="mufy-recovery-web-section" hidden>
           <div id="mufy-recovery-web-tabs"><button data-category="siteSearch">网站角色 (0)</button><button data-category="siteAuthors">网站作者 (0)</button><button data-category="manualFavoriteChats">普通待聊 (0)</button><button id="mufy-recovery-manual-chat-next" title="按普通待聊列表顺序打开角色；再次点击视为当前角色已处理并前往下一个">下一个</button></div>
           <div id="mufy-recovery-site-actions"><button id="mufy-recovery-refresh-favorite-states">获取收藏状态</button><button id="mufy-recovery-select-unfavorite-site">全选未收藏</button><button id="mufy-recovery-favorite-selected-site">立即收藏 (0)</button><button id="mufy-recovery-clear-site-selection">清空勾选</button><button id="mufy-recovery-refresh-site-rows" title="刷新当前网站页面并重新捕获，之后翻页会继续自动获取">重新获取</button><button id="mufy-recovery-clear-site-rows">清空结果</button></div>
-          <div id="mufy-recovery-manual-auto-actions" hidden><input id="mufy-recovery-manual-auto-message" type="text" maxlength="500" value="${esc(state.manualAutoChatMessage)}" aria-label="一键扣数发送内容"><button id="mufy-recovery-manual-auto-start">一键扣数</button><button id="mufy-recovery-manual-auto-cancel" hidden>取消任务</button></div>
+          <div id="mufy-recovery-manual-auto-actions" hidden><input id="mufy-recovery-manual-auto-message" type="text" maxlength="500" value="${esc(state.manualAutoChatMessage)}" aria-label="一键扣数发送内容"><label class="mufy-recovery-auto-delay">间隔 <input id="mufy-recovery-manual-auto-delay" type="number" min="0" max="300" step="1" value="${esc(state.manualAutoChatDelay)}" aria-label="每个角色完成后的冷却秒数"> 秒</label><button id="mufy-recovery-manual-auto-start">一键扣数</button><button id="mufy-recovery-manual-auto-cancel" hidden>取消任务</button></div>
         </div>
         <div id="mufy-recovery-mask-section" hidden>
           <div id="mufy-recovery-mask-tabs"><button data-category="masks">面具 (0)</button><button data-category="library">面具库 (0)</button><button id="mufy-recovery-save-all" class="mufy-recovery-tab-action">全部存入面具库</button></div>
@@ -9513,6 +9556,14 @@ roleStateReady = true;
     manualAutoMessage.onchange = event => {
       state.manualAutoChatMessage = saveManualAutoChatMessage(event.target.value);
       event.target.value = state.manualAutoChatMessage;
+    };
+    const manualAutoDelay = panel.querySelector('#mufy-recovery-manual-auto-delay');
+    manualAutoDelay.oninput = event => {
+      state.manualAutoChatDelay = Math.max(0, Math.min(300, Number(event.target.value) || 0));
+    };
+    manualAutoDelay.onchange = event => {
+      state.manualAutoChatDelay = saveManualAutoChatDelay(event.target.value);
+      event.target.value = String(state.manualAutoChatDelay);
     };
     panel.querySelector('#mufy-recovery-manual-auto-start').onclick = startOrResumeManualAutoChat;
     panel.querySelector('#mufy-recovery-manual-auto-cancel').onclick = cancelManualAutoChatJob;
