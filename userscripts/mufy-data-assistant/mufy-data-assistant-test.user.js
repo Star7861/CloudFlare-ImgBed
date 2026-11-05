@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.26
+// @version      3.0.0-dev.27
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.26';
+  const SCRIPT_VERSION = '3.0.0-dev.27';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const MASK_LIBRARY_KEY = 'mufy-recovery-mask-library-v1';
   const MASK_LIBRARY_BACKUP_KEY = 'mufy-recovery-mask-library-backup-v1';
@@ -858,6 +858,38 @@ roleStateReady = true;
     return false;
   }
 
+  function reactPropsOf(element) {
+    if (!element) return null;
+    try {
+      const key = Reflect.ownKeys(element).find(name => String(name).startsWith('__reactProps$'));
+      return key ? element[key] : null;
+    } catch (_) { return null; }
+  }
+
+  function callReactEventHandler(element, handlerNames, eventValues = {}) {
+    const props = reactPropsOf(element);
+    const handlerName = handlerNames.find(name => typeof props?.[name] === 'function');
+    if (!handlerName) return false;
+    let defaultPrevented = false;
+    const event = {
+      target: element,
+      currentTarget: element,
+      nativeEvent: null,
+      bubbles: true,
+      cancelable: true,
+      defaultPrevented: false,
+      preventDefault() { defaultPrevented = true; this.defaultPrevented = true; },
+      stopPropagation() {},
+      persist() {},
+      isDefaultPrevented() { return defaultPrevented; },
+      isPropagationStopped() { return false; },
+      ...eventValues
+    };
+    event.nativeEvent = event;
+    props[handlerName](event);
+    return true;
+  }
+
   async function activateManualChatSend(textarea, button, message) {
     const previousSessionId = currentRoleContext().sessionId;
     const attempts = [
@@ -865,6 +897,17 @@ roleStateReady = true;
         const nativeClick = pageWindow.HTMLElement?.prototype?.click;
         if (nativeClick) nativeClick.call(button);
         else button.click();
+      },
+      () => {
+        if (!callReactEventHandler(button, ['onClick', 'onPointerUp', 'onMouseUp'], { type: 'click', button: 0, buttons: 0 })) {
+          throw new Error('发送按钮上没有找到页面框架的点击处理器');
+        }
+      },
+      () => {
+        const form = textarea.closest('form') || button.closest('form');
+        if (!form) throw new Error('聊天输入区没有可提交的表单');
+        if (typeof form.requestSubmit === 'function') form.requestSubmit(button);
+        else form.dispatchEvent(new pageWindow.Event('submit', { bubbles: true, cancelable: true }));
       },
       () => {
         const PointerEventCtor = pageWindow.PointerEvent || pageWindow.MouseEvent;
@@ -875,13 +918,18 @@ roleStateReady = true;
       },
       () => {
         textarea.focus();
+        if (callReactEventHandler(textarea, ['onKeyDown', 'onKeyPress'], {
+          type: 'keydown', key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
+          shiftKey: false, ctrlKey: false, altKey: false, metaKey: false
+        })) return;
         const KeyboardEventCtor = pageWindow.KeyboardEvent;
         textarea.dispatchEvent(new KeyboardEventCtor('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
         textarea.dispatchEvent(new KeyboardEventCtor('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
       }
     ];
+    const failures = [];
     for (let index = 0; index < attempts.length; index += 1) {
-      attempts[index]();
+      try { attempts[index](); } catch (error) { failures.push(String(error?.message || error)); }
       if (await manualChatSendStarted(textarea, message, previousSessionId)) return;
       if (index + 1 < attempts.length) {
         const composer = findManualChatComposer();
@@ -889,7 +937,7 @@ roleStateReady = true;
         button = composer.button || button;
       }
     }
-    throw new Error('发送按钮已启用，但点击和 Enter 发送都没有生效');
+    throw new Error(`发送按钮已启用，但页面的点击、框架事件、表单提交和 Enter 都没有生效${failures.length ? `（${[...new Set(failures)].join('；')}）` : ''}`);
   }
 
   async function waitForManualChatResponse(job) {
@@ -994,7 +1042,20 @@ roleStateReady = true;
         return;
       }
       if (job.phase === 'sending') {
-        throw new Error('上次任务在点击发送时中断，为避免重复发送已暂停；请确认页面后再继续');
+        const composer = findManualChatComposer();
+        const messageStillInDraft = Boolean(
+          composer.textarea
+          && String(composer.textarea.value || '').trim() === String(job.message || '').trim()
+          && !current.sessionId
+          && !hasVisibleChatStopControl()
+        );
+        if (messageStillInDraft) {
+          job.phase = 'ready-to-send';
+          job.sentAt = 0;
+          if (!saveManualAutoChatJob(job)) throw new Error('无法恢复发送未生效的任务');
+        } else {
+          throw new Error('上次任务在点击发送时中断，页面状态无法确认；为避免重复发送已暂停');
+        }
       }
       if (job.phase === 'waiting-response') {
         const composer = findManualChatComposer();
