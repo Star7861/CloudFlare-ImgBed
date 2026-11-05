@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.33
+// @version      3.0.0-dev.34
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.33';
+  const SCRIPT_VERSION = '3.0.0-dev.34';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const MASK_LIBRARY_KEY = 'mufy-recovery-mask-library-v1';
   const MASK_LIBRARY_BACKUP_KEY = 'mufy-recovery-mask-library-backup-v1';
@@ -7217,7 +7217,7 @@ roleStateReady = true;
     const modal = panel?.querySelector('#mufy-recovery-chat-search-modal');
     if (!modal) return;
     const queryInput = modal.querySelector('#mufy-recovery-chat-search-query');
-    queryInput.value = String(panel.querySelector('#mufy-recovery-role-search')?.value || state.chatSearchQuery || '');
+    queryInput.value = String(state.chatSearchQuery || '');
     modal.querySelector('#mufy-recovery-chat-search-scope').value = state.chatSearchScope === 'one' ? 'one' : 'all';
     refreshChatSearchDialogRoles();
     modal.hidden = false;
@@ -7242,8 +7242,9 @@ roleStateReady = true;
     const scope = modal?.querySelector('#mufy-recovery-chat-search-scope')?.value === 'one' ? 'one' : 'all';
     const characterId = scope === 'one' ? String(modal?.querySelector('#mufy-recovery-chat-search-role')?.value || '') : '';
     const query = String(input?.value || state.roleQuery || '').trim();
-    if (query.length < 2) {
-      state.status = '请在角色搜索框输入至少 2 个字，再点击“搜聊天”。';
+    const minimumLength = scope === 'one' ? 1 : 2;
+    if (query.length < minimumLength) {
+      state.status = scope === 'one' ? '搜索单个角色时请输入至少 1 个字。' : '搜索所有角色时请输入至少 2 个字，以免产生大量请求和无关结果。';
       render();
       return;
     }
@@ -7285,11 +7286,11 @@ roleStateReady = true;
         await wait(100);
       }
       state.active = 'chatMatches';
-      state.section = 'roles';
+      state.section = 'chats';
       state.status = `聊天记录搜索完成：检查 ${sessions.length} 段会话，找到 ${state.chatSearchResults.length} 个匹配角色。`;
     } catch (error) {
       state.active = 'chatMatches';
-      state.section = 'roles';
+      state.section = 'chats';
       if (error?.name === 'AbortError' || state.chatSearchStopRequested) {
         state.status = `已停止聊天记录搜索，保留当前找到的 ${state.chatSearchResults.length} 个结果。`;
       } else {
@@ -8536,7 +8537,7 @@ roleStateReady = true;
     const manualAutoStart = panel.querySelector('#mufy-recovery-manual-auto-start');
     const manualAutoCancel = panel.querySelector('#mufy-recovery-manual-auto-cancel');
     const manualAutoJob = loadManualAutoChatJob();
-    if (manualAutoActions) manualAutoActions.hidden = !(state.section === 'web' && state.active === 'manualFavoriteChats');
+    if (manualAutoActions) manualAutoActions.hidden = !(state.section === 'favorites' && state.active === 'manualFavoriteChats');
     if (manualAutoMessage) {
       if (document.activeElement !== manualAutoMessage) manualAutoMessage.value = state.manualAutoChatMessage;
       manualAutoMessage.disabled = Boolean(manualAutoJob && !manualAutoJob.paused);
@@ -8591,9 +8592,13 @@ roleStateReady = true;
     const isMaskView = state.section === 'masks' || state.active === 'masks' || state.active === 'library';
     const isWebView = state.section === 'web' || state.active === 'siteSearch' || state.active === 'siteAuthors';
     const roleSection = panel.querySelector('#mufy-recovery-role-section');
+    const favoriteSection = panel.querySelector('#mufy-recovery-favorite-section');
+    const chatSection = panel.querySelector('#mufy-recovery-chat-section');
     const maskSection = panel.querySelector('#mufy-recovery-mask-section');
     const webSection = panel.querySelector('#mufy-recovery-web-section');
     if (roleSection) roleSection.hidden = state.section !== 'roles';
+    if (favoriteSection) favoriteSection.hidden = state.section !== 'favorites';
+    if (chatSection) chatSection.hidden = state.section !== 'chats';
     if (maskSection) maskSection.hidden = state.section !== 'masks';
     if (webSection) webSection.hidden = state.section !== 'web';
     panel.querySelectorAll('[data-section]').forEach(button => button.classList.toggle('active', button.dataset.section === state.section));
@@ -8617,7 +8622,7 @@ roleStateReady = true;
       statusFilter.innerHTML = statusOptions.map(([value, label, count]) => `<option value="${value}">${label}（${count}）</option>`).join('');
       statusFilter.value = state.statusFilter;
     }
-    const query = isMaskView ? state.maskQuery : (isWebView ? '' : state.roleQuery);
+    const query = isMaskView ? state.maskQuery : (state.section === 'roles' ? state.roleQuery : '');
     const libraryRows = visibleLibraryRows();
     const roleRows = allRoleRows();
     const source = state.active === 'allRoles' ? roleRows
@@ -8670,11 +8675,11 @@ roleStateReady = true;
                 : button.dataset.category === 'siteSearch' ? state.siteSearchRows.length
                   : button.dataset.category === 'siteAuthors' ? authorGroups(state.siteSearchRows, '').length
                     : button.dataset.category === 'masks' ? state.masks.length : libraryRows.length;
-      const label = button.dataset.category === 'allRoles' ? '总数'
+      const label = button.dataset.category === 'allRoles' ? '全部角色'
         : button.dataset.category === 'chatted' ? '聊过的'
           : button.dataset.category === 'chattedNotFavorite' ? '聊过未收藏'
             : button.dataset.category === 'favoriteOnly' ? '收藏未聊'
-              : button.dataset.category === 'chatMatches' ? '聊天匹配'
+              : button.dataset.category === 'chatMatches' ? '搜索结果'
               : button.dataset.category === 'manualFavoriteChats' ? '普通待聊'
                 : button.dataset.category === 'authors' ? '作者合集'
                 : button.dataset.category === 'siteSearch' ? '网站角色'
@@ -8781,8 +8786,7 @@ roleStateReady = true;
       #mufy-recovery-title{display:flex;align-items:center;gap:6px;min-width:0}
       #mufy-recovery-title>span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
       #mufy-recovery-head button{background:none;border:0;color:#bbb;font-size:20px;cursor:pointer}
-      #mufy-recovery-export-chat,#mufy-recovery-quote-entry,#mufy-recovery-model-entry,#mufy-recovery-log-entry,#mufy-recovery-history-entry{flex:none;padding:5px 8px!important;border:1px solid #666!important;border-radius:6px!important;background:#3a3a44!important;color:#ddd!important;font:600 11px/1.2 system-ui!important;white-space:nowrap}
-      #mufy-recovery-export-chat{margin-left:auto}
+      #mufy-recovery-head #mufy-recovery-model-entry,#mufy-recovery-head #mufy-recovery-log-entry{flex:none;padding:5px 8px!important;border:1px solid #666!important;border-radius:6px!important;background:#3a3a44!important;color:#ddd!important;font:600 11px/1.2 system-ui!important;white-space:nowrap}
       #mufy-recovery-export-chat:disabled{opacity:.45;cursor:not-allowed!important}
       #mufy-recovery-quote-entry{margin-left:6px;border-color:#766bb1!important;background:#443c67!important;color:#eeeaff!important}
       #mufy-recovery-model-entry{margin-left:6px}
@@ -8893,7 +8897,9 @@ roleStateReady = true;
       #mufy-recovery-resize-handle::after,#mufy-recovery-resize-handle-bottom::after{content:'';width:48px;height:4px;border-radius:3px;background:#777;box-shadow:0 1px 2px #0007}
       #mufy-recovery-panel.is-resizing{user-select:none}
       #mufy-recovery-controls{display:grid;gap:7px;padding:9px 10px;flex:none;overflow:auto;max-height:55%}
-      #mufy-recovery-role-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;align-items:stretch}
+      #mufy-recovery-role-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;align-items:stretch}
+      #mufy-recovery-favorite-actions{display:grid;grid-template-columns:1fr;gap:6px;align-items:stretch}
+      #mufy-recovery-chat-tools{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;align-items:stretch}
       #mufy-recovery-mask-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
       #mufy-recovery-role-actions > button,#mufy-recovery-mask-actions > button{min-width:0;white-space:normal;line-height:1.25}
       #mufy-recovery-favorite-visible{width:100%}
@@ -8909,7 +8915,7 @@ roleStateReady = true;
       #mufy-recovery-panel button{border:1px solid #666;border-radius:6px;background:#35353c;color:#eee;padding:6px 9px;cursor:pointer}
       #mufy-recovery-panel button:disabled{opacity:.5;cursor:wait}
       #mufy-recovery-run{background:#786bd4!important;border-color:#8f84dd!important}
-      #mufy-recovery-role-filter-row{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr) auto;gap:6px;min-width:0}
+      #mufy-recovery-role-filter-row{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);gap:6px;min-width:0}
       #mufy-recovery-role-filter-row > *,#mufy-recovery-mask-search{box-sizing:border-box;min-width:0;width:100%;border:1px solid #555;border-radius:6px;background:#18181c;color:#fff;padding:7px 9px;font:inherit}
       #mufy-recovery-chat-search{width:auto!important;white-space:nowrap;background:#3a355d!important;border-color:#7569bd!important}
       #mufy-recovery-site-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin-top:6px}
@@ -8932,14 +8938,14 @@ roleStateReady = true;
       #mufy-recovery-favorite-task-controls{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:6px;padding:7px;border:1px solid #665d35;border-radius:7px;background:#2c281d}
       #mufy-recovery-favorite-task-main{background:#735f22!important;border-color:#b69637!important;color:#fff0b0!important;font-weight:700}
       #mufy-recovery-favorite-task-cancel{background:#572b30!important;border-color:#945059!important;color:#ffc6cb!important}
-      #mufy-recovery-section-tabs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
+      #mufy-recovery-section-tabs{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:6px}
       #mufy-recovery-section-tabs button{font-weight:700;background:#282832}
       #mufy-recovery-section-tabs button.active{background:#786bd4;border-color:#8f84dd;color:#fff}
-      #mufy-recovery-tabs,#mufy-recovery-web-tabs{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+      #mufy-recovery-tabs,#mufy-recovery-favorite-tabs,#mufy-recovery-chat-tabs,#mufy-recovery-web-tabs{display:grid;grid-template-columns:1fr 1fr;gap:6px}
       #mufy-recovery-mask-tabs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
-      #mufy-recovery-tabs button.active,#mufy-recovery-mask-tabs button.active,#mufy-recovery-web-tabs button.active{background:#786bd4;border-color:#8f84dd;color:#fff}
+      #mufy-recovery-tabs button.active,#mufy-recovery-favorite-tabs button.active,#mufy-recovery-chat-tabs button.active,#mufy-recovery-mask-tabs button.active,#mufy-recovery-web-tabs button.active{background:#786bd4;border-color:#8f84dd;color:#fff}
       #mufy-recovery-tabs .mufy-recovery-tab-action,#mufy-recovery-mask-tabs .mufy-recovery-tab-action{background:#453d69;border-color:#8578c8;color:#f4efff}
-      #mufy-recovery-role-section,#mufy-recovery-mask-section,#mufy-recovery-web-section{display:flex;flex-direction:column;gap:8px}
+      #mufy-recovery-role-section,#mufy-recovery-favorite-section,#mufy-recovery-chat-section,#mufy-recovery-mask-section,#mufy-recovery-web-section{display:flex;flex-direction:column;gap:8px}
       #mufy-recovery-list{flex:1 1 auto;min-height:0;overflow:auto;border-top:1px solid #444;padding:0 10px 16px}
       .mufy-recovery-row{display:flex;gap:9px;padding:9px 2px;border-bottom:1px solid #3e3e45}
       .mufy-recovery-row img{width:40px;height:40px;flex:none;border-radius:10px;object-fit:cover}
@@ -9040,13 +9046,13 @@ roleStateReady = true;
         #mufy-recovery-panel{right:8px;bottom:58px;width:calc(100vw - 16px);max-width:calc(100vw - 16px)}
         #mufy-recovery-role-actions button,#mufy-recovery-mask-actions button{font-size:11px;padding:6px 5px}
         #mufy-recovery-section-tabs{grid-template-columns:repeat(3,minmax(0,1fr));gap:5px}
-        #mufy-recovery-tabs,#mufy-recovery-web-tabs{grid-template-columns:repeat(2,minmax(0,1fr));gap:5px}
+        #mufy-recovery-tabs,#mufy-recovery-favorite-tabs,#mufy-recovery-chat-tabs,#mufy-recovery-web-tabs{grid-template-columns:repeat(2,minmax(0,1fr));gap:5px}
         #mufy-recovery-mask-tabs{grid-template-columns:repeat(3,minmax(0,1fr));gap:5px}
         #mufy-recovery-mask-actions{grid-template-columns:repeat(3,minmax(0,1fr));gap:5px}
         #mufy-recovery-site-actions{grid-template-columns:repeat(2,minmax(0,1fr));gap:5px}
         #mufy-recovery-manual-auto-actions{grid-template-columns:1fr 1fr}
         #mufy-recovery-manual-auto-message{grid-column:1/-1}
-        #mufy-recovery-section-tabs button,#mufy-recovery-tabs button,#mufy-recovery-mask-tabs button,#mufy-recovery-web-tabs button{padding:6px 4px;font-size:11px}
+        #mufy-recovery-section-tabs button,#mufy-recovery-tabs button,#mufy-recovery-favorite-tabs button,#mufy-recovery-chat-tabs button,#mufy-recovery-mask-tabs button,#mufy-recovery-web-tabs button{padding:6px 4px;font-size:11px}
         #mufy-recovery-export-options{gap:6px;padding:10px}
         #mufy-recovery-role-read-options{gap:5px;font-size:10px}
         #mufy-recovery-status{font-size:12px}
@@ -9056,7 +9062,7 @@ roleStateReady = true;
         #mufy-recovery-mask-editor-hint{grid-column:auto}
         .mufy-recovery-mask-editor-field textarea{min-height:128px}
         #mufy-recovery-mask-editor-actions{padding:10px 11px}
-        #mufy-recovery-head{gap:3px;padding-left:9px;padding-right:7px}#mufy-recovery-export-chat,#mufy-recovery-quote-entry,#mufy-recovery-model-entry,#mufy-recovery-log-entry,#mufy-recovery-history-entry{padding:5px 5px!important;font-size:9px!important}#mufy-recovery-history-entry{margin-right:2px}
+        #mufy-recovery-head{gap:3px;padding-left:9px;padding-right:7px}#mufy-recovery-head #mufy-recovery-model-entry,#mufy-recovery-head #mufy-recovery-log-entry{padding:5px 5px!important;font-size:9px!important}
         #mufy-recovery-quote-list{padding:10px 8px 30px}.mufy-quote-deck-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:18px 14px;padding-left:12px;padding-right:12px}.mufy-quote-stack{height:205px}.mufy-quote-deck{min-height:195px;padding-left:8px;padding-right:8px}.mufy-quote-deck-card{width:86px;height:132px;margin-left:-48px!important}#mufy-recovery-quote-stage{padding:5px}#mufy-recovery-quote-stage-panel{padding:9px}#mufy-recovery-quote-preview{width:230px;height:362px}.mufy-quote-card-content{padding:23px 18px}.mufy-quote-card-content .mufy-quote-preview-text{max-height:270px}
       }`;
     document.documentElement.appendChild(style);
@@ -9174,17 +9180,17 @@ roleStateReady = true;
     panel = document.createElement('div');
     panel.id = 'mufy-recovery-panel';
     panel.innerHTML = `<div id="mufy-recovery-resize-handle" title="上下拖动调整面板高度" aria-label="上下拖动调整面板高度"></div>
-      <div id="mufy-recovery-head"><span id="mufy-recovery-title"><span>Mufy 数据助手 <small class="mufy-recovery-version">v${DISPLAY_VERSION}</small> <small id="mufy-recovery-count">0/0</small></span><button id="mufy-recovery-help" title="使用说明" aria-label="使用说明">?</button></span><button id="mufy-recovery-export-chat" title="进入一段具体聊天后可完整导出当前会话">导出聊天</button><button id="mufy-recovery-quote-entry" title="查看角色摘录牌组">摘录</button><button id="mufy-recovery-model-entry" title="选择并监控模型状态">模型</button><button id="mufy-recovery-log-entry" title="查看运行日志">日志</button><button id="mufy-recovery-history-entry" title="查看本账号历史角色索引">索引</button><button id="mufy-recovery-close">×</button></div>
+      <div id="mufy-recovery-head"><span id="mufy-recovery-title"><span>Mufy 数据助手 <small class="mufy-recovery-version">v${DISPLAY_VERSION}</small> <small id="mufy-recovery-count">0/0</small></span><button id="mufy-recovery-help" title="使用说明" aria-label="使用说明">?</button></span><button id="mufy-recovery-model-entry" title="选择并监控模型状态">模型</button><button id="mufy-recovery-log-entry" title="查看运行日志">日志</button><button id="mufy-recovery-close">×</button></div>
       <div id="mufy-recovery-help-modal" hidden><div id="mufy-recovery-help-head"><strong>使用说明</strong><button id="mufy-recovery-help-close" title="关闭说明">×</button></div><div id="mufy-recovery-help-body"><ol>
 <li><strong>找回聊过的角色：</strong>打开“角色”面板，点击“找回角色链接”。可以选择完整读取或查找最新几页；读取过程中可以点击“停止找回”，之后再继续读取，已读取的数据会保留。</li>
 <li><strong>收藏趋势榜角色：</strong>打开 Mufy 趋势榜页面，再打开脚本面板。趋势榜返回的数据已经包含可靠的收藏状态，不需要点击“获取收藏状态”；直接在网页角色列表中多选要收藏的角色，点击“立即收藏”即可。收藏完成后回到“角色”区域点击“更新状态”，可核对这些角色的收藏和公开状态。</li>
 <li><strong>收藏作者的全部角色：</strong>有两种方式，按需要选择一种即可：<ol><li>在“角色”→“作者合集”中找到对应作者，点击右侧收藏角色可选择收藏。</li><li>在 Mufy 网页搜索作者并进入作者主页，打开脚本面板；切到“网页”，让页面翻页自动获取角色。作者主页返回的收藏状态不准确，需要先点击“获取收藏状态”，等待逐个查询完成，再点击“全选未收藏”和“立即收藏”。</li></ol></li>
-<li><strong>整理或删除收藏夹：</strong>点击角色区域的“收藏夹”，可以按作者创建或复用收藏夹并整理角色，也可以进入管理界面核对角色数量、筛选空收藏夹或批量删除。删除收藏夹不会取消角色收藏，且不能由脚本撤回。</li>
+<li><strong>整理或删除收藏夹：</strong>进入“收藏”区域点击“收藏夹”，可以按作者创建或复用收藏夹并整理角色，也可以进入管理界面核对角色数量、筛选空收藏夹或批量删除。删除收藏夹不会取消角色收藏，且不能由脚本撤回。</li>
 <li><strong>普通收藏：</strong>角色卡片右侧的星星可以收藏或取消收藏。收藏时会优先使用并保存当前账号的分享链接；没有分享链接时会提示并改用普通收藏。批量收藏结束会弹窗显示分享链接收藏数和普通收藏数。</li>
-<li><strong>普通角色一键扣数：</strong>进入“网页”→“普通待聊”，可以修改默认发送内容并启动“一键扣数”。脚本会逐个打开角色、发送一次消息，并等待回复生成结束且 URL 出现 sessionId 后再进入下一个；任务可以停止、继续或取消。</li>
-<li><strong>完整导出当前聊天：</strong>进入一段已有 sessionId 的具体聊天，点击面板顶部“导出聊天”。脚本会直接分页读取服务器记录，按消息 ID 去重，并用服务器 total 与分页末尾双重校验；最终下载一个 ZIP，内含适合手机浏览器阅读的 HTML 和纯文字 TXT，不包含 JSON。再次点击可停止导出。</li>
-<li><strong>根据聊天内容找角色：</strong>点击“搜聊天”，可选择搜索所有角色或指定单个角色。脚本会读取可访问的历史会话并逐段查找，结果会标记关键词；点击“打开并定位”后进入原会话，自动向上加载并尝试滚动到对应消息。搜索期间可随时停止，不会长期保存聊天正文。</li>
-<li><strong>角色回复摘录：</strong>在角色回复里选中文字，展开该消息的省略号操作栏并点击“摘录”；不选文字时会把整条回复放进编辑框。摘录按角色组成牌组，点击顶部“摘录”可查看、调整卡片样式或返回原聊天位置。当前只支持角色回复，暂不处理自己的消息。</li>
+<li><strong>普通角色一键扣数：</strong>进入“收藏”→“普通待聊”，可以修改默认发送内容并启动“一键扣数”。脚本会逐个打开角色、发送一次消息，并等待回复生成结束且 URL 出现 sessionId 后再进入下一个；任务可以停止、继续或取消。</li>
+<li><strong>完整导出当前聊天：</strong>进入一段已有 sessionId 的具体聊天，再到“聊天记录”点击“导出当前聊天”。脚本会直接分页读取服务器记录，按消息 ID 去重，并用服务器 total 与分页末尾双重校验；最终下载一个 ZIP，内含适合手机浏览器阅读的 HTML 和纯文字 TXT，不包含 JSON。再次点击可停止导出。</li>
+<li><strong>根据聊天内容找角色：</strong>进入“聊天记录”点击“搜索聊天记录”，可选择搜索所有角色或指定单个角色。单角色允许搜索 1 个字，所有角色至少需要 2 个字。结果会标记关键词；点击“打开并定位”后进入原会话，自动向上加载并尝试滚动到对应消息。</li>
+<li><strong>角色回复摘录：</strong>在角色回复里选中文字，展开该消息的省略号操作栏并点击“摘录”；不选文字时会把整条回复放进编辑框。摘录按角色组成牌组，进入“聊天记录”点击“摘录牌组”可查看、调整卡片样式或返回原聊天位置。当前只支持角色回复，暂不处理自己的消息。</li>
 <li><strong>模型可用性监控：</strong>点击顶部“模型”，勾选需要监控的模型。脚本每 5 分钟读取一次网站模型状态；悬浮按钮上方用绿、黄、红、灰色圆点分别表示流畅、拥堵、中断和暂时未知。点击状态点可查看响应时长、成功率和最后检测时间。</li>
 <li><strong>导出分享链接：</strong>点击“导出角色”，再选择“仅分享链接 TXT”。角色 JSON/CSV 也会附带已保存的分享链接；独立 TXT 会导出当前账号缓存中的全部分享链接，包括当前角色列表里已经找不到但本地仍有记录的角色。</li>
 <li><strong>收藏未聊转为链接收藏：</strong>进入“收藏未聊”，点击“检测未记录角色”。分享链接记录按账号隔离，本账号已有记录的角色会直接跳过；其余角色严格一次处理一个：先保存分享链接，再取消原收藏，从分享链接进入并重新收藏。任务可以中断、继续或彻底取消。</li>
@@ -9232,25 +9238,34 @@ roleStateReady = true;
       </div>
       <div id="mufy-recovery-model-modal" hidden><div id="mufy-recovery-model-head"><span><strong>模型可用性监控</strong><small id="mufy-recovery-model-summary">每 5 分钟检测一次</small></span><button id="mufy-recovery-model-close" title="关闭">×</button></div><div id="mufy-recovery-model-tools"><input id="mufy-recovery-model-search" placeholder="搜索模型名称"><button id="mufy-recovery-model-refresh">立即检测</button></div><div id="mufy-recovery-model-list"><div class="mufy-recovery-empty">正在读取模型状态…</div></div></div>
       <div id="mufy-recovery-controls">
-        <div id="mufy-recovery-section-tabs"><button class="active" data-section="roles">角色</button><button data-section="masks">面具</button><button data-section="web">网页</button></div>
+        <div id="mufy-recovery-section-tabs"><button class="active" data-section="roles">角色</button><button data-section="favorites">收藏</button><button data-section="chats">聊天记录</button><button data-section="masks">面具</button><button data-section="web">网页</button></div>
         <div id="mufy-recovery-status"></div>
         <div id="mufy-recovery-favorite-task-controls" hidden><button id="mufy-recovery-favorite-task-main">中断收藏</button><button id="mufy-recovery-favorite-task-cancel">取消任务</button></div>
         <div id="mufy-recovery-export-modal" hidden><div class="mufy-recovery-export-head"><strong>选择导出格式</strong><button id="mufy-recovery-export-close" title="关闭">×</button></div><label id="mufy-recovery-export-binding-option" class="mufy-recovery-export-binding-option" hidden><input id="mufy-recovery-export-bindings" type="checkbox" checked><span>同时导出角色的面具绑定信息</span></label><div id="mufy-recovery-export-binding-hint" class="mufy-recovery-export-binding-hint" hidden>绑定信息只支持 JSON；导入时会再询问是否恢复。</div><div class="mufy-recovery-export-options"><button data-export-format="csv">导出 CSV</button><button data-export-format="json">导出 JSON</button><button id="mufy-recovery-export-share-links" data-export-format="share-links">仅分享链接 TXT</button></div></div>
-        <div id="mufy-recovery-chat-search-modal" hidden><div id="mufy-recovery-chat-search-head"><strong>根据聊天内容找角色</strong><button id="mufy-recovery-chat-search-close" title="关闭">×</button></div><div id="mufy-recovery-chat-search-fields"><label>要查找的聊天文字<input id="mufy-recovery-chat-search-query" type="text" maxlength="500" placeholder="输入至少 2 个字"></label><label>搜索范围<select id="mufy-recovery-chat-search-scope"><option value="all">所有角色</option><option value="one">指定单个角色</option></select></label><label id="mufy-recovery-chat-search-role-label" hidden>选择角色<select id="mufy-recovery-chat-search-role"></select></label></div><div id="mufy-recovery-chat-search-actions"><button id="mufy-recovery-chat-search-start">开始搜索</button></div></div>
+        <div id="mufy-recovery-chat-search-modal" hidden><div id="mufy-recovery-chat-search-head"><strong>根据聊天内容找角色</strong><button id="mufy-recovery-chat-search-close" title="关闭">×</button></div><div id="mufy-recovery-chat-search-fields"><label>要查找的聊天文字<input id="mufy-recovery-chat-search-query" type="text" maxlength="500" placeholder="单角色可搜 1 字；所有角色至少 2 字"></label><label>搜索范围<select id="mufy-recovery-chat-search-scope"><option value="all">所有角色</option><option value="one">指定单个角色</option></select></label><label id="mufy-recovery-chat-search-role-label" hidden>选择角色<select id="mufy-recovery-chat-search-role"></select></label></div><div id="mufy-recovery-chat-search-actions"><button id="mufy-recovery-chat-search-start">开始搜索</button></div></div>
         <div id="mufy-recovery-author-favorite-modal" hidden><div id="mufy-recovery-author-favorite-head"><strong>选择收藏范围</strong><button id="mufy-recovery-author-favorite-close" title="关闭">×</button></div><div id="mufy-recovery-author-favorite-options"><button data-author-favorite-mode="all">收藏该作者所有作品</button><button data-author-favorite-mode="panel">仅收藏面板记录的这些</button></div></div>
         <div id="mufy-recovery-folder-menu-modal" hidden><div id="mufy-recovery-folder-menu-head"><strong>收藏夹功能</strong><button id="mufy-recovery-folder-menu-close" title="关闭">×</button></div><div id="mufy-recovery-folder-menu-actions"><button id="mufy-recovery-folder-menu-organize">按作者整理收藏夹</button><button id="mufy-recovery-folder-menu-manage">管理 / 删除收藏夹</button></div></div>
         <div id="mufy-recovery-folder-delete-modal" hidden><div id="mufy-recovery-folder-delete-head"><strong>管理 / 批量删除收藏夹</strong><button id="mufy-recovery-folder-delete-close" title="关闭">×</button></div><div id="mufy-recovery-folder-delete-summary">读取收藏夹后显示准确的角色数量。</div><label id="mufy-recovery-folder-delete-filter"><input id="mufy-recovery-folder-delete-empty-only" type="checkbox" checked>只看空收藏夹</label><div id="mufy-recovery-folder-delete-list"><div class="mufy-recovery-folder-delete-empty">尚未读取收藏夹</div></div><div id="mufy-recovery-folder-delete-actions"><button id="mufy-recovery-folder-delete-select-all">全选当前</button><button id="mufy-recovery-folder-delete-clear">清空选择</button><button id="mufy-recovery-folder-delete-empty">一键删除空夹 (0)</button><button id="mufy-recovery-folder-delete-confirm">删除已选 (0)</button></div></div>
         <div id="mufy-recovery-log-modal" hidden><div id="mufy-recovery-log-head"><span><strong>运行日志</strong><button id="mufy-recovery-copy-error-logs">复制反馈日志</button><button id="mufy-recovery-clear-logs">清除日志</button></span><button id="mufy-recovery-log-close" title="关闭">×</button></div><div id="mufy-recovery-log-output"><div class="mufy-recovery-log-empty">暂无运行日志</div></div></div>
         <div id="mufy-recovery-role-section">
-          <div id="mufy-recovery-tabs"><button class="active" data-category="allRoles">总数 (0)</button><button data-category="chatted">聊过的 (0)</button><button data-category="chattedNotFavorite">聊过未收藏 (0)</button><button data-category="favoriteOnly">收藏未聊 (0)</button><button data-category="chatMatches">聊天匹配 (0)</button><button data-category="authors">作者合集 (0)</button><button id="mufy-recovery-export-roles" class="mufy-recovery-tab-action">导出角色</button></div>
-          <div id="mufy-recovery-role-filter-row"><input id="mufy-recovery-role-search" placeholder="搜索角色；输入聊天内容后可点右侧搜聊天"><select id="mufy-recovery-status-filter" aria-label="按角色状态筛选"></select><button id="mufy-recovery-chat-search" title="根据聊天内容查找角色">搜聊天</button></div>
+          <div id="mufy-recovery-tabs"><button class="active" data-category="allRoles">全部角色 (0)</button><button data-category="chatted">聊过的 (0)</button><button data-category="chattedNotFavorite">聊过未收藏 (0)</button><button data-category="authors">作者合集 (0)</button><button id="mufy-recovery-history-entry" title="查看本账号历史角色索引">历史索引</button><button id="mufy-recovery-export-roles" class="mufy-recovery-tab-action">导出角色</button></div>
+          <div id="mufy-recovery-role-filter-row"><input id="mufy-recovery-role-search" placeholder="搜索角色名、作者、ID或标签"><select id="mufy-recovery-status-filter" aria-label="按角色状态筛选"></select></div>
           <div id="mufy-recovery-role-read-options"><span>读取方式</span><select id="mufy-recovery-role-read-mode" aria-label="角色读取方式"><option value="full">完整读取</option><option value="latest">查找最新几页</option></select><label>页数 <input id="mufy-recovery-role-latest-pages" type="number" min="1" max="500" value="2" aria-label="读取页数"></label><span>每页 20 个</span></div>
-          <div id="mufy-recovery-role-actions"><button id="mufy-recovery-run">找回角色链接</button><button id="mufy-recovery-refresh-status" title="更新最近一次链接读取到的角色状态和作者名称">更新状态</button><button id="mufy-recovery-stop-action" title="整理或管理收藏夹">收藏夹</button></div><button id="mufy-recovery-favorite-visible" hidden>收藏当前列表</button><div id="mufy-recovery-share-recovery-controls" hidden><button id="mufy-recovery-share-recovery-one">检测全部收藏未聊</button><button id="mufy-recovery-share-recovery-cancel" hidden>取消任务</button></div>
+          <div id="mufy-recovery-role-actions"><button id="mufy-recovery-run">找回角色链接</button><button id="mufy-recovery-refresh-status" title="更新最近一次链接读取到的角色状态和作者名称">更新状态</button></div><button id="mufy-recovery-favorite-visible" hidden>收藏当前列表</button>
+        </div>
+        <div id="mufy-recovery-favorite-section" hidden>
+          <div id="mufy-recovery-favorite-tabs"><button data-category="favoriteOnly">收藏未聊 (0)</button><button data-category="manualFavoriteChats">普通待聊 (0)</button></div>
+          <div id="mufy-recovery-favorite-actions"><button id="mufy-recovery-stop-action" title="整理或管理收藏夹">收藏夹</button></div>
+          <div id="mufy-recovery-share-recovery-controls" hidden><button id="mufy-recovery-share-recovery-one">检测全部收藏未聊</button><button id="mufy-recovery-share-recovery-cancel" hidden>取消任务</button></div>
+          <div id="mufy-recovery-manual-auto-actions" hidden><input id="mufy-recovery-manual-auto-message" type="text" maxlength="500" value="${esc(state.manualAutoChatMessage)}" aria-label="一键扣数发送内容"><label class="mufy-recovery-auto-delay">间隔 <input id="mufy-recovery-manual-auto-delay-min" type="number" min="0" max="300" step="1" value="${esc(state.manualAutoChatDelayMin)}" aria-label="随机冷却最短秒数">～<input id="mufy-recovery-manual-auto-delay-max" type="number" min="0" max="300" step="1" value="${esc(state.manualAutoChatDelayMax)}" aria-label="随机冷却最长秒数"> 秒</label><button id="mufy-recovery-manual-auto-start">一键扣数</button><button id="mufy-recovery-manual-auto-cancel" hidden>取消任务</button><button id="mufy-recovery-manual-chat-next" title="按普通待聊列表顺序打开角色；再次点击视为当前角色已处理并前往下一个">下一个</button></div>
+        </div>
+        <div id="mufy-recovery-chat-section" hidden>
+          <div id="mufy-recovery-chat-tabs"><button data-category="chatMatches">搜索结果 (0)</button></div>
+          <div id="mufy-recovery-chat-tools"><button id="mufy-recovery-chat-search" title="根据聊天内容查找角色">搜索聊天记录</button><button id="mufy-recovery-export-chat" title="进入一段具体聊天后可完整导出当前会话">导出当前聊天</button><button id="mufy-recovery-quote-entry" title="查看角色摘录牌组">摘录牌组</button></div>
         </div>
         <div id="mufy-recovery-web-section" hidden>
-          <div id="mufy-recovery-web-tabs"><button data-category="siteSearch">网站角色 (0)</button><button data-category="siteAuthors">网站作者 (0)</button><button data-category="manualFavoriteChats">普通待聊 (0)</button><button id="mufy-recovery-manual-chat-next" title="按普通待聊列表顺序打开角色；再次点击视为当前角色已处理并前往下一个">下一个</button></div>
+          <div id="mufy-recovery-web-tabs"><button data-category="siteSearch">网站角色 (0)</button><button data-category="siteAuthors">网站作者 (0)</button></div>
           <div id="mufy-recovery-site-actions"><button id="mufy-recovery-refresh-favorite-states">获取收藏状态</button><button id="mufy-recovery-select-unfavorite-site">全选未收藏</button><button id="mufy-recovery-favorite-selected-site">立即收藏 (0)</button><button id="mufy-recovery-clear-site-selection">清空勾选</button><button id="mufy-recovery-refresh-site-rows" title="刷新当前网站页面并重新捕获，之后翻页会继续自动获取">重新获取</button><button id="mufy-recovery-clear-site-rows">清空结果</button></div>
-          <div id="mufy-recovery-manual-auto-actions" hidden><input id="mufy-recovery-manual-auto-message" type="text" maxlength="500" value="${esc(state.manualAutoChatMessage)}" aria-label="一键扣数发送内容"><label class="mufy-recovery-auto-delay">间隔 <input id="mufy-recovery-manual-auto-delay-min" type="number" min="0" max="300" step="1" value="${esc(state.manualAutoChatDelayMin)}" aria-label="随机冷却最短秒数">～<input id="mufy-recovery-manual-auto-delay-max" type="number" min="0" max="300" step="1" value="${esc(state.manualAutoChatDelayMax)}" aria-label="随机冷却最长秒数"> 秒</label><button id="mufy-recovery-manual-auto-start">一键扣数</button><button id="mufy-recovery-manual-auto-cancel" hidden>取消任务</button></div>
         </div>
         <div id="mufy-recovery-mask-section" hidden>
           <div id="mufy-recovery-mask-tabs"><button data-category="masks">面具 (0)</button><button data-category="library">面具库 (0)</button><button id="mufy-recovery-save-all" class="mufy-recovery-tab-action">全部存入面具库</button></div>
@@ -9593,10 +9608,12 @@ roleStateReady = true;
     panel.querySelectorAll('[data-section]').forEach(button => {
       button.onclick = () => {
         const nextSection = button.dataset.section;
-        state.section = nextSection === 'masks' ? 'masks' : (nextSection === 'web' ? 'web' : 'roles');
-        if (state.section === 'roles' && !['allRoles', 'chatted', 'chattedNotFavorite', 'favoriteOnly', 'chatMatches', 'roleHistory', 'authors'].includes(state.active)) state.active = 'allRoles';
+        state.section = ['roles', 'favorites', 'chats', 'masks', 'web'].includes(nextSection) ? nextSection : 'roles';
+        if (state.section === 'roles' && !['allRoles', 'chatted', 'chattedNotFavorite', 'roleHistory', 'authors'].includes(state.active)) state.active = 'allRoles';
+        if (state.section === 'favorites' && !['favoriteOnly', 'manualFavoriteChats'].includes(state.active)) state.active = 'favoriteOnly';
+        if (state.section === 'chats' && state.active !== 'chatMatches') state.active = 'chatMatches';
         if (state.section === 'masks' && state.active !== 'masks' && state.active !== 'library') state.active = 'masks';
-        if (state.section === 'web' && state.active !== 'siteSearch' && state.active !== 'siteAuthors' && state.active !== 'manualFavoriteChats') state.active = 'siteSearch';
+        if (state.section === 'web' && state.active !== 'siteSearch' && state.active !== 'siteAuthors') state.active = 'siteSearch';
         render();
         if (state.section === 'masks' && state.active === 'masks') loadCurrentSiteMasks();
       };
@@ -9632,7 +9649,10 @@ roleStateReady = true;
     panel.querySelectorAll('[data-category]').forEach(button => {
       button.onclick = () => {
         state.active = button.dataset.category;
-        state.section = state.active === 'masks' || state.active === 'library' ? 'masks' : (state.active === 'siteSearch' || state.active === 'siteAuthors' || state.active === 'manualFavoriteChats' ? 'web' : 'roles');
+        state.section = state.active === 'masks' || state.active === 'library' ? 'masks'
+          : state.active === 'siteSearch' || state.active === 'siteAuthors' ? 'web'
+            : state.active === 'favoriteOnly' || state.active === 'manualFavoriteChats' ? 'favorites'
+              : state.active === 'chatMatches' ? 'chats' : 'roles';
         render();
         if (state.active === 'masks') loadCurrentSiteMasks();
       };
@@ -9769,7 +9789,7 @@ roleStateReady = true;
       if (!manualAutoJob) return;
       state.manualAutoChatRunning = !manualAutoJob.paused;
       if (manualAutoJob.paused) {
-        state.status = `检测到已暂停的一键扣数任务：已完成 ${Number(manualAutoJob.completed || 0)}/${Number(manualAutoJob.total || 0)} 个。可进入“网页”→“普通待聊”继续或取消。`;
+        state.status = `检测到已暂停的一键扣数任务：已完成 ${Number(manualAutoJob.completed || 0)}/${Number(manualAutoJob.total || 0)} 个。可进入“收藏”→“普通待聊”继续或取消。`;
         render();
         return;
       }
