@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.25
+// @version      3.0.0-dev.26
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.25';
+  const SCRIPT_VERSION = '3.0.0-dev.26';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const MASK_LIBRARY_KEY = 'mufy-recovery-mask-library-v1';
   const MASK_LIBRARY_BACKUP_KEY = 'mufy-recovery-mask-library-backup-v1';
@@ -844,6 +844,54 @@ roleStateReady = true;
     throw new Error('消息已写入，但发送按钮在 15 秒内没有启用');
   }
 
+  async function manualChatSendStarted(textarea, expectedText, previousSessionId, timeoutMs = 2200) {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      const current = currentRoleContext();
+      const composer = findManualChatComposer();
+      const draftCleared = String(textarea?.value || '').trim() !== String(expectedText || '').trim();
+      const sessionCreated = Boolean(current.sessionId && current.sessionId !== String(previousSessionId || ''));
+      const sendControlChanged = Boolean(composer.button && !isManualChatSendButton(composer.button));
+      if (draftCleared || sessionCreated || sendControlChanged || hasVisibleChatStopControl()) return true;
+      await wait(120);
+    }
+    return false;
+  }
+
+  async function activateManualChatSend(textarea, button, message) {
+    const previousSessionId = currentRoleContext().sessionId;
+    const attempts = [
+      () => {
+        const nativeClick = pageWindow.HTMLElement?.prototype?.click;
+        if (nativeClick) nativeClick.call(button);
+        else button.click();
+      },
+      () => {
+        const PointerEventCtor = pageWindow.PointerEvent || pageWindow.MouseEvent;
+        const MouseEventCtor = pageWindow.MouseEvent;
+        button.dispatchEvent(new PointerEventCtor('pointerdown', { bubbles: true, cancelable: true, pointerType: 'mouse', button: 0 }));
+        button.dispatchEvent(new PointerEventCtor('pointerup', { bubbles: true, cancelable: true, pointerType: 'mouse', button: 0 }));
+        button.dispatchEvent(new MouseEventCtor('click', { bubbles: true, cancelable: true, view: pageWindow, button: 0 }));
+      },
+      () => {
+        textarea.focus();
+        const KeyboardEventCtor = pageWindow.KeyboardEvent;
+        textarea.dispatchEvent(new KeyboardEventCtor('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+        textarea.dispatchEvent(new KeyboardEventCtor('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+      }
+    ];
+    for (let index = 0; index < attempts.length; index += 1) {
+      attempts[index]();
+      if (await manualChatSendStarted(textarea, message, previousSessionId)) return;
+      if (index + 1 < attempts.length) {
+        const composer = findManualChatComposer();
+        if (!composer.textarea || String(composer.textarea.value || '').trim() !== String(message || '').trim()) return;
+        button = composer.button || button;
+      }
+    }
+    throw new Error('发送按钮已启用，但点击和 Enter 发送都没有生效');
+  }
+
   async function waitForManualChatResponse(job) {
     const startedAt = Number(job.sentAt) || Date.now();
     let lastMutationAt = Date.now();
@@ -948,6 +996,22 @@ roleStateReady = true;
       if (job.phase === 'sending') {
         throw new Error('上次任务在点击发送时中断，为避免重复发送已暂停；请确认页面后再继续');
       }
+      if (job.phase === 'waiting-response') {
+        const composer = findManualChatComposer();
+        const messageStillInDraft = Boolean(
+          composer.textarea
+          && String(composer.textarea.value || '').trim() === String(job.message || '').trim()
+          && !current.sessionId
+          && !hasVisibleChatStopControl()
+        );
+        if (messageStillInDraft) {
+          job.phase = 'ready-to-send';
+          job.sentAt = 0;
+          if (!saveManualAutoChatJob(job)) throw new Error('无法恢复尚未真正发送的任务');
+          state.status = '检测到消息仍停留在输入框，正在重新发送……';
+          render();
+        }
+      }
       if (job.phase !== 'waiting-response') {
         state.status = `一键扣数 ${Number(job.completed || 0) + 1}/${job.total}：正在等待“${job.activeCharacterName || job.activeCharacterId}”的输入框……`;
         render();
@@ -961,7 +1025,7 @@ roleStateReady = true;
         job.phase = 'sending';
         job.sentAt = Date.now();
         if (!saveManualAutoChatJob(job)) throw new Error('发送前无法保存任务状态');
-        sendButton.click();
+        await activateManualChatSend(textarea, sendButton, String(job.message || DEFAULT_MANUAL_AUTO_CHAT_MESSAGE));
         job.phase = 'waiting-response';
         if (!saveManualAutoChatJob(job)) throw new Error('发送后无法保存等待状态');
       }
