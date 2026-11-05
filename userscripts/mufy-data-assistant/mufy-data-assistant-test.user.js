@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.32
+// @version      3.0.0-dev.33
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.32';
+  const SCRIPT_VERSION = '3.0.0-dev.33';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const MASK_LIBRARY_KEY = 'mufy-recovery-mask-library-v1';
   const MASK_LIBRARY_BACKUP_KEY = 'mufy-recovery-mask-library-backup-v1';
@@ -4948,6 +4948,20 @@ roleStateReady = true;
     await wait(750);
     return true;
   }
+
+  async function ensureFavoriteFromCharacterDetail(characterId, row = {}) {
+    // 作者作品列表的 isFollowed 目前不可靠；单角色详情才是服务器当前收藏状态。
+    // 分享链接打开后网站有时已经自动恢复收藏，此时无需再切换一次按钮。
+    const detail = await requestCharacterDetail(String(characterId));
+    if (detail?.favoriteKnown === true) {
+      if (detail.isFavorite) return true;
+      return clickWebsiteFavoriteFromKnownUnfavorite(characterId, row);
+    }
+    // 接口没有返回收藏字段或临时失败时，才退回页面按钮的状态识别。
+    const nativeHandled = await tryWebsiteFavoriteClick(characterId, true, row);
+    if (!nativeHandled) throw new Error(`角色详情和当前页面都无法确认“${row?.name || characterId}”的收藏状态`);
+    return true;
+  }
   async function requestShareCode(characterId) {
     scanStoredAuthorization();
     const url = new URL('/api/characters/share_code', location.origin);
@@ -5051,9 +5065,7 @@ roleStateReady = true;
           if (automaticWait) await wait(2500);
           automaticWait = false;
           try {
-            // 与普通分享链接收藏完全相同：优先点击网页原生按钮，找不到再调用接口。
-            const nativeHandled = await tryWebsiteFavoriteClick(row.characterId, true, row);
-            if (!nativeHandled) throw new Error(`没有找到“${row.name || row.characterId}”对应的网页收藏按钮，已跳过`);
+            await ensureFavoriteFromCharacterDetail(row.characterId, row);
             applyRecoveredFavoriteState(row);
           } catch (error) {
             task.paused = true;
@@ -5293,8 +5305,7 @@ roleStateReady = true;
       state.status = `取消任务前正在恢复“${row.name || '未命名角色'}”的收藏……`;
       render();
       try {
-        const nativeHandled = await tryWebsiteFavoriteClick(row.characterId, true, row);
-        if (!nativeHandled) throw new Error(`没有找到“${row.name || row.characterId}”对应的网页收藏按钮，当前收藏未恢复`);
+        await ensureFavoriteFromCharacterDetail(row.characterId, row);
         applyRecoveredFavoriteState(row);
       } catch (error) {
         state.status = `恢复当前角色收藏失败，任务没有清除：${explainFailure(error)}`;
