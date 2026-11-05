@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.3
+// @version      3.0.0-dev.4
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.3';
+  const SCRIPT_VERSION = '3.0.0-dev.4';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const MASK_LIBRARY_KEY = 'mufy-recovery-mask-library-v1';
   const MASK_LIBRARY_BACKUP_KEY = 'mufy-recovery-mask-library-backup-v1';
@@ -1413,6 +1413,7 @@ roleStateReady = true;
       name: name && name !== '未命名角色' ? name : (previous?.name || '未命名角色'),
       authorName: authorName || previous?.authorName || '',
       authorId: String(row?.authorId || previous?.authorId || ''),
+      tags: normalizeRoleTags(previous?.tags, row?.tags),
       lastSessionId: String(useIncomingSession ? row.lastSessionId : (previous?.lastSessionId || row?.lastSessionId || '')),
       lastInteracted: String(incomingTime >= previousTime ? (row?.lastInteracted || previous?.lastInteracted || '') : previous?.lastInteracted || ''),
       firstSeenAt: previous?.firstSeenAt || now,
@@ -1958,6 +1959,42 @@ roleStateReady = true;
     }
     return null;
   }
+
+  function normalizeRoleTags(...sources) {
+    const found = new Map();
+    const addText = value => {
+      String(value ?? '').split(/[,，、|]/).forEach(part => {
+        const tag = part.trim().replace(/^#+/, '');
+        if (!tag) return;
+        const key = tag.toLocaleLowerCase('zh-CN');
+        if (!found.has(key)) found.set(key, tag);
+      });
+    };
+    const addValue = value => {
+      if (value == null || value === '') return;
+      if (Array.isArray(value)) {
+        value.forEach(addValue);
+        return;
+      }
+      if (typeof value === 'object') {
+        const label = value.name ?? value.tagName ?? value.label ?? value.title ?? value.value ?? value.text;
+        if (label != null && label !== '') addText(label);
+        return;
+      }
+      addText(value);
+    };
+    const fields = ['tags', 'tagList', 'tagNames', 'characterTags', 'labels', 'categories', 'categoryNames'];
+    sources.forEach(source => {
+      if (Array.isArray(source) || typeof source === 'string') {
+        addValue(source);
+        return;
+      }
+      if (!source || typeof source !== 'object') return;
+      fields.forEach(field => addValue(source[field]));
+    });
+    return [...found.values()];
+  }
+
   function normalize(row) {
     const character = row?.character || row?.characterInfo || row?.characterData || row?.role || {};
     const author = row?.author || row?.authorInfo || row?.creator || row?.creatorInfo || row?.user || row?.userInfo || row?.owner
@@ -1986,7 +2023,7 @@ roleStateReady = true;
         || authorNameFrom(author) || ''),
       visibility: visibilityFrom({ ...row, ...character }),
       availability: String(value('availability', 'status') || ''),
-      tags: Array.isArray(row?.tags) ? row.tags.map(String) : [],
+      tags: normalizeRoleTags(row, character),
       metadataError: String(row?.metadataError || ''),
       metadataErrorCode: Number(row?.metadataErrorCode) || 0,
       metadataChecked: Boolean(row?.metadataChecked)
@@ -2056,6 +2093,7 @@ roleStateReady = true;
       lastInteracted: existing.lastInteracted || incoming.lastInteracted,
       authorId: existing.authorId || incoming.authorId,
       authorName: existing.authorName || incoming.authorName,
+      tags: normalizeRoleTags(existing?.tags, incoming?.tags),
       visibility: incoming.metadataChecked
         ? visibilityFrom(incoming)
         : visibilityFrom(existing) !== '未知'
@@ -6511,8 +6549,29 @@ roleStateReady = true;
     render();
   }
   function matchesRole(row, query) {
-    return !query || `${row.name} ${row.characterId} ${row.lastSessionId} ${row.authorName} ${row.authorId} ${row.metadataError || ''} ${visibilityLabel(row)}`
-      .toLowerCase().includes(query);
+    const rawQuery = String(query || '').trim().toLocaleLowerCase('zh-CN');
+    if (!rawQuery) return true;
+    const tags = normalizeRoleTags(row?.tags).map(tag => tag.toLocaleLowerCase('zh-CN'));
+    const tokens = rawQuery.split(/\s+/).filter(Boolean);
+    const requiredTags = tokens.filter(token => token.startsWith('#')).map(token => token.slice(1)).filter(Boolean);
+    const excludedTags = tokens.filter(token => token.startsWith('-#')).map(token => token.slice(2)).filter(Boolean);
+    if (requiredTags.some(token => !tags.some(tag => tag.includes(token)))) return false;
+    if (excludedTags.some(token => tags.some(tag => tag.includes(token)))) return false;
+    const textQuery = tokens.filter(token => !token.startsWith('#') && !token.startsWith('-#')).join(' ');
+    if (!textQuery) return true;
+    return `${row.name || ''} ${row.characterId || ''} ${row.lastSessionId || ''} ${row.authorName || ''} ${row.authorId || ''} ${tags.join(' ')} ${row.metadataError || ''} ${visibilityLabel(row)}`
+      .toLocaleLowerCase('zh-CN').includes(textQuery);
+  }
+
+  function roleTagButtons(row, limit = 10) {
+    const tags = normalizeRoleTags(row?.tags);
+    if (!tags.length) return '';
+    const visible = tags.slice(0, limit);
+    const more = tags.length > visible.length ? `<span class="mufy-recovery-tag-more">+${tags.length - visible.length}</span>` : '';
+    const interactive = state.section !== 'web';
+    return `<div class="mufy-recovery-role-tags">${visible.map(tag => interactive
+      ? `<button type="button" data-role-tag="${esc(tag)}" title="筛选标签：${esc(tag)}">#${esc(tag)}</button>`
+      : `<span class="mufy-recovery-role-tag">#${esc(tag)}</span>`).join('')}${more}</div>`;
   }
 
   function authorGroups(rows, query) {
@@ -6572,6 +6631,7 @@ roleStateReady = true;
         <div class="mufy-recovery-row-title"><b>${index + 1}. ${esc(row.name)}</b>${old ? '<span class="mufy-recovery-old">旧记录</span>' : ''}${rowTools}</div>
         <div class="mufy-recovery-muted">作者：${esc(authorLabel(row))} ${visibilityBadge(row)}</div>
         <div class="mufy-recovery-muted">${esc(row.lastInteracted || '时间未知')} · ${esc(row.characterId)}</div>
+        ${roleTagButtons(row)}
         ${binding}
         <a href="${esc(sessionUrl(row))}" rel="noreferrer">${openLabel}</a>
         ${archiveList}
@@ -6586,6 +6646,7 @@ roleStateReady = true;
       <div class="mufy-recovery-row-title"><b>${index + 1}. ${esc(row.name || '未命名角色')}</b></div>
       <div class="mufy-recovery-muted">${esc(row.authorName || '作者未知')} · ${esc(row.characterId)}</div>
       <div class="mufy-recovery-muted">最后记录：${esc(row.lastInteracted || row.lastSeenAt || '时间未知')}</div>
+      ${roleTagButtons(row)}
       <div class="mufy-recovery-row-actions"><a href="${esc(roleUrl(row.characterId))}" rel="noreferrer">打开角色</a>${row.lastSessionId ? `<a href="${esc(sessionUrl(row))}" rel="noreferrer">打开记录的会话</a>` : ''}${shareCode ? `<a href="${esc(shareUrlFromCode(shareCode))}" rel="noreferrer">打开分享链接</a>` : ''}</div>
     </div></div>`;
   }
@@ -7111,6 +7172,11 @@ roleStateReady = true;
       .mufy-recovery-author-works{padding-left:8px}
       .mufy-recovery-site-slot{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:20px;padding:0 5px;border:1px solid #8888;border-radius:10px;background:#ffffff18;color:#ddd;font-size:11px;line-height:1}
       .mufy-recovery-muted{color:#999;font-size:11px;margin:2px 0 3px}
+      .mufy-recovery-role-tags{display:flex;align-items:center;gap:4px;flex-wrap:wrap;margin:4px 0}
+      .mufy-recovery-role-tags button{border:1px solid #5f5874!important;border-radius:12px!important;background:#302c3c!important;color:#c9bfff!important;padding:2px 7px!important;font-size:10px!important;line-height:1.35!important;cursor:pointer}
+      .mufy-recovery-role-tags button:hover{border-color:#9185bd!important;background:#433c57!important;color:#fff!important}
+      .mufy-recovery-role-tag{border:1px solid #4e4a5b;border-radius:12px;background:#292631;color:#aaa2c2;padding:2px 7px;font-size:10px;line-height:1.35}
+      .mufy-recovery-tag-more{color:#999;font-size:10px}
       .mufy-recovery-detail{margin-top:5px;white-space:pre-wrap;color:#ccc;line-height:1.45}
       .mufy-recovery-row-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:7px}
       .mufy-recovery-row-actions button{padding:4px 7px!important;font-size:11px}
@@ -7271,6 +7337,7 @@ roleStateReady = true;
 <li><strong>账号分区：</strong>面具库和角色绑定仍保存在当前浏览器本地，但会按 Mufy 账号分别保存。同一浏览器切换账号后会自动换到该账号自己的库；旧版公共库只迁移给升级时第一个识别到的账号。面板显示“未识别账号”时，请先打开任意角色聊天页让网站发出登录请求。</li>
 <li><strong>面具导出/导入：</strong>面具库保存在浏览器本地，不会自动同步到其他浏览器，也不会自动复制到另一个 Mufy 账号。更换浏览器、账号或清除浏览器缓存前，请先点击“导出面具”保存文件；导出 JSON 时可选择是否同时复制角色绑定信息；导入时可选择清空旧面具库后导入，或保留旧数据合并导入，含绑定信息的文件还会询问是否恢复绑定；之后用“导入面具”恢复，防止本地面具数据丢失。</li>
 <li><strong>更新作者和状态：</strong>点击“更新状态”会同时更新最近一次读取到的角色状态和作者名称；如果中途停止或部分失败，稍后再次点击同一个按钮即可继续补充。</li>
+<li><strong>标签搜索：</strong>搜索框可直接输入标签文字，也可以使用 <code>#标签</code> 精确按标签筛选；多个标签用空格分隔且需要同时满足，使用 <code>-#标签</code> 可排除标签。角色卡片上的标签可以直接点击筛选。</li>
 </ol></div></div>
       <div id="mufy-recovery-mask-editor" hidden>
         <div id="mufy-recovery-mask-editor-head"><strong id="mufy-recovery-mask-editor-title">编辑面具</strong><button id="mufy-recovery-mask-editor-close" title="关闭编辑">×</button></div>
@@ -7301,7 +7368,7 @@ roleStateReady = true;
         <div id="mufy-recovery-log-modal" hidden><div id="mufy-recovery-log-head"><span><strong>运行日志</strong><button id="mufy-recovery-copy-error-logs">复制反馈日志</button><button id="mufy-recovery-clear-logs">清除日志</button></span><button id="mufy-recovery-log-close" title="关闭">×</button></div><div id="mufy-recovery-log-output"><div class="mufy-recovery-log-empty">暂无运行日志</div></div></div>
         <div id="mufy-recovery-role-section">
           <div id="mufy-recovery-tabs"><button class="active" data-category="allRoles">总数 (0)</button><button data-category="chatted">聊过的 (0)</button><button data-category="chattedNotFavorite">聊过未收藏 (0)</button><button data-category="favoriteOnly">收藏未聊 (0)</button><button data-category="authors">作者合集 (0)</button><button id="mufy-recovery-export-roles" class="mufy-recovery-tab-action">导出角色</button></div>
-          <div id="mufy-recovery-role-filter-row"><input id="mufy-recovery-role-search" placeholder="搜索角色名、作者名或 ID"><select id="mufy-recovery-status-filter" aria-label="按角色状态筛选"></select></div>
+          <div id="mufy-recovery-role-filter-row"><input id="mufy-recovery-role-search" placeholder="搜索角色名、作者、ID或标签（支持 #标签）"><select id="mufy-recovery-status-filter" aria-label="按角色状态筛选"></select></div>
           <div id="mufy-recovery-role-read-options"><span>读取方式</span><select id="mufy-recovery-role-read-mode" aria-label="角色读取方式"><option value="full">完整读取</option><option value="latest">查找最新几页</option></select><label>页数 <input id="mufy-recovery-role-latest-pages" type="number" min="1" max="500" value="2" aria-label="读取页数"></label><span>每页 20 个</span></div>
           <div id="mufy-recovery-role-actions"><button id="mufy-recovery-run">找回角色链接</button><button id="mufy-recovery-refresh-status" title="更新最近一次链接读取到的角色状态和作者名称">更新状态</button><button id="mufy-recovery-stop-action" title="整理或管理收藏夹">收藏夹</button></div><button id="mufy-recovery-favorite-visible" hidden>收藏当前列表</button><div id="mufy-recovery-share-recovery-controls" hidden><button id="mufy-recovery-share-recovery-one">检测全部收藏未聊</button><button id="mufy-recovery-share-recovery-cancel" hidden>取消任务</button></div>
         </div>
@@ -7595,6 +7662,16 @@ roleStateReady = true;
     });
     panel.querySelector('#mufy-recovery-list').onclick = event => {
       if (event.target.closest('.mufy-recovery-card-longpress-consumed')) return;
+      const tagButton = event.target.closest('[data-role-tag]');
+      if (tagButton) {
+        const tag = String(tagButton.dataset.roleTag || '').trim();
+        if (!tag) return;
+        state.roleQuery = `#${tag}`.toLocaleLowerCase('zh-CN');
+        const searchInput = panel.querySelector('#mufy-recovery-role-search');
+        if (searchInput) searchInput.value = `#${tag}`;
+        render();
+        return;
+      }
       const selectToggle = event.target.closest('[data-action="toggle-site-select"]');
       if (selectToggle) {
         const id = String(selectToggle.dataset.characterId || '');
