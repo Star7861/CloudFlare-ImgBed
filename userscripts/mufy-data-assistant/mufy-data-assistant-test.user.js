@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.6
+// @version      3.0.0-dev.7
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.6';
+  const SCRIPT_VERSION = '3.0.0-dev.7';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const MASK_LIBRARY_KEY = 'mufy-recovery-mask-library-v1';
   const MASK_LIBRARY_BACKUP_KEY = 'mufy-recovery-mask-library-backup-v1';
@@ -73,6 +73,59 @@
   let shareFavoriteJobStorageGeneration = 0;
   const AUTH_HOOK_MARK = '__mufyRecoveryAuthHookedV3Test';
   let authCaptureLogged = false;
+  const observedChatApiSignatures = new Set();
+
+  function chatApiObservationTarget(requestUrl) {
+    try {
+      const url = new URL(String(requestUrl || ''), location.href);
+      const hostname = String(url.hostname || '').toLowerCase();
+      const isMufyHost = hostname === 'mufy.ai' || hostname.endsWith('.mufy.ai')
+        || hostname === 'mufyai.com' || hostname.endsWith('.mufyai.com');
+      if (!isMufyHost || !/(?:^|\/)api(?:\/|$)/i.test(url.pathname)) return null;
+      if (!/(conversation|message|chat|sessions?\/(?:history|detail|messages?))/i.test(url.pathname)) return null;
+      return url;
+    } catch (_) { return null; }
+  }
+
+  function chatRequestFieldSummary(url, body) {
+    const fields = new Set([...url.searchParams.keys()]);
+    if (typeof body === 'string' && body.trim()) {
+      try {
+        const parsed = JSON.parse(body);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) Object.keys(parsed).forEach(key => fields.add(key));
+      } catch (_) {}
+    }
+    return [...fields].sort().join(', ') || '无';
+  }
+
+  function chatResponseShape(value, depth = 0) {
+    if (Array.isArray(value)) return `数组(${value.length})${value.length && depth < 2 ? `[${chatResponseShape(value[0], depth + 1)}]` : ''}`;
+    if (!value || typeof value !== 'object') return typeof value;
+    const keys = Object.keys(value).slice(0, 20);
+    if (depth >= 2) return `{${keys.join(', ')}}`;
+    return `{${keys.map(key => `${key}:${chatResponseShape(value[key], depth + 1)}`).join(', ')}}`;
+  }
+
+  function recordChatApiObservation(requestUrl, response, method = 'GET', requestBody = '') {
+    const url = chatApiObservationTarget(requestUrl);
+    if (!url || !response) return;
+    const signature = `${String(method || 'GET').toUpperCase()} ${url.hostname}${url.pathname}`;
+    if (observedChatApiSignatures.has(signature)) return;
+    observedChatApiSignatures.add(signature);
+    const finish = body => {
+      appendRunLog('info', `聊天接口侦测：${signature}；请求字段：${chatRequestFieldSummary(url, requestBody)}；响应结构：${chatResponseShape(body)}。未记录聊天正文和凭证。`);
+    };
+    try {
+      if (typeof response.clone === 'function') {
+        response.clone().json().then(finish).catch(() => finish('非 JSON 响应'));
+        return;
+      }
+      if (response.responseType === 'json' && response.response) finish(response.response);
+      else if (typeof response.responseText === 'string' && response.responseText.trim()) {
+        try { finish(JSON.parse(response.responseText)); } catch (_) { finish('非 JSON 响应'); }
+      }
+    } catch (_) {}
+  }
 
   function decodeJwtPayload(authValue) {
     try {
@@ -266,13 +319,16 @@
       XHR.prototype[AUTH_HOOK_MARK] = true;
       const originalOpen = XHR.prototype.open;
       const originalSetRequestHeader = XHR.prototype.setRequestHeader;
+      const originalSend = XHR.prototype.send;
       XHR.prototype.open = function (method, url, ...rest) {
         this.__mufyRecoveryUrl = String(url || '');
+        this.__mufyRecoveryMethod = String(method || 'GET');
         this.__mufyRecoveryPageScope = currentSiteCaptureScope();
         if (!this.__mufyRecoveryCaptureHooked && this.addEventListener) {
           this.__mufyRecoveryCaptureHooked = true;
           this.addEventListener('loadend', function () {
             tryCaptureSiteCharacterXhr(this.__mufyRecoveryUrl, this, this.__mufyRecoveryPageScope);
+            recordChatApiObservation(this.__mufyRecoveryUrl, this, this.__mufyRecoveryMethod, this.__mufyRecoveryBody);
           });
         }
         return originalOpen.call(this, method, url, ...rest);
@@ -280,6 +336,10 @@
       XHR.prototype.setRequestHeader = function (name, value) {
         if (/^authorization$/i.test(String(name))) captureAuthorization({ authorization: value }, this.__mufyRecoveryUrl);
         return originalSetRequestHeader.call(this, name, value);
+      };
+      XHR.prototype.send = function (body) {
+        this.__mufyRecoveryBody = typeof body === 'string' ? body : '';
+        return originalSend.apply(this, arguments);
       };
     }
     if (pageWindow.fetch && !pageWindow.fetch[AUTH_HOOK_MARK]) {
@@ -296,6 +356,7 @@
         try {
           return Promise.resolve(result).then(response => {
             tryCaptureSiteCharacterResponse(requestUrl, response, pageScope);
+            recordChatApiObservation(requestUrl, response, init?.method || input?.method || 'GET', init?.body || '');
             return response;
           });
         } catch (_) {
@@ -6056,7 +6117,7 @@ roleStateReady = true;
     const rows = loadRunLogs().filter(row => {
       const level = String(row.level || '').toLowerCase();
       const message = String(row.message || '');
-      return ['error', 'warn'].includes(level) || /(IndexedDB|localStorage|迁移|面具库.*载入)/i.test(message);
+      return ['error', 'warn'].includes(level) || /(IndexedDB|localStorage|迁移|面具库.*载入|聊天接口侦测)/i.test(message);
     });
     const diagnostics = [
       `脚本版本：${SCRIPT_VERSION}`,
