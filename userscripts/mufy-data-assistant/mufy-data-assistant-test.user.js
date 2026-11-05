@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.27
+// @version      3.0.0-dev.28
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.27';
+  const SCRIPT_VERSION = '3.0.0-dev.28';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const MASK_LIBRARY_KEY = 'mufy-recovery-mask-library-v1';
   const MASK_LIBRARY_BACKUP_KEY = 'mufy-recovery-mask-library-backup-v1';
@@ -44,6 +44,7 @@
   const MANUAL_FAVORITE_CHAT_CURRENT_KEY = 'mufy-role-links-only-manual-favorite-chat-current-v1';
   const MANUAL_AUTO_CHAT_MESSAGE_KEY = 'mufy-role-links-only-manual-auto-chat-message-v1';
   const MANUAL_AUTO_CHAT_JOB_KEY = 'mufy-role-links-only-manual-auto-chat-job-v1';
+  const CHAT_MODEL_CONFIG_KEY = 'mufy-role-links-only-chat-model-config-v1';
   const CHAT_JUMP_KEY = 'mufy-role-links-only-chat-jump-v1';
   const QUOTE_CARD_KEY = 'mufy-role-links-only-quote-cards-v1';
   const QUOTE_STYLE_KEY = 'mufy-role-links-only-quote-style-v1';
@@ -76,6 +77,7 @@
   let liveHistoryPendingKey = '';
   let liveHistorySavedKey = '';
   let manualAutoChatProcessing = false;
+  let chatModelConfigCache = new Map();
   let shareFavoriteJobCache = null;
   let shareFavoriteJobStoragePromise = null;
   let shareFavoriteJobStorageGeneration = 0;
@@ -195,6 +197,7 @@
     if (!nextScope || nextScope === maskAccountScope) return;
     const previousScope = maskAccountScope;
     maskAccountScope = nextScope;
+    chatModelConfigCache = loadChatModelConfigCache();
     if (!roleStateReady) return;
     state.roleHistory = [];
     reloadShareCodeCacheForAccount();
@@ -321,6 +324,70 @@
     }
     return authorization;
   }
+
+  function loadChatModelConfigCache() {
+    try {
+      const value = JSON.parse(loadAndMigrateScopedValue(CHAT_MODEL_CONFIG_KEY) || '{}');
+      return new Map(Object.entries(value && typeof value === 'object' ? value : {}).filter(([, row]) => row?.modelId && row?.modelTemplateId));
+    } catch (_) { return new Map(); }
+  }
+
+  function saveChatModelConfigCache() {
+    try { localStorage.setItem(accountStorageKey(CHAT_MODEL_CONFIG_KEY), JSON.stringify(Object.fromEntries(chatModelConfigCache))); } catch (_) {}
+  }
+
+  function modelConfigFromObject(value, depth = 0) {
+    if (!value || typeof value !== 'object' || depth > 7) return null;
+    if (!Array.isArray(value) && value.modelId != null && value.modelTemplateId != null) {
+      const modelId = Number(value.modelId);
+      const modelTemplateId = Number(value.modelTemplateId);
+      if (Number.isFinite(modelId) && Number.isFinite(modelTemplateId)) return { modelId, modelTemplateId };
+    }
+    for (const child of Array.isArray(value) ? value : Object.values(value)) {
+      const found = modelConfigFromObject(child, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  function rememberChatModelConfig(characterId, value) {
+    const id = String(characterId || '');
+    const config = modelConfigFromObject(value);
+    if (!id || !config) return false;
+    chatModelConfigCache.set(id, { ...config, savedAt: Date.now() });
+    saveChatModelConfigCache();
+    return true;
+  }
+
+  function captureChatCompletionRequest(requestUrl, body) {
+    try {
+      const url = new URL(String(requestUrl || ''), location.href);
+      if (!/\/api\/v1\/chat\/completions$/i.test(url.pathname)) return;
+      const payload = typeof body === 'string' ? JSON.parse(body) : body;
+      rememberChatModelConfig(payload?.characterId || currentRoleContext().characterId, payload);
+    } catch (_) {}
+  }
+
+  function captureChatModelConfigResponse(requestUrl, response) {
+    try {
+      const url = new URL(String(requestUrl || ''), location.href);
+      if (!/(?:model|preference|current)/i.test(url.pathname) || !response?.clone) return;
+      const characterId = url.searchParams.get('characterId') || currentRoleContext().characterId;
+      if (!characterId) return;
+      response.clone().json().then(body => rememberChatModelConfig(characterId, body)).catch(() => {});
+    } catch (_) {}
+  }
+
+  function captureChatModelConfigXhr(requestUrl, xhr) {
+    try {
+      const url = new URL(String(requestUrl || ''), location.href);
+      if (!/(?:model|preference|current)/i.test(url.pathname)) return;
+      const characterId = url.searchParams.get('characterId') || currentRoleContext().characterId;
+      if (!characterId) return;
+      const body = xhr.responseType === 'json' ? xhr.response : JSON.parse(String(xhr.responseText || ''));
+      rememberChatModelConfig(characterId, body);
+    } catch (_) {}
+  }
   // Mufy 给 /api 请求添加 Bearer 令牌。这里只在内存中接住它，
   // 用于请求同一个网站的会话列表；不会显示、保存或导出令牌。
   let roleStateReady = false;
@@ -344,6 +411,7 @@
           this.addEventListener('loadend', function () {
             tryCaptureSiteCharacterXhr(this.__mufyRecoveryUrl, this, this.__mufyRecoveryPageScope);
             recordChatApiObservation(this.__mufyRecoveryUrl, this, this.__mufyRecoveryMethod, this.__mufyRecoveryBody);
+            captureChatModelConfigXhr(this.__mufyRecoveryUrl, this);
           });
         }
         return originalOpen.call(this, method, url, ...rest);
@@ -354,6 +422,7 @@
       };
       XHR.prototype.send = function (body) {
         this.__mufyRecoveryBody = typeof body === 'string' ? body : '';
+        captureChatCompletionRequest(this.__mufyRecoveryUrl, this.__mufyRecoveryBody);
         return originalSend.apply(this, arguments);
       };
     }
@@ -367,11 +436,13 @@
         } catch (_) {}
         captureAuthorization(init?.headers, requestUrl);
         captureAuthorization(input?.headers, requestUrl);
+        captureChatCompletionRequest(requestUrl, init?.body || '');
         const result = originalFetch.apply(this, arguments);
         try {
           return Promise.resolve(result).then(response => {
             tryCaptureSiteCharacterResponse(requestUrl, response, pageScope);
             recordChatApiObservation(requestUrl, response, init?.method || input?.method || 'GET', init?.body || '');
+            captureChatModelConfigResponse(requestUrl, response);
             return response;
           });
         } catch (_) {
@@ -686,6 +757,7 @@
   };
   if (maskLibraryStorageWarning) state.status = maskLibraryStorageWarning;
 roleStateReady = true;
+  chatModelConfigCache = loadChatModelConfigCache();
   if (pendingSiteCaptureRows.length) {
     pendingSiteCaptureRows.splice(0).forEach(item => addCapturedSiteRows(item.rows, item.pageScope));
   }
@@ -940,6 +1012,107 @@ roleStateReady = true;
     throw new Error(`发送按钮已启用，但页面的点击、框架事件、表单提交和 Enter 都没有生效${failures.length ? `（${[...new Set(failures)].join('；')}）` : ''}`);
   }
 
+  async function resolveManualChatModelConfig(characterId, timeoutMs = 12000) {
+    const id = String(characterId || '');
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      const cached = chatModelConfigCache.get(id);
+      if (cached?.modelId && cached?.modelTemplateId) return cached;
+      await wait(250);
+    }
+    throw new Error('没有获取到当前角色所选模型的 modelId/modelTemplateId；请刷新该角色页面，等待模型名称显示后再继续');
+  }
+
+  function sessionIdFromStreamValue(value, depth = 0) {
+    if (!value || depth > 7) return '';
+    if (typeof value === 'object') {
+      if (value.sessionId && String(value.sessionId) !== '00000000-0000-0000-0000-000000000000') return String(value.sessionId);
+      for (const child of Array.isArray(value) ? value : Object.values(value)) {
+        const found = sessionIdFromStreamValue(child, depth + 1);
+        if (found) return found;
+      }
+    }
+    return '';
+  }
+
+  async function findCreatedManualChatSession(characterId, previousSessionId = '', timeoutMs = 20000) {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      const data = await requestPage(1, false);
+      const row = extractCharacterRows(data).map(normalize).find(item => String(item.characterId) === String(characterId));
+      const sessionId = String(row?.lastSessionId || '');
+      if (sessionId && sessionId !== String(previousSessionId || '')) return sessionId;
+      await wait(800);
+    }
+    return '';
+  }
+
+  async function sendManualChatViaApi(job, textarea) {
+    scanStoredAuthorization();
+    const characterId = String(job.activeCharacterId || '');
+    const config = await resolveManualChatModelConfig(characterId);
+    const current = currentRoleContext();
+    const previousSessionId = String(current.sessionId || '');
+    const requestSessionId = previousSessionId || '00000000-0000-0000-0000-000000000000';
+    const headers = { Accept: 'text/event-stream', 'Content-Type': 'application/json' };
+    if (authorization) headers.Authorization = authorization;
+    const payload = {
+      userInput: String(job.message || DEFAULT_MANUAL_AUTO_CHAT_MESSAGE),
+      sessionId: requestSessionId,
+      modelId: Number(config.modelId),
+      modelTemplateId: Number(config.modelTemplateId),
+      characterId,
+      itemText: null,
+      skipRedPacket: false
+    };
+    const response = await pageWindow.fetch(new URL('/api/v1/chat/completions', location.origin).href, {
+      method: 'POST',
+      credentials: 'include',
+      headers,
+      body: JSON.stringify(payload)
+    });
+    if (response.status === 401 || response.status === 403) throw new Error(loginErrorMessage(response.status, '自动发送消息'));
+    if (!response.ok) {
+      const raw = await response.text().catch(() => '');
+      throw new Error(`自动发送消息失败（HTTP ${response.status}${raw ? `：${raw.slice(0, 240)}` : ''}）`);
+    }
+    if (!response.body?.getReader) throw new Error('聊天接口没有返回可读取的 EventStream');
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let doneReceived = false;
+    let createdSessionId = '';
+    const inspectLine = line => {
+      const trimmed = String(line || '').trim();
+      if (!trimmed || trimmed.startsWith(':') || /^(?:event|id|retry):/i.test(trimmed)) return;
+      const dataText = trimmed.replace(/^data:\s*/i, '');
+      if (dataText === '[DONE]') { doneReceived = true; return; }
+      try {
+        const event = JSON.parse(dataText);
+        createdSessionId = createdSessionId || sessionIdFromStreamValue(event);
+        if (String(event?.type || '').toLowerCase() === 'done' || String(event?.content || '').trim() === '[DONE]') doneReceived = true;
+      } catch (_) {}
+    };
+    while (true) {
+      if (manualAutoChatWasStopped()) {
+        try { await reader.cancel(); } catch (_) {}
+        throw new ManualAutoChatPausedError('任务已暂停；当前接口回复流已停止读取');
+      }
+      const chunk = await reader.read();
+      buffer += decoder.decode(chunk.value || new Uint8Array(), { stream: !chunk.done });
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() || '';
+      lines.forEach(inspectLine);
+      if (chunk.done) break;
+    }
+    if (buffer) inspectLine(buffer);
+    if (!doneReceived) throw new Error('EventStream 已结束，但没有收到 done/[DONE] 完成标记');
+    if (!createdSessionId) createdSessionId = await findCreatedManualChatSession(characterId, previousSessionId);
+    if (!createdSessionId) throw new Error('已收到回复完成标记，但没有取得新生成的 sessionId');
+    if (textarea) setManualChatTextareaValue(textarea, '');
+    return createdSessionId;
+  }
+
   async function waitForManualChatResponse(job) {
     const startedAt = Number(job.sentAt) || Date.now();
     let lastMutationAt = Date.now();
@@ -1073,7 +1246,7 @@ roleStateReady = true;
           render();
         }
       }
-      if (job.phase !== 'waiting-response') {
+      if (job.phase !== 'waiting-response' && job.phase !== 'response-complete') {
         state.status = `一键扣数 ${Number(job.completed || 0) + 1}/${job.total}：正在等待“${job.activeCharacterName || job.activeCharacterId}”的输入框……`;
         render();
         const { textarea } = await waitForManualChatComposer();
@@ -1082,17 +1255,23 @@ roleStateReady = true;
           throw new Error('输入框中已有其他草稿，为避免覆盖已暂停任务');
         }
         setManualChatTextareaValue(textarea, String(job.message || DEFAULT_MANUAL_AUTO_CHAT_MESSAGE));
-        const sendButton = await waitForEnabledManualChatButton(textarea);
+        await waitForEnabledManualChatButton(textarea);
         job.phase = 'sending';
         job.sentAt = Date.now();
         if (!saveManualAutoChatJob(job)) throw new Error('发送前无法保存任务状态');
-        await activateManualChatSend(textarea, sendButton, String(job.message || DEFAULT_MANUAL_AUTO_CHAT_MESSAGE));
-        job.phase = 'waiting-response';
-        if (!saveManualAutoChatJob(job)) throw new Error('发送后无法保存等待状态');
+        const createdSessionId = await sendManualChatViaApi(job, textarea);
+        job.phase = 'response-complete';
+        job.completedSessionId = createdSessionId;
+        if (!saveManualAutoChatJob(job)) throw new Error('回复完成后无法保存任务状态');
       }
-      state.status = `一键扣数 ${Number(job.completed || 0) + 1}/${job.total}：消息已发送，正在等待完整回复和 sessionId……`;
-      render();
-      await waitForManualChatResponse(job);
+      if (job.phase === 'waiting-response') {
+        state.status = `一键扣数 ${Number(job.completed || 0) + 1}/${job.total}：消息已发送，正在等待完整回复和 sessionId……`;
+        render();
+        job.completedSessionId = await waitForManualChatResponse(job);
+      } else {
+        state.status = `一键扣数 ${Number(job.completed || 0) + 1}/${job.total}：EventStream 已收到 done，回复完成。`;
+        render();
+      }
       if (manualAutoChatWasStopped()) throw new ManualAutoChatPausedError('任务已暂停');
       const finishedId = String(job.activeCharacterId);
       state.manualFavoriteChats = state.manualFavoriteChats.filter(row => String(row.characterId) !== finishedId);
@@ -1104,6 +1283,7 @@ roleStateReady = true;
       job.activeCharacterName = '';
       job.phase = 'navigating';
       job.sentAt = 0;
+      job.completedSessionId = '';
       if (!state.manualFavoriteChats.length) {
         finishManualAutoChatJob(job);
         return;
