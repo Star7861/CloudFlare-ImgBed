@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.13
+// @version      3.0.0-dev.14
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.13';
+  const SCRIPT_VERSION = '3.0.0-dev.14';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const MASK_LIBRARY_KEY = 'mufy-recovery-mask-library-v1';
   const MASK_LIBRARY_BACKUP_KEY = 'mufy-recovery-mask-library-backup-v1';
@@ -7319,6 +7319,7 @@ roleStateReady = true;
   let messageQuoteObserver = null;
   let quoteStageOpen = false;
   let quotePreviewFlipped = false;
+  let quoteOpenDeckId = '';
 
   function messageContainerFromAction(actionBox) {
     let node = actionBox;
@@ -7472,15 +7473,21 @@ roleStateReady = true;
     if (!modal) return;
     const list = modal.querySelector('#mufy-recovery-quote-list');
     const groups = quoteCardGroups();
-    list.innerHTML = groups.map(group => {
+    const openGroup = groups.find(group => group.characterId === quoteOpenDeckId);
+    if (!openGroup) quoteOpenDeckId = '';
+    if (!quoteOpenDeckId) {
+      list.innerHTML = groups.length ? `<div class="mufy-quote-deck-grid">${groups.map(group => `<button class="mufy-quote-stack" data-quote-deck="${esc(group.characterId)}"><span class="mufy-quote-stack-layers"></span><span class="mufy-quote-stack-cover">${group.avatarUrl ? `<img src="${esc(group.avatarUrl)}" alt="${esc(group.name)}">` : '<i>✦</i>'}<span><b>${esc(group.name)}</b><small>${group.rows.length} 张摘录</small></span></span></button>`).join('')}</div>` : '<div class="mufy-recovery-empty">还没有摘录。请在角色回复中选中文字，再从省略号菜单点击“摘录”。</div>';
+    } else {
+      const group = openGroup;
       const middle = (group.rows.length - 1) / 2;
       const cards = group.rows.map((row, index) => {
-        const angle = Math.max(-11, Math.min(11, (index - middle) * 2.4));
-        const lift = Math.min(18, Math.abs(index - middle) * 2.3);
-        return `<button class="mufy-quote-deck-card ${row.id === state.quoteSelectedId ? 'active' : ''}" data-quote-id="${esc(row.id)}" style="transform:translateY(${lift}px) rotate(${angle}deg);z-index:${index + 1}" title="${esc(row.text.slice(0, 100))}">${row.avatarUrl ? `<img src="${esc(row.avatarUrl)}" alt="${esc(row.characterName)}">` : '<span class="mufy-quote-deck-fallback">✦</span>'}<i></i></button>`;
+        const angle = Math.max(-16, Math.min(16, (index - middle) * 3.2));
+        const lift = Math.min(24, Math.abs(index - middle) * 3);
+        const active = row.id === state.quoteSelectedId;
+        return `<button class="mufy-quote-deck-card ${active ? 'active' : ''}" data-quote-id="${esc(row.id)}" style="transform:translateY(${lift}px) rotate(${angle}deg);z-index:${active ? 60 : index + 1}" title="${esc(row.text.slice(0, 100))}">${row.avatarUrl ? `<img src="${esc(row.avatarUrl)}" alt="${esc(row.characterName)}">` : '<span class="mufy-quote-deck-fallback">✦</span>'}<i></i></button>`;
       }).join('');
-      return `<section class="mufy-quote-deck"><div class="mufy-quote-deck-head">${group.avatarUrl ? `<img src="${esc(group.avatarUrl)}" alt="">` : ''}<div><b>${esc(group.name)}</b><small>${group.rows.length} 张摘录牌</small></div><span>点击一张放大</span></div><div class="mufy-quote-fan-scroll"><div class="mufy-quote-fan">${cards}</div></div></section>`;
-    }).join('') || '<div class="mufy-recovery-empty">还没有摘录。请在角色回复中选中文字，再从省略号菜单点击“摘录”。</div>';
+      list.innerHTML = `<section class="mufy-quote-deck is-open"><div class="mufy-quote-deck-head"><button id="mufy-recovery-quote-deck-back">‹ 返回牌组</button>${group.avatarUrl ? `<img src="${esc(group.avatarUrl)}" alt="">` : ''}<div><b>${esc(group.name)}</b><small>${group.rows.length} 张摘录牌</small></div><span>选择一张放大</span></div><div class="mufy-quote-fan-scroll"><div class="mufy-quote-fan">${cards}</div></div></section>`;
+    }
     const card = selectedQuoteCard();
     if (card && !state.quoteSelectedId) state.quoteSelectedId = card.id;
     const stage = modal.querySelector('#mufy-recovery-quote-stage');
@@ -7507,6 +7514,11 @@ roleStateReady = true;
     modal.querySelector('#mufy-recovery-quote-source').disabled = !card;
     modal.querySelector('#mufy-recovery-quote-export').disabled = !card;
     modal.querySelector('#mufy-recovery-quote-update').disabled = !card;
+    modal.querySelector('#mufy-recovery-quote-deck-back')?.addEventListener('click', () => {
+      quoteOpenDeckId = '';
+      quoteStageOpen = false;
+      renderQuoteLibraryModal();
+    });
   }
 
   function openQuoteLibraryModal() {
@@ -7514,6 +7526,7 @@ roleStateReady = true;
     if (!modal) return;
     quoteStageOpen = false;
     quotePreviewFlipped = false;
+    quoteOpenDeckId = '';
     renderQuoteLibraryModal();
     modal.hidden = false;
   }
@@ -8196,11 +8209,15 @@ roleStateReady = true;
       #mufy-recovery-quote-card-actions{display:grid;grid-template-columns:1fr 1fr;gap:7px}#mufy-recovery-quote-delete{border-color:#8b4b52!important;color:#ffb8bd!important}
       #mufy-recovery-quote-library-body{position:relative;display:block;overflow:hidden;background:radial-gradient(circle at 50% 0,#39324e 0,#211f29 42%,#18181d 100%)}
       #mufy-recovery-quote-list{box-sizing:border-box;height:100%;overflow:auto;padding:14px 12px 38px;border:0;background:transparent}
+      .mufy-quote-deck-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:20px 12px;padding:8px 4px 28px}
+      .mufy-quote-stack{position:relative;min-width:0;height:190px;padding:0!important;border:0!important;background:transparent!important;overflow:visible;filter:drop-shadow(0 9px 10px #0008);transition:transform .2s,filter .2s}.mufy-quote-stack:hover{transform:translateY(-7px);filter:drop-shadow(0 12px 15px #8d73df66)}
+      .mufy-quote-stack-layers,.mufy-quote-stack-layers:before,.mufy-quote-stack-layers:after{position:absolute;inset:8px 7px 7px;display:block;border:2px solid #8f7cc7;border-radius:11px;background:#302943;content:''}.mufy-quote-stack-layers{transform:rotate(-3.5deg) translate(-4px,1px)}.mufy-quote-stack-layers:before{inset:-3px;transform:rotate(6deg) translate(7px,-2px);background:#413657}.mufy-quote-stack-layers:after{inset:-2px;transform:rotate(2deg) translate(4px,-1px);background:#282136}
+      .mufy-quote-stack-cover{position:absolute;inset:7px;z-index:3;display:block;overflow:hidden;border:2px solid #b29be7;border-radius:11px;background:#282139;color:#fff}.mufy-quote-stack-cover>img{width:100%;height:100%;object-fit:cover}.mufy-quote-stack-cover>i{display:flex;height:100%;align-items:center;justify-content:center;color:#cdbdff;font-size:40px}.mufy-quote-stack-cover:after{content:'';position:absolute;inset:0;background:linear-gradient(transparent 48%,#000e)}.mufy-quote-stack-cover>span{position:absolute;z-index:2;left:8px;right:8px;bottom:10px;display:grid;gap:3px;text-align:center;text-shadow:0 2px 5px #000}.mufy-quote-stack-cover b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:700 13px/1.2 Georgia,"Noto Serif SC",serif}.mufy-quote-stack-cover small{color:#ffffffb8;font-size:9px}
       .mufy-quote-deck{min-height:205px;margin-bottom:18px;padding:11px 12px 18px;border:1px solid #ffffff1c;border-radius:13px;background:linear-gradient(145deg,#ffffff0e,#00000022);box-shadow:0 10px 24px #0005}
       .mufy-quote-deck-head{display:flex;align-items:center;gap:8px;margin-bottom:9px}.mufy-quote-deck-head>img{width:34px;height:34px;border:1px solid #a895e7;border-radius:50%;object-fit:cover}.mufy-quote-deck-head>div{min-width:0;display:grid}.mufy-quote-deck-head b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#f2efff}.mufy-quote-deck-head small{color:#999;font-size:10px}.mufy-quote-deck-head>span{margin-left:auto;color:#a99fc8;font-size:10px;white-space:nowrap}
       .mufy-quote-fan-scroll{overflow-x:auto;overflow-y:hidden;padding:9px 13px 12px}.mufy-quote-fan{min-width:max-content;display:flex;align-items:flex-start;padding:0 34px 0 10px}
       .mufy-quote-deck-card{position:relative;flex:none;width:90px;height:138px;margin-left:-48px!important;padding:0!important;overflow:hidden;border:2px solid #b29be7!important;border-radius:10px!important;background:#272139!important;box-shadow:-8px 7px 15px #0009;transform-origin:50% 125%;transition:transform .18s,filter .18s,box-shadow .18s}.mufy-quote-deck-card:first-child{margin-left:0!important}.mufy-quote-deck-card:hover,.mufy-quote-deck-card.active{filter:brightness(1.14);box-shadow:0 5px 22px #a88df077;transform:translateY(-8px) rotate(0)!important;z-index:99!important}.mufy-quote-deck-card img{width:100%;height:100%;object-fit:cover}.mufy-quote-deck-card i{position:absolute;inset:0;border:5px double #ffffff60;border-radius:7px;pointer-events:none}.mufy-quote-deck-fallback{display:flex;height:100%;align-items:center;justify-content:center;color:#c9b6ff;font-size:30px}
-      #mufy-recovery-quote-stage{position:absolute;inset:0;z-index:3;display:flex;align-items:center;justify-content:center;padding:14px;background:#09090dc7;backdrop-filter:blur(5px)}#mufy-recovery-quote-stage[hidden]{display:none}
+      #mufy-recovery-quote-stage{position:absolute;inset:0;z-index:200;display:flex;align-items:center;justify-content:center;padding:14px;background:#09090de8;backdrop-filter:blur(5px)}#mufy-recovery-quote-stage[hidden]{display:none}
       #mufy-recovery-quote-stage-panel{box-sizing:border-box;width:min(100%,430px);max-height:100%;overflow:auto;padding:12px;border:1px solid #766bb1;border-radius:13px;background:#24242c;box-shadow:0 18px 50px #000d}
       #mufy-recovery-quote-stage-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;color:#eee}#mufy-recovery-quote-stage-head small{color:#aaa;font-weight:400}#mufy-recovery-quote-stage-close{padding:1px 7px!important;border:0!important;background:transparent!important;font-size:21px!important}
       #mufy-recovery-quote-preview{width:260px;height:410px;min-height:0;margin:4px auto 12px;padding:0;border:0;border-radius:17px;background:transparent;box-shadow:none;cursor:pointer;perspective:1200px;overflow:visible}
@@ -8232,7 +8249,7 @@ roleStateReady = true;
         .mufy-recovery-mask-editor-field textarea{min-height:128px}
         #mufy-recovery-mask-editor-actions{padding:10px 11px}
         #mufy-recovery-head{gap:4px;padding-left:9px;padding-right:7px}#mufy-recovery-export-chat,#mufy-recovery-quote-entry,#mufy-recovery-log-entry,#mufy-recovery-history-entry{padding:5px 6px!important;font-size:10px!important}#mufy-recovery-history-entry{margin-right:2px}
-        #mufy-recovery-quote-list{padding:10px 8px 30px}.mufy-quote-deck{min-height:195px;padding-left:8px;padding-right:8px}.mufy-quote-deck-card{width:86px;height:132px;margin-left:-48px!important}#mufy-recovery-quote-stage{padding:5px}#mufy-recovery-quote-stage-panel{padding:9px}#mufy-recovery-quote-preview{width:230px;height:362px}.mufy-quote-card-content{padding:23px 18px}.mufy-quote-card-content .mufy-quote-preview-text{max-height:270px}
+        #mufy-recovery-quote-list{padding:10px 8px 30px}.mufy-quote-deck-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:18px 14px;padding-left:12px;padding-right:12px}.mufy-quote-stack{height:205px}.mufy-quote-deck{min-height:195px;padding-left:8px;padding-right:8px}.mufy-quote-deck-card{width:86px;height:132px;margin-left:-48px!important}#mufy-recovery-quote-stage{padding:5px}#mufy-recovery-quote-stage-panel{padding:9px}#mufy-recovery-quote-preview{width:230px;height:362px}.mufy-quote-card-content{padding:23px 18px}.mufy-quote-card-content .mufy-quote-preview-text{max-height:270px}
       }`;
     document.documentElement.appendChild(style);
 
@@ -8523,8 +8540,16 @@ roleStateReady = true;
     panel.querySelector('#mufy-recovery-quote-editor-cancel').onclick = closeQuoteEditor;
     panel.querySelector('#mufy-recovery-quote-editor-save').onclick = saveQuoteDraft;
     const quoteLibraryModal = panel.querySelector('#mufy-recovery-quote-library-modal');
-    panel.querySelector('#mufy-recovery-quote-library-close').onclick = () => { quoteStageOpen = false; quoteLibraryModal.hidden = true; };
+    panel.querySelector('#mufy-recovery-quote-library-close').onclick = () => { quoteStageOpen = false; quoteOpenDeckId = ''; quoteLibraryModal.hidden = true; };
     panel.querySelector('#mufy-recovery-quote-list').onclick = event => {
+      const deck = event.target.closest?.('[data-quote-deck]');
+      if (deck) {
+        quoteOpenDeckId = String(deck.dataset.quoteDeck || '');
+        quoteStageOpen = false;
+        quotePreviewFlipped = false;
+        renderQuoteLibraryModal();
+        return;
+      }
       const item = event.target.closest?.('[data-quote-id]');
       if (!item) return;
       state.quoteSelectedId = String(item.dataset.quoteId || '');
