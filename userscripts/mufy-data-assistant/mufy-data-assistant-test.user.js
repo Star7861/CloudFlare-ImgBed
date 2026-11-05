@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.9
+// @version      3.0.0-dev.10
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.9';
+  const SCRIPT_VERSION = '3.0.0-dev.10';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const MASK_LIBRARY_KEY = 'mufy-recovery-mask-library-v1';
   const MASK_LIBRARY_BACKUP_KEY = 'mufy-recovery-mask-library-backup-v1';
@@ -526,6 +526,11 @@
     chatExportLoading: false,
     chatExportStopRequested: false,
     chatExportAbortController: null,
+    chatSearchLoading: false,
+    chatSearchStopRequested: false,
+    chatSearchAbortController: null,
+    chatSearchResults: [],
+    chatSearchQuery: '',
     archived: cachedRoles?.archived || [],
     roleHistory: [],
     archiveCheckedCharacterIds: new Set(cachedRoles?.archiveCheckedCharacterIds || []),
@@ -6375,6 +6380,133 @@ roleStateReady = true;
     }).filter(Boolean).join('\n');
   }
 
+  function dialogSearchText(row) {
+    const pieces = Array.isArray(row?.content) ? row.content : [row?.content];
+    return pieces.filter(item => item != null).map(item => {
+      if (typeof item === 'string') return item;
+      if (item?.text != null) return String(item.text);
+      try { return JSON.stringify(item); } catch (_) { return String(item); }
+    }).join('\n');
+  }
+
+  function dialogMatchSnippet(row, query) {
+    const plain = plainDialogContent(row).replace(/\s+/g, ' ').trim();
+    const lower = plain.toLocaleLowerCase('zh-CN');
+    const needle = String(query || '').toLocaleLowerCase('zh-CN');
+    const index = lower.indexOf(needle);
+    if (index < 0) return plain.slice(0, 180);
+    const start = Math.max(0, index - 70);
+    const end = Math.min(plain.length, index + needle.length + 110);
+    return `${start ? '…' : ''}${plain.slice(start, end)}${end < plain.length ? '…' : ''}`;
+  }
+
+  async function loadChatSearchSessions() {
+    const found = new Map();
+    const seenPages = new Set();
+    for (let page = 1; page <= 500; page += 1) {
+      if (state.chatSearchStopRequested) throw new DOMException('聊天搜索已停止', 'AbortError');
+      state.status = `正在读取可搜索的会话：第 ${page} 页，已找到 ${found.size} 段……`;
+      render();
+      const data = await requestPage(page, false);
+      const rawRows = extractCharacterRows(data);
+      const rows = rawRows.map(normalize).filter(row => row.characterId && row.lastSessionId);
+      const signature = rows.map(row => `${row.characterId}|${row.lastSessionId}`).join('|');
+      if (signature && seenPages.has(signature)) break;
+      if (signature) seenPages.add(signature);
+      rows.forEach(row => found.set(String(row.lastSessionId), row));
+      if (!pageHasMore(data, rawRows, 20, page)) break;
+      await wait(ROLE_REQUEST_INTERVAL_MS);
+    }
+    return [...found.values()];
+  }
+
+  async function searchOneChatSession(row, query) {
+    const context = { characterId: String(row.characterId), sessionId: String(row.lastSessionId) };
+    const needle = query.toLocaleLowerCase('zh-CN');
+    const seenPages = new Set();
+    for (let page = 1; page <= 5000; page += 1) {
+      if (state.chatSearchStopRequested) throw new DOMException('聊天搜索已停止', 'AbortError');
+      const data = await requestDialogPage(context, page, CHAT_EXPORT_FAST_PAGE_SIZE, state.chatSearchAbortController?.signal);
+      const dialogs = dialogRowsFromPage(data).filter(item => item && typeof item === 'object');
+      const signature = dialogs.map(item => String(item.dialogsId || item.dialogId || item.id || '')).join('|');
+      if (signature && seenPages.has(signature)) break;
+      if (signature) seenPages.add(signature);
+      for (const dialog of dialogs) {
+        if (!dialogSearchText(dialog).toLocaleLowerCase('zh-CN').includes(needle)) continue;
+        return {
+          ...row,
+          lastSessionId: context.sessionId,
+          chatMatchSnippet: dialogMatchSnippet(dialog, query),
+          chatMatchRole: String(dialog.role || ''),
+          chatMatchTime: String(dialog.createdTime || dialog.updatedTime || '')
+        };
+      }
+      const hasNext = data?.hasNext ?? data?.hasMore;
+      if (hasNext === false || !dialogs.length) break;
+      await wait(80);
+    }
+    return null;
+  }
+
+  async function searchRolesByChatRecord() {
+    if (state.chatSearchLoading) {
+      state.chatSearchStopRequested = true;
+      state.chatSearchAbortController?.abort();
+      state.status = '正在停止聊天记录搜索……';
+      render();
+      return;
+    }
+    const input = panel?.querySelector('#mufy-recovery-role-search');
+    const query = String(input?.value || state.roleQuery || '').trim();
+    if (query.length < 2) {
+      state.status = '请在角色搜索框输入至少 2 个字，再点击“搜聊天”。';
+      render();
+      return;
+    }
+    state.chatSearchLoading = true;
+    state.chatSearchStopRequested = false;
+    state.chatSearchAbortController = new AbortController();
+    state.chatSearchResults = [];
+    state.chatSearchQuery = query;
+    render();
+    try {
+      scanStoredAuthorization();
+      const sessions = await loadChatSearchSessions();
+      if (!sessions.length) throw new Error('没有读取到可搜索的历史会话，请先确认账号有聊天记录');
+      const confirmed = pageWindow.confirm(`将逐个读取 ${sessions.length} 段历史会话，查找“${query}”。\n\n聊天越多耗时越长，可随时点击“停止搜索”。确定开始吗？`);
+      if (!confirmed) {
+        state.status = '已取消聊天记录搜索。';
+        return;
+      }
+      for (let index = 0; index < sessions.length; index += 1) {
+        if (state.chatSearchStopRequested) throw new DOMException('聊天搜索已停止', 'AbortError');
+        const row = sessions[index];
+        state.status = `正在按聊天内容找角色：${index + 1}/${sessions.length}，已匹配 ${state.chatSearchResults.length} 个……`;
+        render();
+        const match = await searchOneChatSession(row, query);
+        if (match) state.chatSearchResults.push(match);
+        await wait(100);
+      }
+      state.active = 'chatMatches';
+      state.section = 'roles';
+      state.status = `聊天记录搜索完成：检查 ${sessions.length} 段会话，找到 ${state.chatSearchResults.length} 个匹配角色。`;
+    } catch (error) {
+      state.active = 'chatMatches';
+      state.section = 'roles';
+      if (error?.name === 'AbortError' || state.chatSearchStopRequested) {
+        state.status = `已停止聊天记录搜索，保留当前找到的 ${state.chatSearchResults.length} 个结果。`;
+      } else {
+        state.status = `聊天记录搜索失败：${explainFailure(error)}`;
+        appendRunLog('error', '聊天记录搜索失败', error);
+      }
+    } finally {
+      state.chatSearchLoading = false;
+      state.chatSearchStopRequested = false;
+      state.chatSearchAbortController = null;
+      render();
+    }
+  }
+
   function safeDialogHtml(row) {
     const pieces = Array.isArray(row?.content) ? row.content : [row?.content];
     const holder = document.createElement('div');
@@ -6849,7 +6981,7 @@ roleStateReady = true;
     if (excludedTags.some(token => tags.some(tag => tag.includes(token)))) return false;
     const textQuery = tokens.filter(token => !token.startsWith('#') && !token.startsWith('-#')).join(' ');
     if (!textQuery) return true;
-    return `${row.name || ''} ${row.characterId || ''} ${row.lastSessionId || ''} ${row.authorName || ''} ${row.authorId || ''} ${tags.join(' ')} ${row.metadataError || ''} ${visibilityLabel(row)}`
+    return `${row.name || ''} ${row.characterId || ''} ${row.lastSessionId || ''} ${row.authorName || ''} ${row.authorId || ''} ${tags.join(' ')} ${row.chatMatchSnippet || ''} ${row.metadataError || ''} ${visibilityLabel(row)}`
       .toLocaleLowerCase('zh-CN').includes(textQuery);
   }
 
@@ -6914,7 +7046,8 @@ roleStateReady = true;
     const archiveList = archiveOpen && !row.archive
       ? `<div class="mufy-recovery-archives">${archiveRows.map((item, archiveIndex) => `<a href="${esc(sessionUrl(item))}" target="_blank" rel="noreferrer">旧档 ${archiveIndex + 1}${item.archiveRemark ? ` · ${esc(item.archiveRemark)}` : ''}${item.archiveUpdatedAt || item.archiveCreatedAt ? ` · ${esc(new Date(item.archiveUpdatedAt || item.archiveCreatedAt).toLocaleString('zh-CN'))}` : ''}</a>`).join('') || '<span>没有找到归档旧档</span>'}</div>`
       : '';
-    const openLabel = state.active === 'chatted' || state.active === 'chattedNotFavorite' ? '打开会话' : '打开角色';
+    const matchSnippet = row.chatMatchSnippet ? `<div class="mufy-recovery-chat-match"><b>${esc(chatRoleLabel(row.chatMatchRole))}${row.chatMatchTime ? ` · ${esc(new Date(row.chatMatchTime).toLocaleString('zh-CN'))}` : ''}</b><span>${esc(row.chatMatchSnippet)}</span></div>` : '';
+    const openLabel = state.active === 'chatted' || state.active === 'chattedNotFavorite' || state.active === 'chatMatches' ? '打开匹配会话' : '打开角色';
     return `<div class="mufy-recovery-row">
       ${row.avatarUrl ? `<img src="${esc(row.avatarUrl)}" alt="">` : ''}
       <div class="mufy-recovery-info">
@@ -6922,6 +7055,7 @@ roleStateReady = true;
         <div class="mufy-recovery-muted">作者：${esc(authorLabel(row))} ${visibilityBadge(row)}</div>
         <div class="mufy-recovery-muted">${esc(row.lastInteracted || '时间未知')} · ${esc(row.characterId)}</div>
         ${roleTagButtons(row)}
+        ${matchSnippet}
         ${binding}
         <a href="${esc(sessionUrl(row))}" rel="noreferrer">${openLabel}</a>
         ${archiveList}
@@ -7148,6 +7282,7 @@ roleStateReady = true;
       : state.active === 'chatted' ? state.chatted
         : state.active === 'chattedNotFavorite' ? state.chattedNotFavorite
           : state.active === 'favoriteOnly' ? state.favoriteOnly
+            : state.active === 'chatMatches' ? state.chatSearchResults
             : state.active === 'roleHistory' ? state.roleHistory
             : state.active === 'manualFavoriteChats' ? state.manualFavoriteChats
               : state.active === 'authors' ? roleRows
@@ -7164,6 +7299,11 @@ roleStateReady = true;
       ? `${groups.length} 位作者`
       : `${rows.length}/${statusSource.length}`;
     panel.querySelector('#mufy-recovery-history-entry').classList.toggle('active', state.section === 'roles' && state.active === 'roleHistory');
+    const chatSearchButton = panel.querySelector('#mufy-recovery-chat-search');
+    if (chatSearchButton) {
+      chatSearchButton.textContent = state.chatSearchLoading ? '停止搜索' : '搜聊天';
+      chatSearchButton.disabled = state.roleLoading || state.loading || state.metadataLoading;
+    }
     const exportChatButton = panel.querySelector('#mufy-recovery-export-chat');
     if (exportChatButton) {
       const context = currentRoleContext();
@@ -7182,6 +7322,7 @@ roleStateReady = true;
         : button.dataset.category === 'chatted' ? state.chatted.length
           : button.dataset.category === 'chattedNotFavorite' ? state.chattedNotFavorite.length
           : button.dataset.category === 'favoriteOnly' ? state.favoriteOnly.length
+            : button.dataset.category === 'chatMatches' ? state.chatSearchResults.length
             : button.dataset.category === 'manualFavoriteChats' ? state.manualFavoriteChats.length
                 : button.dataset.category === 'authors' ? authorGroups(roleRows, '').length
                 : button.dataset.category === 'siteSearch' ? state.siteSearchRows.length
@@ -7191,6 +7332,7 @@ roleStateReady = true;
         : button.dataset.category === 'chatted' ? '聊过的'
           : button.dataset.category === 'chattedNotFavorite' ? '聊过未收藏'
             : button.dataset.category === 'favoriteOnly' ? '收藏未聊'
+              : button.dataset.category === 'chatMatches' ? '聊天匹配'
               : button.dataset.category === 'manualFavoriteChats' ? '普通待聊'
                 : button.dataset.category === 'authors' ? '作者合集'
                 : button.dataset.category === 'siteSearch' ? '网站角色'
@@ -7412,8 +7554,9 @@ roleStateReady = true;
       #mufy-recovery-panel button{border:1px solid #666;border-radius:6px;background:#35353c;color:#eee;padding:6px 9px;cursor:pointer}
       #mufy-recovery-panel button:disabled{opacity:.5;cursor:wait}
       #mufy-recovery-run{background:#786bd4!important;border-color:#8f84dd!important}
-      #mufy-recovery-role-filter-row{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);gap:6px;min-width:0}
+      #mufy-recovery-role-filter-row{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr) auto;gap:6px;min-width:0}
       #mufy-recovery-role-filter-row > *,#mufy-recovery-mask-search{box-sizing:border-box;min-width:0;width:100%;border:1px solid #555;border-radius:6px;background:#18181c;color:#fff;padding:7px 9px;font:inherit}
+      #mufy-recovery-chat-search{width:auto!important;white-space:nowrap;background:#3a355d!important;border-color:#7569bd!important}
       #mufy-recovery-site-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin-top:6px}
       #mufy-recovery-site-actions button{min-width:0;padding:7px 6px;font-size:12px}
       #mufy-recovery-manual-auto-actions{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:6px;margin-top:6px;padding:7px;border:1px solid #5d5575;border-radius:7px;background:#24222c}
@@ -7476,6 +7619,8 @@ roleStateReady = true;
       .mufy-recovery-role-tags button:hover{border-color:#9185bd!important;background:#433c57!important;color:#fff!important}
       .mufy-recovery-role-tag{border:1px solid #4e4a5b;border-radius:12px;background:#292631;color:#aaa2c2;padding:2px 7px;font-size:10px;line-height:1.35}
       .mufy-recovery-tag-more{color:#999;font-size:10px}
+      .mufy-recovery-chat-match{display:grid;gap:3px;margin:6px 0;padding:7px 8px;border-left:3px solid #8b79db;border-radius:4px;background:#2c2939;color:#ddd;line-height:1.45}
+      .mufy-recovery-chat-match b{color:#c9c0ff;font-size:10px}.mufy-recovery-chat-match span{word-break:break-word}
       .mufy-recovery-detail{margin-top:5px;white-space:pre-wrap;color:#ccc;line-height:1.45}
       .mufy-recovery-row-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:7px}
       .mufy-recovery-row-actions button{padding:4px 7px!important;font-size:11px}
@@ -7628,6 +7773,7 @@ roleStateReady = true;
 <li><strong>普通收藏：</strong>角色卡片右侧的星星可以收藏或取消收藏。收藏时会优先使用并保存当前账号的分享链接；没有分享链接时会提示并改用普通收藏。批量收藏结束会弹窗显示分享链接收藏数和普通收藏数。</li>
 <li><strong>普通角色一键扣数：</strong>进入“网页”→“普通待聊”，可以修改默认发送内容并启动“一键扣数”。脚本会逐个打开角色、发送一次消息，并等待回复生成结束且 URL 出现 sessionId 后再进入下一个；任务可以停止、继续或取消。</li>
 <li><strong>完整导出当前聊天：</strong>进入一段已有 sessionId 的具体聊天，点击面板顶部“导出聊天”。脚本会直接分页读取服务器记录，按消息 ID 去重，并用服务器 total 与分页末尾双重校验；最终下载一个 ZIP，内含适合手机浏览器阅读的 HTML 和纯文字 TXT，不包含 JSON。再次点击可停止导出。</li>
+<li><strong>根据聊天内容找角色：</strong>在角色搜索框输入记得的聊天文字，点击“搜聊天”。脚本会读取当前账号可访问的历史会话并逐段查找，命中后显示文字片段和原会话链接；搜索期间可随时停止，不会长期保存聊天正文。</li>
 <li><strong>导出分享链接：</strong>点击“导出角色”，再选择“仅分享链接 TXT”。角色 JSON/CSV 也会附带已保存的分享链接；独立 TXT 会导出当前账号缓存中的全部分享链接，包括当前角色列表里已经找不到但本地仍有记录的角色。</li>
 <li><strong>收藏未聊转为链接收藏：</strong>进入“收藏未聊”，点击“检测未记录角色”。分享链接记录按账号隔离，本账号已有记录的角色会直接跳过；其余角色严格一次处理一个：先保存分享链接，再取消原收藏，从分享链接进入并重新收藏。任务可以中断、继续或彻底取消。</li>
 <li><strong>中断收藏：</strong>收藏任务运行时可点击“中断收藏”，选择保留剩余队列或彻底取消。脚本开关、浏览器关闭等原因留下的未完成任务不会自行恢复，必须手动选择“继续收藏”，也可以直接“取消任务”。</li>
@@ -7667,8 +7813,8 @@ roleStateReady = true;
         <div id="mufy-recovery-folder-delete-modal" hidden><div id="mufy-recovery-folder-delete-head"><strong>管理 / 批量删除收藏夹</strong><button id="mufy-recovery-folder-delete-close" title="关闭">×</button></div><div id="mufy-recovery-folder-delete-summary">读取收藏夹后显示准确的角色数量。</div><label id="mufy-recovery-folder-delete-filter"><input id="mufy-recovery-folder-delete-empty-only" type="checkbox" checked>只看空收藏夹</label><div id="mufy-recovery-folder-delete-list"><div class="mufy-recovery-folder-delete-empty">尚未读取收藏夹</div></div><div id="mufy-recovery-folder-delete-actions"><button id="mufy-recovery-folder-delete-select-all">全选当前</button><button id="mufy-recovery-folder-delete-clear">清空选择</button><button id="mufy-recovery-folder-delete-empty">一键删除空夹 (0)</button><button id="mufy-recovery-folder-delete-confirm">删除已选 (0)</button></div></div>
         <div id="mufy-recovery-log-modal" hidden><div id="mufy-recovery-log-head"><span><strong>运行日志</strong><button id="mufy-recovery-copy-error-logs">复制反馈日志</button><button id="mufy-recovery-clear-logs">清除日志</button></span><button id="mufy-recovery-log-close" title="关闭">×</button></div><div id="mufy-recovery-log-output"><div class="mufy-recovery-log-empty">暂无运行日志</div></div></div>
         <div id="mufy-recovery-role-section">
-          <div id="mufy-recovery-tabs"><button class="active" data-category="allRoles">总数 (0)</button><button data-category="chatted">聊过的 (0)</button><button data-category="chattedNotFavorite">聊过未收藏 (0)</button><button data-category="favoriteOnly">收藏未聊 (0)</button><button data-category="authors">作者合集 (0)</button><button id="mufy-recovery-export-roles" class="mufy-recovery-tab-action">导出角色</button></div>
-          <div id="mufy-recovery-role-filter-row"><input id="mufy-recovery-role-search" placeholder="搜索角色名、作者、ID或标签（支持 #标签）"><select id="mufy-recovery-status-filter" aria-label="按角色状态筛选"></select></div>
+          <div id="mufy-recovery-tabs"><button class="active" data-category="allRoles">总数 (0)</button><button data-category="chatted">聊过的 (0)</button><button data-category="chattedNotFavorite">聊过未收藏 (0)</button><button data-category="favoriteOnly">收藏未聊 (0)</button><button data-category="chatMatches">聊天匹配 (0)</button><button data-category="authors">作者合集 (0)</button><button id="mufy-recovery-export-roles" class="mufy-recovery-tab-action">导出角色</button></div>
+          <div id="mufy-recovery-role-filter-row"><input id="mufy-recovery-role-search" placeholder="搜索角色；输入聊天内容后可点右侧搜聊天"><select id="mufy-recovery-status-filter" aria-label="按角色状态筛选"></select><button id="mufy-recovery-chat-search" title="根据聊天内容查找角色">搜聊天</button></div>
           <div id="mufy-recovery-role-read-options"><span>读取方式</span><select id="mufy-recovery-role-read-mode" aria-label="角色读取方式"><option value="full">完整读取</option><option value="latest">查找最新几页</option></select><label>页数 <input id="mufy-recovery-role-latest-pages" type="number" min="1" max="500" value="2" aria-label="读取页数"></label><span>每页 20 个</span></div>
           <div id="mufy-recovery-role-actions"><button id="mufy-recovery-run">找回角色链接</button><button id="mufy-recovery-refresh-status" title="更新最近一次链接读取到的角色状态和作者名称">更新状态</button><button id="mufy-recovery-stop-action" title="整理或管理收藏夹">收藏夹</button></div><button id="mufy-recovery-favorite-visible" hidden>收藏当前列表</button><div id="mufy-recovery-share-recovery-controls" hidden><button id="mufy-recovery-share-recovery-one">检测全部收藏未聊</button><button id="mufy-recovery-share-recovery-cancel" hidden>取消任务</button></div>
         </div>
@@ -7903,6 +8049,7 @@ roleStateReady = true;
     panel.querySelector('#mufy-recovery-import-masks').onclick = () => panel.querySelector('#mufy-recovery-mask-file').click();
     panel.querySelector('#mufy-recovery-mask-file').onchange = event => importMasks(event.target.files?.[0]);
     panel.querySelector('#mufy-recovery-role-search').oninput = event => { state.roleQuery = event.target.value.trim().toLowerCase(); render(); };
+    panel.querySelector('#mufy-recovery-chat-search').onclick = searchRolesByChatRecord;
     panel.querySelector('#mufy-recovery-refresh-favorite-states').onclick = refreshCapturedFavoriteStates;
     panel.querySelector('#mufy-recovery-select-unfavorite-site').onclick = selectUnfavoriteSiteRows;
     panel.querySelector('#mufy-recovery-favorite-selected-site').onclick = favoriteSelectedSiteRows;
@@ -7931,7 +8078,7 @@ roleStateReady = true;
       button.onclick = () => {
         const nextSection = button.dataset.section;
         state.section = nextSection === 'masks' ? 'masks' : (nextSection === 'web' ? 'web' : 'roles');
-        if (state.section === 'roles' && !['allRoles', 'chatted', 'chattedNotFavorite', 'favoriteOnly', 'roleHistory', 'authors'].includes(state.active)) state.active = 'allRoles';
+        if (state.section === 'roles' && !['allRoles', 'chatted', 'chattedNotFavorite', 'favoriteOnly', 'chatMatches', 'roleHistory', 'authors'].includes(state.active)) state.active = 'allRoles';
         if (state.section === 'masks' && state.active !== 'masks' && state.active !== 'library') state.active = 'masks';
         if (state.section === 'web' && state.active !== 'siteSearch' && state.active !== 'siteAuthors' && state.active !== 'manualFavoriteChats') state.active = 'siteSearch';
         render();
