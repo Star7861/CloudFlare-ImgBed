@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.28
+// @version      3.0.0-dev.29
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.28';
+  const SCRIPT_VERSION = '3.0.0-dev.29';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const MASK_LIBRARY_KEY = 'mufy-recovery-mask-library-v1';
   const MASK_LIBRARY_BACKUP_KEY = 'mufy-recovery-mask-library-backup-v1';
@@ -354,7 +354,9 @@
     const id = String(characterId || '');
     const config = modelConfigFromObject(value);
     if (!id || !config) return false;
-    chatModelConfigCache.set(id, { ...config, savedAt: Date.now() });
+    const saved = { ...config, savedAt: Date.now() };
+    chatModelConfigCache.set(id, saved);
+    chatModelConfigCache.set('__last__', saved);
     saveChatModelConfigCache();
     return true;
   }
@@ -1015,6 +1017,55 @@ roleStateReady = true;
   async function resolveManualChatModelConfig(characterId, timeoutMs = 12000) {
     const id = String(characterId || '');
     const startedAt = Date.now();
+    while (Date.now() - startedAt < Math.min(timeoutMs, 1800)) {
+      const cached = chatModelConfigCache.get(id);
+      if (cached?.modelId && cached?.modelTemplateId) return cached;
+      await wait(250);
+    }
+    try {
+      const headers = { Accept: 'application/json' };
+      if (authorization) headers.Authorization = authorization;
+      const response = await pageWindow.fetch(new URL('/api/models/tree', location.origin).href, {
+        method: 'GET', credentials: 'include', cache: 'no-store', headers
+      });
+      const body = await response.json();
+      const rows = flattenModelMonitorRows(body?.data || body);
+      const normalizeLabel = value => String(value || '').toLocaleLowerCase('zh-CN').replace(/[\s·•—_()（）【】\[\]]+/g, '');
+      const composerRect = findManualChatComposer().textarea?.getBoundingClientRect?.();
+      const visibleLabels = [...document.querySelectorAll('button,[role="button"]')]
+        .filter(element => !element.closest('#mufy-recovery-panel') && isVisibleElement(element))
+        .map(element => {
+          const text = String(element.textContent || element.getAttribute('aria-label') || element.title || '').trim();
+          const rect = element.getBoundingClientRect?.();
+          const distance = composerRect && rect
+            ? Math.abs((rect.top + rect.bottom) / 2 - (composerRect.top + composerRect.bottom) / 2)
+            : 9999;
+          return { text, distance };
+        })
+        .filter(item => item.text && item.text.length <= 80 && item.distance <= 240);
+      const matches = rows.map(row => {
+        const name = normalizeLabel(row.name);
+        const score = visibleLabels.reduce((best, item) => {
+          const normalized = normalizeLabel(item.text);
+          if (!normalized || !name) return best;
+          if (normalized === name) return Math.max(best, 2000 + name.length - item.distance);
+          if (normalized.includes(name) || name.includes(normalized)) return Math.max(best, 1000 + name.length - item.distance);
+          return best;
+        }, 0);
+        return { row, score };
+      }).filter(item => item.score > 0 && item.row.modelId && item.row.templateId)
+        .sort((a, b) => b.score - a.score);
+      if (matches.length) {
+        const selected = { modelId: Number(matches[0].row.modelId), modelTemplateId: Number(matches[0].row.templateId) };
+        rememberChatModelConfig(id, selected);
+        appendRunLog('info', `一键扣数已按页面模型名称“${matches[0].row.name}”匹配 modelId=${selected.modelId}、modelTemplateId=${selected.modelTemplateId}。`);
+        return selected;
+      }
+    } catch (error) {
+      appendRunLog('warn', '一键扣数自动匹配当前模型失败', error);
+    }
+    const recent = chatModelConfigCache.get('__last__');
+    if (recent?.modelId && recent?.modelTemplateId) return recent;
     while (Date.now() - startedAt < timeoutMs) {
       const cached = chatModelConfigCache.get(id);
       if (cached?.modelId && cached?.modelTemplateId) return cached;
