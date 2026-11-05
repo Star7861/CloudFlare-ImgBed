@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.17
+// @version      3.0.0-dev.18
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.17';
+  const SCRIPT_VERSION = '3.0.0-dev.18';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const MASK_LIBRARY_KEY = 'mufy-recovery-mask-library-v1';
   const MASK_LIBRARY_BACKUP_KEY = 'mufy-recovery-mask-library-backup-v1';
@@ -8326,7 +8326,7 @@ roleStateReady = true;
       .mufy-quote-action-separator{height:14px;width:1px;flex:none;border-radius:999px;background:#ffffff33}
       .mufy-quote-action-button{display:flex;align-items:center;gap:4px;padding-right:16px;color:#e9c77f;font-size:14px;line-height:1;cursor:pointer;white-space:nowrap;user-select:none}
       .mufy-quote-action-button:hover{opacity:.72}.mufy-quote-action-button:active{transform:translateY(1px)}
-      #mufy-recovery-model-dots{position:absolute;left:50%;bottom:49px;min-width:22px;max-width:76px;display:flex;align-items:center;justify-content:center;gap:3px;flex-wrap:wrap;padding:4px 5px;border:1px solid #ffffff30;border-radius:10px;background:#17171ded;box-shadow:0 3px 10px #0007;transform:translateX(-50%);pointer-events:auto}#mufy-recovery-model-dots[hidden]{display:none}#mufy-recovery-model-dots i,.mufy-model-monitor-dot{display:block;flex:none;width:8px;height:8px;border-radius:50%;box-shadow:0 0 0 1px #0008}.is-green{background:#24ba7a!important;color:#62dca8!important}.is-yellow{background:#e7cf58!important;color:#f1df82!important}.is-red{background:#e94f46!important;color:#ff8c85!important}.is-gray{background:#7b7b85!important;color:#aaa!important}#mufy-recovery-model-dots b{color:#bbb;font-size:8px}
+      #mufy-recovery-model-dots{position:absolute;left:50%;bottom:52px;box-sizing:border-box;min-width:34px;max-width:96px;min-height:28px;display:flex;align-items:center;justify-content:center;gap:5px;flex-wrap:wrap;padding:6px 8px;border:1px solid #ffffff48;border-radius:14px;background:#17171df2;box-shadow:0 4px 14px #0009;transform:translateX(-50%);pointer-events:auto;cursor:pointer}#mufy-recovery-model-dots[hidden]{display:none}#mufy-recovery-toggle.mufy-docked-right #mufy-recovery-model-dots{left:auto;right:22px;transform:none}#mufy-recovery-toggle.mufy-docked-left #mufy-recovery-model-dots{left:22px;right:auto;transform:none}#mufy-recovery-model-dots i,.mufy-model-monitor-dot{display:block;flex:none;width:10px;height:10px;border-radius:50%;box-shadow:0 0 0 1px #0008,0 0 6px currentColor}.is-green{background:#24ba7a!important;color:#62dca8!important}.is-yellow{background:#e7cf58!important;color:#f1df82!important}.is-red{background:#e94f46!important;color:#ff8c85!important}.is-gray{background:#7b7b85!important;color:#aaa!important}#mufy-recovery-model-dots b{color:#ddd;font-size:9px}
       #mufy-recovery-model-modal{position:absolute;inset:48px 10px 10px;z-index:11;display:flex;flex-direction:column;overflow:hidden;background:#292930;border:1px solid #666;border-radius:9px;box-shadow:0 12px 32px #000b}#mufy-recovery-model-modal[hidden]{display:none}
       #mufy-recovery-model-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 11px;background:#35353e;border-bottom:1px solid #4b4b55}#mufy-recovery-model-head>span{display:grid;gap:2px}#mufy-recovery-model-summary{color:#aaa;font-size:10px;font-weight:400}#mufy-recovery-model-head button{padding:1px 7px!important;font-size:20px!important}
       #mufy-recovery-model-tools{display:grid;grid-template-columns:1fr auto;gap:7px;padding:9px 10px;border-bottom:1px solid #414149}#mufy-recovery-model-search{box-sizing:border-box;min-width:0;width:100%;border:1px solid #555;border-radius:6px;background:#18181c;color:#fff;padding:7px 9px;font:inherit}#mufy-recovery-model-refresh{background:#51477b!important;border-color:#7e70b5!important}
