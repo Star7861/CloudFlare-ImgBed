@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.7
+// @version      3.0.0-dev.8
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.7';
+  const SCRIPT_VERSION = '3.0.0-dev.8';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const MASK_LIBRARY_KEY = 'mufy-recovery-mask-library-v1';
   const MASK_LIBRARY_BACKUP_KEY = 'mufy-recovery-mask-library-backup-v1';
@@ -523,6 +523,9 @@
     manualAutoChatMessage: loadManualAutoChatMessage(),
     manualAutoChatRunning: Boolean(loadManualAutoChatJob() && !loadManualAutoChatJob()?.paused),
     manualAutoChatStopRequested: false,
+    chatExportLoading: false,
+    chatExportStopRequested: false,
+    chatExportAbortController: null,
     archived: cachedRoles?.archived || [],
     roleHistory: [],
     archiveCheckedCharacterIds: new Set(cachedRoles?.archiveCheckedCharacterIds || []),
@@ -6270,6 +6273,231 @@ roleStateReady = true;
     const modal = panel?.querySelector('#mufy-recovery-author-favorite-modal');
     if (modal) modal.hidden = false;
   }
+
+  const CHAT_EXPORT_FAST_PAGE_SIZE = 100;
+  const CHAT_EXPORT_SAFE_PAGE_SIZE = 16;
+
+  function dialogRowsFromPage(data) {
+    if (Array.isArray(data)) return data;
+    for (const key of ['data', 'rows', 'list', 'records', 'items', 'content', 'results']) {
+      if (Array.isArray(data?.[key])) return data[key];
+    }
+    return [];
+  }
+
+  async function requestDialogPage(context, pageNum, pageSize, signal) {
+    const url = new URL('/api/dialogs/query', location.origin);
+    url.searchParams.set('sessionId', context.sessionId);
+    url.searchParams.set('pageNum', String(pageNum));
+    url.searchParams.set('pageSize', String(pageSize));
+    url.searchParams.set('characterId', context.characterId);
+    const headers = { Accept: 'application/json' };
+    if (authorization) headers.Authorization = authorization;
+    const options = { method: 'GET', credentials: 'include', cache: 'no-store', headers, signal };
+    let response;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      response = await pageWindow.fetch(url.href, options);
+      if (response.status !== 429 && response.status < 500) break;
+      if (attempt < 2) await wait(1200 * (attempt + 1));
+    }
+    if ((response.status === 401 || response.status === 403) && authorization) {
+      const cookieHeaders = new pageWindow.Headers(headers);
+      cookieHeaders.delete('Authorization');
+      response = await pageWindow.fetch(url.href, { ...options, headers: cookieHeaders });
+    }
+    if (response.status === 401 || response.status === 403) throw new Error(loginErrorMessage(response.status, '聊天记录读取'));
+    if (!response.ok) throw new Error(`聊天记录接口失败（HTTP ${response.status}）`);
+    const body = await response.json();
+    if (body?.code !== 200 || !body?.data) throw new Error(body?.reason || body?.message || '聊天记录接口返回异常');
+    return body.data;
+  }
+
+  async function readCompleteDialogHistory(context, pageSize) {
+    const collected = [];
+    const ids = new Set();
+    const totals = new Set();
+    const pageSignatures = new Set();
+    let duplicates = 0;
+    let reachedEnd = false;
+    let pageNum = 1;
+    for (; pageNum <= 5000; pageNum += 1) {
+      if (state.chatExportStopRequested) throw new DOMException('聊天导出已停止', 'AbortError');
+      state.status = `正在完整读取当前聊天：第 ${pageNum} 页，已取得 ${ids.size} 条……`;
+      render();
+      const data = await requestDialogPage(context, pageNum, pageSize, state.chatExportAbortController?.signal);
+      const rows = dialogRowsFromPage(data).filter(row => row && typeof row === 'object');
+      const total = Number(data?.total ?? data?.totalCount ?? data?.count);
+      if (Number.isFinite(total) && total >= 0) totals.add(total);
+      const signature = rows.map(row => String(row.dialogsId || row.dialogId || row.id || '')).join('|');
+      if (signature && pageSignatures.has(signature)) break;
+      if (signature) pageSignatures.add(signature);
+      for (const row of rows) {
+        const id = String(row.dialogsId || row.dialogId || row.id || '');
+        const fallback = `${row.role || ''}|${row.createdTime || row.updatedTime || ''}|${JSON.stringify(row.content || '')}`;
+        const key = id || fallback;
+        if (ids.has(key)) {
+          duplicates += 1;
+          continue;
+        }
+        ids.add(key);
+        collected.push(row);
+      }
+      const hasNext = data?.hasNext ?? data?.hasMore;
+      if (hasNext === false || !rows.length) {
+        reachedEnd = hasNext === false || !rows.length;
+        break;
+      }
+      await wait(80);
+    }
+    const expectedTotal = totals.size ? Math.max(...totals) : null;
+    const countMatchesTotal = expectedTotal == null ? false : collected.length === expectedTotal;
+    return {
+      rows: collected.reverse(),
+      expectedTotal,
+      reachedEnd,
+      countMatchesTotal,
+      complete: reachedEnd && countMatchesTotal && totals.size === 1,
+      pagesRead: pageNum,
+      duplicates,
+      totals: [...totals].sort((a, b) => a - b),
+      pageSize
+    };
+  }
+
+  function plainDialogContent(row) {
+    const pieces = Array.isArray(row?.content) ? row.content : [row?.content];
+    return pieces.filter(item => item != null).map(item => {
+      const raw = typeof item === 'string' ? item : (item?.text != null ? String(item.text) : JSON.stringify(item));
+      const holder = document.createElement('div');
+      holder.innerHTML = raw.replace(/<br\s*\/?>/gi, '\n');
+      holder.querySelectorAll('p,div,li,tr,details,hr').forEach(node => node.append('\n'));
+      return String(holder.textContent || '').replace(/\n{3,}/g, '\n\n').trim();
+    }).filter(Boolean).join('\n');
+  }
+
+  function safeDialogHtml(row) {
+    const pieces = Array.isArray(row?.content) ? row.content : [row?.content];
+    const holder = document.createElement('div');
+    holder.innerHTML = pieces.filter(item => item != null).map(item => {
+      if (typeof item === 'string') return item;
+      if (item?.text != null) return String(item.text);
+      return `<pre>${esc(JSON.stringify(item, null, 2))}</pre>`;
+    }).join('\n');
+    holder.querySelectorAll('script,iframe,frame,object,embed,link,meta,base,form,input,button,textarea,select').forEach(node => node.remove());
+    holder.querySelectorAll('*').forEach(node => {
+      [...node.attributes].forEach(attribute => {
+        const name = attribute.name.toLowerCase();
+        const value = String(attribute.value || '');
+        if (name.startsWith('on') || ((name === 'href' || name === 'src') && /^\s*(?:javascript|data:text\/html)/i.test(value))) node.removeAttribute(attribute.name);
+        if (name === 'style' && /(?:expression|url\s*\()/i.test(value)) node.removeAttribute(attribute.name);
+      });
+    });
+    return holder.innerHTML;
+  }
+
+  function chatRoleLabel(role) {
+    return role === 'user' ? '我' : role === 'assistant' ? '角色' : role === 'system' ? '系统' : (role || '未知');
+  }
+
+  function chatExportName(value) {
+    return String(value || '当前聊天').replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 60) || '当前聊天';
+  }
+
+  function makeChatExportFiles(result, context, characterName) {
+    const exportedAt = new Date().toISOString();
+    const manifest = {
+      schemaVersion: 1,
+      exportedAt,
+      sourceUrl: pageWindow.location.href,
+      characterName,
+      characterId: context.characterId,
+      sessionId: context.sessionId,
+      complete: result.complete,
+      expectedTotal: result.expectedTotal,
+      exportedCount: result.rows.length,
+      pagesRead: result.pagesRead,
+      pageSize: result.pageSize,
+      duplicatesRemoved: result.duplicates,
+      totalsObserved: result.totals,
+      checks: {
+        reachedPaginationEnd: result.reachedEnd,
+        countMatchesServerTotal: result.countMatchesTotal,
+        serverTotalStayedStable: result.totals.length === 1
+      }
+    };
+    const warning = result.complete
+      ? '完整性校验通过：已到达分页末尾，去重后的消息数与服务器 total 完全一致。'
+      : '警告：完整性校验未通过。文件仍保留已读取内容，但不能视为完整备份。';
+    const text = [
+      `角色：${characterName}`,
+      `会话 ID：${context.sessionId}`,
+      `导出时间：${new Date(exportedAt).toLocaleString('zh-CN')}`,
+      `消息：${result.rows.length}/${result.expectedTotal ?? '未知'}`,
+      warning,
+      '',
+      ...result.rows.flatMap(row => [`[${row.createdTime || row.updatedTime || ''}] ${chatRoleLabel(row.role)}`, plainDialogContent(row), ''])
+    ].join('\n');
+    const articles = result.rows.map(row => `<article class="message ${esc(row.role || '')}"><header><b>${esc(chatRoleLabel(row.role))}</b><time>${esc(row.createdTime || row.updatedTime || '')}</time></header><div class="content">${safeDialogHtml(row)}</div></article>`).join('\n');
+    const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(characterName)} - Mufy 聊天导出</title><style>body{max-width:960px;margin:auto;padding:24px;background:#17171b;color:#eee;font:15px/1.65 system-ui}h1{font-size:22px}.summary,.message{padding:14px 16px;margin:12px 0;border:1px solid #444;border-radius:10px;background:#23232a}.summary.ok{border-color:#398b5d}.summary.warn{border-color:#b88435}.message header{display:flex;justify-content:space-between;gap:12px;color:#bdb8ef}.message.user{border-left:4px solid #6d9df7}.message.assistant{border-left:4px solid #a879e8}.content{overflow-wrap:anywhere}.content img{max-width:100%;height:auto}time{font-size:12px;color:#999}pre{white-space:pre-wrap}</style></head><body><h1>${esc(characterName)}</h1><section class="summary ${result.complete ? 'ok' : 'warn'}"><b>${esc(warning)}</b><div>消息：${result.rows.length}/${result.expectedTotal ?? '未知'} · 会话：${esc(context.sessionId)} · 导出：${esc(new Date(exportedAt).toLocaleString('zh-CN'))}</div></section>${articles}</body></html>`;
+    return [
+      { name: '完整性报告.json', content: JSON.stringify(manifest, null, 2) },
+      { name: '聊天记录.json', content: JSON.stringify({ manifest, messages: result.rows }, null, 2) },
+      { name: '聊天记录.txt', content: text },
+      { name: '聊天记录.html', content: html }
+    ];
+  }
+
+  async function exportCurrentChat() {
+    if (state.chatExportLoading) {
+      state.chatExportStopRequested = true;
+      state.chatExportAbortController?.abort();
+      state.status = '正在停止当前聊天导出……';
+      render();
+      return;
+    }
+    const context = currentRoleContext();
+    if (pageWindow.location.pathname !== '/chat' || !context.characterId || !context.sessionId) {
+      state.status = '请先进入一段已经产生 sessionId 的具体角色聊天，再导出当前聊天。';
+      render();
+      return;
+    }
+    state.chatExportLoading = true;
+    state.chatExportStopRequested = false;
+    state.chatExportAbortController = new AbortController();
+    render();
+    try {
+      scanStoredAuthorization();
+      let result = await readCompleteDialogHistory(context, CHAT_EXPORT_FAST_PAGE_SIZE);
+      if (!result.complete && !state.chatExportStopRequested) {
+        state.status = '快速分页校验未通过，正在按网站原始每页 16 条重新读取核对……';
+        render();
+        result = await readCompleteDialogHistory(context, CHAT_EXPORT_SAFE_PAGE_SIZE);
+      }
+      if (state.chatExportStopRequested) throw new DOMException('聊天导出已停止', 'AbortError');
+      const known = [...state.chatted, ...state.favoriteOnly, ...state.roleHistory, ...state.siteSearchRows]
+        .find(row => String(row?.characterId || '') === context.characterId);
+      const characterName = known?.name || document.querySelector('h1,h2')?.textContent?.trim() || '当前角色';
+      const files = makeChatExportFiles(result, context, characterName);
+      const date = new Date().toISOString().slice(0, 10);
+      downloadBlob(`mufy-chat-${chatExportName(characterName)}-${date}.zip`, storedZip(files));
+      state.status = result.complete
+        ? `当前聊天已完整导出：${result.rows.length}/${result.expectedTotal} 条，分页末尾和服务器总数校验均通过。`
+        : `聊天导出完成但校验未通过：读取 ${result.rows.length}/${result.expectedTotal ?? '未知'} 条；压缩包内已写明不完整原因。`;
+      appendRunLog(result.complete ? 'info' : 'warn', state.status);
+    } catch (error) {
+      if (error?.name === 'AbortError' || state.chatExportStopRequested) state.status = '已停止聊天导出，未生成不完整文件。';
+      else {
+        state.status = `导出当前聊天失败：${explainFailure(error)}`;
+        appendRunLog('error', '导出当前聊天失败', error);
+      }
+    } finally {
+      state.chatExportLoading = false;
+      state.chatExportStopRequested = false;
+      state.chatExportAbortController = null;
+      render();
+    }
+  }
+
   function downloadBlob(name, blob) {
     // Userscript 管理器可能把脚本放在隔离世界中；Blob URL 与页面 DOM 必须来自同一页面上下文，
     // 否则页面里的 <a> 可能无法解析脚本沙盒创建的 URL，表现为点击后毫无反应。
@@ -6957,6 +7185,13 @@ roleStateReady = true;
       ? `${groups.length} 位作者`
       : `${rows.length}/${statusSource.length}`;
     panel.querySelector('#mufy-recovery-history-entry').classList.toggle('active', state.section === 'roles' && state.active === 'roleHistory');
+    const exportChatButton = panel.querySelector('#mufy-recovery-export-chat');
+    if (exportChatButton) {
+      const context = currentRoleContext();
+      exportChatButton.disabled = !state.chatExportLoading && (!context.characterId || !context.sessionId || pageWindow.location.pathname !== '/chat');
+      exportChatButton.textContent = state.chatExportLoading ? '停止导出' : '导出聊天';
+      exportChatButton.title = exportChatButton.disabled ? '进入一段具体聊天后可完整导出当前会话' : '完整分页导出当前聊天';
+    }
     const manualChatNextButton = panel.querySelector('#mufy-recovery-manual-chat-next');
     if (manualChatNextButton) {
       manualChatNextButton.hidden = state.active !== 'manualFavoriteChats';
@@ -7081,7 +7316,9 @@ roleStateReady = true;
       #mufy-recovery-title{display:flex;align-items:center;gap:6px;min-width:0}
       #mufy-recovery-title>span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
       #mufy-recovery-head button{background:none;border:0;color:#bbb;font-size:20px;cursor:pointer}
-      #mufy-recovery-log-entry,#mufy-recovery-history-entry{flex:none;padding:5px 8px!important;border:1px solid #666!important;border-radius:6px!important;background:#3a3a44!important;color:#ddd!important;font:600 11px/1.2 system-ui!important;white-space:nowrap}
+      #mufy-recovery-export-chat,#mufy-recovery-log-entry,#mufy-recovery-history-entry{flex:none;padding:5px 8px!important;border:1px solid #666!important;border-radius:6px!important;background:#3a3a44!important;color:#ddd!important;font:600 11px/1.2 system-ui!important;white-space:nowrap}
+      #mufy-recovery-export-chat{margin-left:auto}
+      #mufy-recovery-export-chat:disabled{opacity:.45;cursor:not-allowed!important}
       #mufy-recovery-log-entry{margin-left:auto}
       #mufy-recovery-history-entry{margin-left:6px;margin-right:10px}
       #mufy-recovery-history-entry.active{background:#786bd4!important;border-color:#8f84dd!important;color:#fff!important}
@@ -7403,7 +7640,7 @@ roleStateReady = true;
     panel = document.createElement('div');
     panel.id = 'mufy-recovery-panel';
     panel.innerHTML = `<div id="mufy-recovery-resize-handle" title="上下拖动调整面板高度" aria-label="上下拖动调整面板高度"></div>
-      <div id="mufy-recovery-head"><span id="mufy-recovery-title"><span>Mufy 数据助手 <small class="mufy-recovery-version">v${DISPLAY_VERSION}</small> <small id="mufy-recovery-count">0/0</small></span><button id="mufy-recovery-help" title="使用说明" aria-label="使用说明">?</button></span><button id="mufy-recovery-log-entry" title="查看运行日志">日志</button><button id="mufy-recovery-history-entry" title="查看本账号历史角色索引">索引</button><button id="mufy-recovery-close">×</button></div>
+      <div id="mufy-recovery-head"><span id="mufy-recovery-title"><span>Mufy 数据助手 <small class="mufy-recovery-version">v${DISPLAY_VERSION}</small> <small id="mufy-recovery-count">0/0</small></span><button id="mufy-recovery-help" title="使用说明" aria-label="使用说明">?</button></span><button id="mufy-recovery-export-chat" title="进入一段具体聊天后可完整导出当前会话">导出聊天</button><button id="mufy-recovery-log-entry" title="查看运行日志">日志</button><button id="mufy-recovery-history-entry" title="查看本账号历史角色索引">索引</button><button id="mufy-recovery-close">×</button></div>
       <div id="mufy-recovery-help-modal" hidden><div id="mufy-recovery-help-head"><strong>使用说明</strong><button id="mufy-recovery-help-close" title="关闭说明">×</button></div><div id="mufy-recovery-help-body"><ol>
 <li><strong>找回聊过的角色：</strong>打开“角色”面板，点击“找回角色链接”。可以选择完整读取或查找最新几页；读取过程中可以点击“停止找回”，之后再继续读取，已读取的数据会保留。</li>
 <li><strong>收藏趋势榜角色：</strong>打开 Mufy 趋势榜页面，再打开脚本面板。趋势榜返回的数据已经包含可靠的收藏状态，不需要点击“获取收藏状态”；直接在网页角色列表中多选要收藏的角色，点击“立即收藏”即可。收藏完成后回到“角色”区域点击“更新状态”，可核对这些角色的收藏和公开状态。</li>
@@ -7411,6 +7648,7 @@ roleStateReady = true;
 <li><strong>整理或删除收藏夹：</strong>点击角色区域的“收藏夹”，可以按作者创建或复用收藏夹并整理角色，也可以进入管理界面核对角色数量、筛选空收藏夹或批量删除。删除收藏夹不会取消角色收藏，且不能由脚本撤回。</li>
 <li><strong>普通收藏：</strong>角色卡片右侧的星星可以收藏或取消收藏。收藏时会优先使用并保存当前账号的分享链接；没有分享链接时会提示并改用普通收藏。批量收藏结束会弹窗显示分享链接收藏数和普通收藏数。</li>
 <li><strong>普通角色一键扣数：</strong>进入“网页”→“普通待聊”，可以修改默认发送内容并启动“一键扣数”。脚本会逐个打开角色、发送一次消息，并等待回复生成结束且 URL 出现 sessionId 后再进入下一个；任务可以停止、继续或取消。</li>
+<li><strong>完整导出当前聊天：</strong>进入一段已有 sessionId 的具体聊天，点击面板顶部“导出聊天”。脚本会直接分页读取服务器记录，按消息 ID 去重，并用服务器 total 与分页末尾双重校验；压缩包包含原始 JSON、可阅读 HTML、纯文本和完整性报告。再次点击可停止导出。</li>
 <li><strong>导出分享链接：</strong>点击“导出角色”，再选择“仅分享链接 TXT”。角色 JSON/CSV 也会附带已保存的分享链接；独立 TXT 会导出当前账号缓存中的全部分享链接，包括当前角色列表里已经找不到但本地仍有记录的角色。</li>
 <li><strong>收藏未聊转为链接收藏：</strong>进入“收藏未聊”，点击“检测未记录角色”。分享链接记录按账号隔离，本账号已有记录的角色会直接跳过；其余角色严格一次处理一个：先保存分享链接，再取消原收藏，从分享链接进入并重新收藏。任务可以中断、继续或彻底取消。</li>
 <li><strong>中断收藏：</strong>收藏任务运行时可点击“中断收藏”，选择保留剩余队列或彻底取消。脚本开关、浏览器关闭等原因留下的未完成任务不会自行恢复，必须手动选择“继续收藏”，也可以直接“取消任务”。</li>
@@ -7547,6 +7785,7 @@ roleStateReady = true;
       panel.style.display = panel.style.display === 'none' ? 'flex' : 'none';
     };
     panel.querySelector('#mufy-recovery-close').onclick = () => { panel.style.display = 'none'; };
+    panel.querySelector('#mufy-recovery-export-chat').onclick = exportCurrentChat;
     panel.querySelector('#mufy-recovery-history-entry').onclick = () => {
       state.section = 'roles';
       state.active = 'roleHistory';
