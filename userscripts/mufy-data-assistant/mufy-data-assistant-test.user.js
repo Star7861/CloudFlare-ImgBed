@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.34
+// @version      3.0.0-dev.35
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.34';
+  const SCRIPT_VERSION = '3.0.0-dev.35';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const MASK_LIBRARY_KEY = 'mufy-recovery-mask-library-v1';
   const MASK_LIBRARY_BACKUP_KEY = 'mufy-recovery-mask-library-backup-v1';
@@ -741,7 +741,7 @@
     autoSwitchRunning: false,
     autoSwitchKey: '',
     visibleRows: [],
-    section: 'roles',
+    section: 'home',
     active: 'allRoles',
     roleQuery: '',
     siteSearchRows: [],
@@ -8596,12 +8596,25 @@ roleStateReady = true;
     const chatSection = panel.querySelector('#mufy-recovery-chat-section');
     const maskSection = panel.querySelector('#mufy-recovery-mask-section');
     const webSection = panel.querySelector('#mufy-recovery-web-section');
+    const sectionHome = panel.querySelector('#mufy-recovery-section-home');
+    const sectionNav = panel.querySelector('#mufy-recovery-section-nav');
+    const sectionTitle = panel.querySelector('#mufy-recovery-section-title');
+    const sectionNames = { roles: '角色', favorites: '收藏', chats: '聊天记录', masks: '面具', web: '网页' };
+    if (sectionHome) sectionHome.hidden = state.section !== 'home';
+    if (sectionNav) sectionNav.hidden = state.section === 'home';
+    if (sectionTitle) sectionTitle.textContent = sectionNames[state.section] || '';
+    const controls = panel.querySelector('#mufy-recovery-controls');
+    if (controls) controls.classList.toggle('is-section-home', state.section === 'home');
+    const statusBox = panel.querySelector('#mufy-recovery-status');
+    if (statusBox) statusBox.hidden = state.section === 'home';
+    if (favoriteTaskControls && state.section === 'home') favoriteTaskControls.hidden = true;
     if (roleSection) roleSection.hidden = state.section !== 'roles';
     if (favoriteSection) favoriteSection.hidden = state.section !== 'favorites';
     if (chatSection) chatSection.hidden = state.section !== 'chats';
     if (maskSection) maskSection.hidden = state.section !== 'masks';
     if (webSection) webSection.hidden = state.section !== 'web';
-    panel.querySelectorAll('[data-section]').forEach(button => button.classList.toggle('active', button.dataset.section === state.section));
+    const resultList = panel.querySelector('#mufy-recovery-list');
+    if (resultList) resultList.hidden = state.section === 'home';
     const roleFilterRow = panel.querySelector('#mufy-recovery-role-filter-row');
     const maskSearch = panel.querySelector('#mufy-recovery-mask-search');
     if (roleFilterRow) roleFilterRow.hidden = state.section !== 'roles';
@@ -8642,9 +8655,11 @@ roleStateReady = true;
         ? !query || `${row.name} ${row.characterId || ''} ${row.lastSessionId || ''} ${row.maskId || ''} ${row.maskName || ''} ${row.remark || ''}`.toLowerCase().includes(query)
         : matchesRole(row, query));
     const groups = state.active === 'authors' || state.active === 'siteAuthors' ? authorGroups(statusSource, query) : [];
-    panel.querySelector('#mufy-recovery-count').textContent = state.active === 'authors' || state.active === 'siteAuthors'
-      ? `${groups.length} 位作者`
-      : `${rows.length}/${statusSource.length}`;
+    panel.querySelector('#mufy-recovery-count').textContent = state.section === 'home'
+      ? '选择功能'
+      : state.active === 'authors' || state.active === 'siteAuthors'
+        ? `${groups.length} 位作者`
+        : `${rows.length}/${statusSource.length}`;
     panel.querySelector('#mufy-recovery-history-entry').classList.toggle('active', state.section === 'roles' && state.active === 'roleHistory');
     const chatSearchButton = panel.querySelector('#mufy-recovery-chat-search');
     if (chatSearchButton) {
@@ -8897,6 +8912,7 @@ roleStateReady = true;
       #mufy-recovery-resize-handle::after,#mufy-recovery-resize-handle-bottom::after{content:'';width:48px;height:4px;border-radius:3px;background:#777;box-shadow:0 1px 2px #0007}
       #mufy-recovery-panel.is-resizing{user-select:none}
       #mufy-recovery-controls{display:grid;gap:7px;padding:9px 10px;flex:none;overflow:auto;max-height:55%}
+      #mufy-recovery-controls.is-section-home{flex:1;max-height:none;align-content:start}
       #mufy-recovery-role-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;align-items:stretch}
       #mufy-recovery-favorite-actions{display:grid;grid-template-columns:1fr;gap:6px;align-items:stretch}
       #mufy-recovery-chat-tools{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;align-items:stretch}
@@ -8938,9 +8954,16 @@ roleStateReady = true;
       #mufy-recovery-favorite-task-controls{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:6px;padding:7px;border:1px solid #665d35;border-radius:7px;background:#2c281d}
       #mufy-recovery-favorite-task-main{background:#735f22!important;border-color:#b69637!important;color:#fff0b0!important;font-weight:700}
       #mufy-recovery-favorite-task-cancel{background:#572b30!important;border-color:#945059!important;color:#ffc6cb!important}
-      #mufy-recovery-section-tabs{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:6px}
-      #mufy-recovery-section-tabs button{font-weight:700;background:#282832}
-      #mufy-recovery-section-tabs button.active{background:#786bd4;border-color:#8f84dd;color:#fff}
+      #mufy-recovery-section-home{display:grid;gap:10px;padding:4px 1px 6px}
+      #mufy-recovery-section-home-head{display:grid;gap:3px;padding:2px 3px;color:#eee}#mufy-recovery-section-home-head small{color:#999;font-size:11px;font-weight:400}
+      #mufy-recovery-section-cards{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+      .mufy-recovery-section-card{min-height:74px!important;display:grid!important;align-content:center;justify-items:start;gap:5px;padding:11px 12px!important;text-align:left;background:#292934!important;border-color:#555566!important}
+      .mufy-recovery-section-card strong{font-size:14px;color:#f4f1ff}.mufy-recovery-section-card small{font-size:10px;line-height:1.35;color:#aaa;font-weight:400}
+      .mufy-recovery-section-card:first-child{border-color:#8275ca!important;background:#38324f!important}
+      .mufy-recovery-section-card:last-child{grid-column:1/-1}
+      #mufy-recovery-section-nav{display:flex;align-items:center;gap:9px;padding-bottom:2px;border-bottom:1px solid #414149}
+      #mufy-recovery-section-back{flex:none;background:#292934!important;border-color:#625b7e!important;color:#dcd6ff!important}
+      #mufy-recovery-section-title{font-size:14px;color:#f1efff}
       #mufy-recovery-tabs,#mufy-recovery-favorite-tabs,#mufy-recovery-chat-tabs,#mufy-recovery-web-tabs{display:grid;grid-template-columns:1fr 1fr;gap:6px}
       #mufy-recovery-mask-tabs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
       #mufy-recovery-tabs button.active,#mufy-recovery-favorite-tabs button.active,#mufy-recovery-chat-tabs button.active,#mufy-recovery-mask-tabs button.active,#mufy-recovery-web-tabs button.active{background:#786bd4;border-color:#8f84dd;color:#fff}
@@ -9045,14 +9068,14 @@ roleStateReady = true;
       @media (max-width:520px){
         #mufy-recovery-panel{right:8px;bottom:58px;width:calc(100vw - 16px);max-width:calc(100vw - 16px)}
         #mufy-recovery-role-actions button,#mufy-recovery-mask-actions button{font-size:11px;padding:6px 5px}
-        #mufy-recovery-section-tabs{grid-template-columns:repeat(3,minmax(0,1fr));gap:5px}
+        #mufy-recovery-section-cards{grid-template-columns:1fr 1fr;gap:6px}.mufy-recovery-section-card{min-height:68px!important;padding:9px 10px!important}
         #mufy-recovery-tabs,#mufy-recovery-favorite-tabs,#mufy-recovery-chat-tabs,#mufy-recovery-web-tabs{grid-template-columns:repeat(2,minmax(0,1fr));gap:5px}
         #mufy-recovery-mask-tabs{grid-template-columns:repeat(3,minmax(0,1fr));gap:5px}
         #mufy-recovery-mask-actions{grid-template-columns:repeat(3,minmax(0,1fr));gap:5px}
         #mufy-recovery-site-actions{grid-template-columns:repeat(2,minmax(0,1fr));gap:5px}
         #mufy-recovery-manual-auto-actions{grid-template-columns:1fr 1fr}
         #mufy-recovery-manual-auto-message{grid-column:1/-1}
-        #mufy-recovery-section-tabs button,#mufy-recovery-tabs button,#mufy-recovery-favorite-tabs button,#mufy-recovery-chat-tabs button,#mufy-recovery-mask-tabs button,#mufy-recovery-web-tabs button{padding:6px 4px;font-size:11px}
+        #mufy-recovery-tabs button,#mufy-recovery-favorite-tabs button,#mufy-recovery-chat-tabs button,#mufy-recovery-mask-tabs button,#mufy-recovery-web-tabs button{padding:6px 4px;font-size:11px}
         #mufy-recovery-export-options{gap:6px;padding:10px}
         #mufy-recovery-role-read-options{gap:5px;font-size:10px}
         #mufy-recovery-status{font-size:12px}
@@ -9238,7 +9261,8 @@ roleStateReady = true;
       </div>
       <div id="mufy-recovery-model-modal" hidden><div id="mufy-recovery-model-head"><span><strong>模型可用性监控</strong><small id="mufy-recovery-model-summary">每 5 分钟检测一次</small></span><button id="mufy-recovery-model-close" title="关闭">×</button></div><div id="mufy-recovery-model-tools"><input id="mufy-recovery-model-search" placeholder="搜索模型名称"><button id="mufy-recovery-model-refresh">立即检测</button></div><div id="mufy-recovery-model-list"><div class="mufy-recovery-empty">正在读取模型状态…</div></div></div>
       <div id="mufy-recovery-controls">
-        <div id="mufy-recovery-section-tabs"><button class="active" data-section="roles">角色</button><button data-section="favorites">收藏</button><button data-section="chats">聊天记录</button><button data-section="masks">面具</button><button data-section="web">网页</button></div>
+        <div id="mufy-recovery-section-home"><div id="mufy-recovery-section-home-head"><strong>选择功能分区</strong><small>进入后可通过返回按钮切换到其他分区</small></div><div id="mufy-recovery-section-cards"><button class="mufy-recovery-section-card" data-section="roles"><strong>角色</strong><small>找回、状态、作者、标签与索引</small></button><button class="mufy-recovery-section-card" data-section="favorites"><strong>收藏</strong><small>收藏未聊、普通待聊与收藏夹</small></button><button class="mufy-recovery-section-card" data-section="chats"><strong>聊天记录</strong><small>内容搜索、完整导出与摘录牌组</small></button><button class="mufy-recovery-section-card" data-section="masks"><strong>面具</strong><small>面具库、编辑、绑定与导入导出</small></button><button class="mufy-recovery-section-card" data-section="web"><strong>网页</strong><small>捕获当前网页角色并批量收藏</small></button></div></div>
+        <div id="mufy-recovery-section-nav" hidden><button id="mufy-recovery-section-back">← 返回</button><strong id="mufy-recovery-section-title"></strong></div>
         <div id="mufy-recovery-status"></div>
         <div id="mufy-recovery-favorite-task-controls" hidden><button id="mufy-recovery-favorite-task-main">中断收藏</button><button id="mufy-recovery-favorite-task-cancel">取消任务</button></div>
         <div id="mufy-recovery-export-modal" hidden><div class="mufy-recovery-export-head"><strong>选择导出格式</strong><button id="mufy-recovery-export-close" title="关闭">×</button></div><label id="mufy-recovery-export-binding-option" class="mufy-recovery-export-binding-option" hidden><input id="mufy-recovery-export-bindings" type="checkbox" checked><span>同时导出角色的面具绑定信息</span></label><div id="mufy-recovery-export-binding-hint" class="mufy-recovery-export-binding-hint" hidden>绑定信息只支持 JSON；导入时会再询问是否恢复。</div><div class="mufy-recovery-export-options"><button data-export-format="csv">导出 CSV</button><button data-export-format="json">导出 JSON</button><button id="mufy-recovery-export-share-links" data-export-format="share-links">仅分享链接 TXT</button></div></div>
@@ -9351,7 +9375,12 @@ roleStateReady = true;
         toggle.classList.remove('mufy-toggle-onboarding');
         try { localStorage.setItem(TOGGLE_HINT_KEY, '1'); } catch (_) {}
       }
-      panel.style.display = panel.style.display === 'none' ? 'flex' : 'none';
+      const opening = panel.style.display === 'none';
+      if (opening) {
+        state.section = 'home';
+        render();
+      }
+      panel.style.display = opening ? 'flex' : 'none';
     };
     panel.querySelector('#mufy-recovery-close').onclick = () => { panel.style.display = 'none'; };
     panel.querySelector('#mufy-recovery-export-chat').onclick = exportCurrentChat;
@@ -9618,6 +9647,10 @@ roleStateReady = true;
         if (state.section === 'masks' && state.active === 'masks') loadCurrentSiteMasks();
       };
     });
+    panel.querySelector('#mufy-recovery-section-back').onclick = () => {
+      state.section = 'home';
+      render();
+    };
     const manualChatNext = panel.querySelector('#mufy-recovery-manual-chat-next');
     if (manualChatNext) {
       manualChatNext.hidden = state.active !== 'manualFavoriteChats';
