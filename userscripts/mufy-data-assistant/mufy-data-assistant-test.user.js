@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.21
+// @version      3.0.0-dev.22
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.21';
+  const SCRIPT_VERSION = '3.0.0-dev.22';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const MASK_LIBRARY_KEY = 'mufy-recovery-mask-library-v1';
   const MASK_LIBRARY_BACKUP_KEY = 'mufy-recovery-mask-library-backup-v1';
@@ -2597,31 +2597,33 @@ roleStateReady = true;
   function clearLegacyUnavailableStatus(row) {
     if (!row || typeof row !== 'object') return row;
     const error = String(row.metadataError || '');
-    const wasLegacyGuess = (row.availability === '分享已失效' && /HTTP 503。角色的分享链接已经失效/.test(error))
+    const wasLegacyGuess = row.availability === '分享已失效'
       || (row.availability === '角色已删除' && /HTTP 500。角色已被删除/.test(error));
     if (!wasLegacyGuess) return row;
-    return { ...row, availability: '', metadataChecked: false, metadataError: '旧版仅根据 HTTP 状态码作出的失效判断，等待重新检测', metadataErrorCode: 0 };
+    return { ...row, availability: '', metadataChecked: false, metadataError: '旧版把分享状态或 HTTP 状态误作角色状态，等待重新检测', metadataErrorCode: 0 };
   }
 
-  function explicitCharacterUnavailable(body, raw = '') {
+  function explicitCharacterDeleted(body, raw = '') {
     const codes = [body?.error, body?.errorCode, body?.reasonCode, body?.data?.error, body?.data?.errorCode]
       .filter(value => value != null).map(value => String(value).trim().toLowerCase());
     const text = `${codes.join(' ')} ${String(raw || '')}`.toLowerCase();
-    const shareExpired = codes.some(code => ['share_link_expired', 'share_expired', 'invalid_share_link'].includes(code))
-      || /分享(?:链接|码).{0,12}(?:失效|过期|不存在)/.test(text)
-      || /share.{0,16}(?:expired|invalid|not found)/i.test(text);
-    if (shareExpired) return '分享已失效';
-    const characterDeleted = codes.some(code => ['character_deleted', 'character_not_found', 'role_deleted', 'role_not_found', 'character removed by creator'].includes(code))
+    return codes.some(code => ['character_deleted', 'character_not_found', 'role_deleted', 'role_not_found', 'character removed by creator'].includes(code))
       || /角色.{0,18}(?:已被.{0,10}删除|已删除|不存在|找不到|已下架)/.test(text)
       || /(?:character|role).{0,30}(?:removed by creator|deleted|not found|does not exist)/i.test(text);
-    return characterDeleted ? '角色已删除' : '';
+  }
+
+  function isShareLinkResponse(body, raw = '') {
+    const codes = [body?.error, body?.errorCode, body?.reasonCode, body?.data?.error, body?.data?.errorCode]
+      .filter(value => value != null).map(value => String(value).trim().toLowerCase());
+    const text = `${codes.join(' ')} ${String(raw || '')}`.toLowerCase();
+    return codes.some(code => ['share_link_expired', 'share_expired', 'invalid_share_link'].includes(code))
+      || /分享(?:链接|码).{0,12}(?:失效|过期|不存在)/.test(text)
+      || /share.{0,16}(?:expired|invalid|not found)/i.test(text);
   }
 
   async function requestCharacterDetail(characterId, signal) {
     const url = new URL('/api/characters/get', location.origin);
     url.searchParams.set('id', characterId);
-    const testedShareCode = String(shareCodeCache.get(String(characterId)) || '');
-    if (testedShareCode) url.searchParams.set('shareCode', testedShareCode);
     const headers = { Accept: 'application/json' };
     if (authorization) headers.Authorization = authorization;
     try {
@@ -2633,14 +2635,13 @@ roleStateReady = true;
       if (!apiSucceeded) {
         if (response.status === 429) throw new RateLimitError('角色详情');
         const error = new Error(`角色详情返回 HTTP ${response.status}${body?.message ? `：${body.message}` : body?.reason ? `：${body.reason}` : ''}`);
-        const unavailable = explicitCharacterUnavailable(body, raw);
-        if (unavailable) {
-          if (unavailable === '分享已失效' && !testedShareCode) {
-            const explanation = '角色详情接口要求分享凭证，但脚本没有可用于验证的分享码；保留原角色和会话状态。';
-            metadataFailureReasons.add(explanation);
-            return { metadataError: explanation, metadataErrorCode: response.status, metadataChecked: false };
-          }
-          return { availability: unavailable, metadataError: explainFailure(error), metadataErrorCode: response.status, metadataChecked: true };
+        if (explicitCharacterDeleted(body, raw)) {
+          return { availability: '角色已删除', metadataError: explainFailure(error), metadataErrorCode: response.status, metadataChecked: true };
+        }
+        if (isShareLinkResponse(body, raw)) {
+          const explanation = '角色详情接口返回分享链接失效；分享码只属于分享/收藏流程，不能据此判断角色或历史会话失效。';
+          metadataFailureReasons.add(explanation);
+          return { metadataError: explanation, metadataErrorCode: response.status, metadataChecked: false };
         }
         const explanation = explainFailure(error);
         metadataFailureReasons.add(explanation);
@@ -4032,7 +4033,6 @@ roleStateReady = true;
   }
 
   function visibilityLabel(row) {
-    if (row.availability === '分享已失效') return '分享已失效';
     if (row.availability === '角色已删除') return '角色已删除';
     const visibility = visibilityFrom(row);
     return visibility;
@@ -4044,7 +4044,6 @@ roleStateReady = true;
     return (filter === 'public' && status === '公开')
       || (filter === 'link' && status === '仅链接')
       || (filter === 'private' && status === '私密')
-      || (filter === 'expired' && status === '分享已失效')
       || (filter === 'deleted' && status === '角色已删除');
   }
 
@@ -4053,7 +4052,6 @@ roleStateReady = true;
       public: rows.filter(row => visibilityLabel(row) === '公开').length,
       link: rows.filter(row => visibilityLabel(row) === '仅链接').length,
       private: rows.filter(row => visibilityLabel(row) === '私密').length,
-      expired: rows.filter(row => visibilityLabel(row) === '分享已失效').length,
       deleted: rows.filter(row => visibilityLabel(row) === '角色已删除').length,
       unknown: rows.filter(row => visibilityLabel(row) === '未知').length
     };
@@ -4101,10 +4099,10 @@ roleStateReady = true;
       } else if (remaining) {
         const counts = roleStatusCounts(enriched);
         const reason = [...metadataFailureReasons].slice(0, 2).join('；');
-        state.status = `更新未完成：公开 ${counts.public} 个、仅链接 ${counts.link} 个、私密 ${counts.private} 个、已删除 ${counts.deleted} 个、分享已失效 ${counts.expired} 个。${reason ? `失败说明：${reason}。` : '部分接口没有返回可识别的作者信息。'}仍有 ${remaining} 个角色待更新，可点击“更新状态”继续。`;
+        state.status = `更新未完成：公开 ${counts.public} 个、仅链接 ${counts.link} 个、私密 ${counts.private} 个、已删除 ${counts.deleted} 个。${reason ? `失败说明：${reason}。` : '部分接口没有返回可识别的作者信息。'}仍有 ${remaining} 个角色待更新，可点击“更新状态”继续。`;
       } else {
         const counts = roleStatusCounts(enriched);
-        state.status = `作者信息和公开状态更新完成：公开 ${counts.public} 个、仅链接 ${counts.link} 个、私密 ${counts.private} 个、已删除 ${counts.deleted} 个、分享已失效 ${counts.expired} 个。`;
+        state.status = `作者信息和公开状态更新完成：公开 ${counts.public} 个、仅链接 ${counts.link} 个、私密 ${counts.private} 个、已删除 ${counts.deleted} 个。`;
       }
     } catch (error) {
       const remaining = pendingMetadataRows().length;
@@ -4179,8 +4177,8 @@ roleStateReady = true;
       state.status = stopped
         ? `已停止作者和角色状态查询：已保存完成结果；其余内容未继续请求。`
         : rateLimited
-          ? `作者和角色状态查询已暂停：公开 ${counts.public} 个、仅链接 ${counts.link} 个、私密 ${counts.private} 个、已删除 ${counts.deleted} 个、分享已失效 ${counts.expired} 个。检测到 HTTP 429，已保留已完成的部分。`
-          : `作者和角色状态重新查询完成：公开 ${counts.public} 个、仅链接 ${counts.link} 个、私密 ${counts.private} 个、已删除 ${counts.deleted} 个、分享已失效 ${counts.expired} 个。${reason ? `失败说明：${reason}。` : ''}`;
+          ? `作者和角色状态查询已暂停：公开 ${counts.public} 个、仅链接 ${counts.link} 个、私密 ${counts.private} 个、已删除 ${counts.deleted} 个。检测到 HTTP 429，已保留已完成的部分。`
+          : `作者和角色状态重新查询完成：公开 ${counts.public} 个、仅链接 ${counts.link} 个、私密 ${counts.private} 个、已删除 ${counts.deleted} 个。${reason ? `失败说明：${reason}。` : ''}`;
     } catch (error) {
       state.status = `作者和角色状态重新查询失败：${explainFailure(error)}`;
     } finally {
@@ -7283,7 +7281,7 @@ roleStateReady = true;
     const className = visibility === '公开' ? 'public'
       : visibility === '仅链接' ? 'link'
         : visibility === '私密' ? 'private'
-      : visibility === '分享已失效' || visibility === '角色已删除' ? 'expired'
+      : visibility === '角色已删除' ? 'expired'
             : 'unknown';
     const errorCode = visibility === '未知' && row.metadataErrorCode ? `（HTTP ${row.metadataErrorCode}）` : '';
     return `<span class="mufy-recovery-visibility ${className}">${esc(visibility + errorCode)}</span>`;
@@ -7980,10 +7978,10 @@ roleStateReady = true;
         ['public', '公开', statusCounts.public],
         ['link', '仅链接', statusCounts.link],
         ['private', '私密', statusCounts.private],
-        ['expired', '分享已失效', statusCounts.expired],
         ['deleted', '角色已删除', statusCounts.deleted]
       ];
       statusFilter.innerHTML = statusOptions.map(([value, label, count]) => `<option value="${value}">${label}（${count}）</option>`).join('');
+      if (state.statusFilter === 'expired') state.statusFilter = 'all';
       statusFilter.value = state.statusFilter;
     }
     const query = isMaskView ? state.maskQuery : (isWebView ? '' : state.roleQuery);
