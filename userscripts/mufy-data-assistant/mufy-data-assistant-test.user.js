@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.24
+// @version      3.0.0-dev.25
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.24';
+  const SCRIPT_VERSION = '3.0.0-dev.25';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const MASK_LIBRARY_KEY = 'mufy-recovery-mask-library-v1';
   const MASK_LIBRARY_BACKUP_KEY = 'mufy-recovery-mask-library-backup-v1';
@@ -2504,10 +2504,10 @@ roleStateReady = true;
     return date < boundary;
   }
 
-  async function requestPage(pageNum, isFollowed) {
+  async function requestPage(pageNum, isFollowed, pageParameter = 'pageNum') {
     scanStoredAuthorization();
     const url = new URL('/api/characters/query_session', location.origin);
-    url.searchParams.set('pageNum', String(pageNum));
+    url.searchParams.set(pageParameter, String(pageNum));
     url.searchParams.set('pageSize', '20');
     url.searchParams.set('isFollowed', String(isFollowed));
 
@@ -2516,6 +2516,7 @@ roleStateReady = true;
     const response = await pageWindow.fetch(url.href, {
       method: 'GET',
       credentials: 'include',
+      cache: 'no-store',
       headers
     });
     if (response.status === 429) throw new RateLimitError('角色列表');
@@ -2529,7 +2530,6 @@ roleStateReady = true;
   }
 
   function pageHasMore(data, rows, pageSize, page) {
-    if (!rows.length) return false;
     const sources = [
       data,
       data?.data,
@@ -2550,12 +2550,20 @@ roleStateReady = true;
     };
     const totalPages = numberFrom(['totalPages', 'pageCount', 'pages']);
     if (Number.isFinite(totalPages) && totalPages > 0) return page < totalPages;
-    const total = numberFrom(['total', 'totalCount', 'count']);
-    if (Number.isFinite(total) && total >= 0) return page * pageSize < total;
-    const hasMore = sources.find(source => typeof source.hasMore === 'boolean')?.hasMore;
-    if (typeof hasMore === 'boolean') return hasMore;
     const hasNext = sources.find(source => typeof source.hasNext === 'boolean')?.hasNext;
     if (typeof hasNext === 'boolean') return hasNext;
+    const hasMore = sources.find(source => typeof source.hasMore === 'boolean')?.hasMore;
+    if (typeof hasMore === 'boolean') return hasMore;
+    const total = numberFrom(['total', 'totalCount', 'count']);
+    const responsePageSize = numberFrom(['pageSize', 'size', 'limit']);
+    const responsePage = numberFrom(['pageNum', 'page', 'currentPage', 'current']);
+    const effectivePageSize = Number.isFinite(responsePageSize) && responsePageSize > 0 ? responsePageSize : pageSize;
+    const effectivePage = Number.isFinite(responsePage) && responsePage >= 0 ? responsePage : page;
+    if (Number.isFinite(total) && total >= 0) {
+      const consumedPages = effectivePage === 0 ? 1 : effectivePage;
+      return consumedPages * effectivePageSize < total;
+    }
+    if (!rows.length) return false;
     return rows.length >= pageSize;
   }
 
@@ -2577,6 +2585,7 @@ roleStateReady = true;
     const seenPages = new Set();
     let paused = false;
     let nextPage = startPage;
+    let consecutiveEmptyPages = 0;
     for (let page = startPage; page <= maxPages; page += 1) {
       if (state.rolePauseRequested) {
         paused = true;
@@ -2585,19 +2594,67 @@ roleStateReady = true;
       }
       state.status = `正在读取${label}第 ${page} 页，已找到 ${found.size} 条……`;
       render();
-      const data = await requestPage(page, isFollowed);
+      let data = await requestPage(page, isFollowed);
       nextPage = page + 1;
-      const rows = extractCharacterRows(data);
-      const normalizedRows = rows.map(normalize).filter(row => row.characterId).map(row => (
+      let rows = extractCharacterRows(data);
+      let normalizedRows = rows.map(normalize).filter(row => row.characterId).map(row => (
         isFollowed ? { ...row, isFavorite: true, isFollowed: true, favoriteKnown: true } : row
       ));
-      const pageSignature = normalizedRows.map(row => String(row.characterId)).join('|');
-      if (seenPages.has(pageSignature)) break;
+      let hasMore = pageHasMore(data, rows, 20, page);
+
+      // 某些账号的接口会偶发返回空页，但分页元数据仍明确表示后面还有数据。
+      // 重试两次后再跳过该页，避免一次临时空响应截断整个历史列表。
+      if (!normalizedRows.length && hasMore) {
+        for (let attempt = 1; attempt <= 2 && !normalizedRows.length; attempt += 1) {
+          state.status = `${label}第 ${page} 页暂时为空，正在重试 ${attempt}/2……`;
+          render();
+          await wait(350 * attempt);
+          data = await requestPage(page, isFollowed);
+          rows = extractCharacterRows(data);
+          normalizedRows = rows.map(normalize).filter(row => row.characterId).map(row => (
+            isFollowed ? { ...row, isFavorite: true, isFollowed: true, favoriteKnown: true } : row
+          ));
+          hasMore = pageHasMore(data, rows, 20, page);
+        }
+      }
+
+      let pageSignature = normalizedRows.map(row => String(row.characterId)).join('|');
+      if (pageSignature && seenPages.has(pageSignature)) {
+        // 部分接口变体只识别 page 而不是 pageNum。仅在确认重复页后尝试备用参数，
+        // 不改变正常账号原有的请求方式。
+        state.status = `${label}第 ${page} 页与前页重复，正在尝试备用分页参数……`;
+        render();
+        const alternateData = await requestPage(page, isFollowed, 'page');
+        const alternateRows = extractCharacterRows(alternateData);
+        const alternateNormalized = alternateRows.map(normalize).filter(row => row.characterId).map(row => (
+          isFollowed ? { ...row, isFavorite: true, isFollowed: true, favoriteKnown: true } : row
+        ));
+        const alternateSignature = alternateNormalized.map(row => String(row.characterId)).join('|');
+        if (alternateSignature && !seenPages.has(alternateSignature)) {
+          data = alternateData;
+          rows = alternateRows;
+          normalizedRows = alternateNormalized;
+          pageSignature = alternateSignature;
+          hasMore = pageHasMore(data, rows, 20, page);
+          appendRunLog('info', `${label}第 ${page} 页已自动切换为 page 分页参数。`);
+        } else {
+          appendRunLog('warn', `${label}第 ${page} 页重复，pageNum 与 page 两种参数都没有取得新数据，已停止继续翻页。`);
+          break;
+        }
+      }
+
+      if (!normalizedRows.length) {
+        consecutiveEmptyPages += 1;
+        appendRunLog('warn', `${label}第 ${page} 页重试后仍为空${hasMore ? '，但接口表示仍有下一页' : ''}。`);
+        if (!hasMore || consecutiveEmptyPages >= 3) break;
+        continue;
+      }
+      consecutiveEmptyPages = 0;
       seenPages.add(pageSignature);
       normalizedRows.forEach(row => {
         found.set(row.characterId, row);
       });
-      if (!pageHasMore(data, rows, 20, page)) break;
+      if (!hasMore) break;
       await wait(ROLE_REQUEST_INTERVAL_MS);
     }
     return { rows: [...found.values()], paused, nextPage };
