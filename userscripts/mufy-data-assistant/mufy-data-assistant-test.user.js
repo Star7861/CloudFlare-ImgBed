@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.30
+// @version      3.0.0-dev.31
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.30';
+  const SCRIPT_VERSION = '3.0.0-dev.31';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const MASK_LIBRARY_KEY = 'mufy-recovery-mask-library-v1';
   const MASK_LIBRARY_BACKUP_KEY = 'mufy-recovery-mask-library-backup-v1';
@@ -44,6 +44,8 @@
   const MANUAL_FAVORITE_CHAT_CURRENT_KEY = 'mufy-role-links-only-manual-favorite-chat-current-v1';
   const MANUAL_AUTO_CHAT_MESSAGE_KEY = 'mufy-role-links-only-manual-auto-chat-message-v1';
   const MANUAL_AUTO_CHAT_DELAY_KEY = 'mufy-role-links-only-manual-auto-chat-delay-v1';
+  const MANUAL_AUTO_CHAT_DELAY_MIN_KEY = 'mufy-role-links-only-manual-auto-chat-delay-min-v1';
+  const MANUAL_AUTO_CHAT_DELAY_MAX_KEY = 'mufy-role-links-only-manual-auto-chat-delay-max-v1';
   const MANUAL_AUTO_CHAT_JOB_KEY = 'mufy-role-links-only-manual-auto-chat-job-v1';
   const CHAT_MODEL_CONFIG_KEY = 'mufy-role-links-only-chat-model-config-v1';
   const CHAT_JUMP_KEY = 'mufy-role-links-only-chat-jump-v1';
@@ -546,19 +548,30 @@
     return value;
   }
 
-  function loadManualAutoChatDelay() {
-    try {
-      const raw = loadAndMigrateScopedValue(MANUAL_AUTO_CHAT_DELAY_KEY);
-      if (raw == null || raw === '') return 10;
-      const value = Number(raw);
-      return Number.isFinite(value) ? Math.max(0, Math.min(300, Math.round(value))) : 10;
-    } catch (_) { return 10; }
+  function normalizedManualAutoChatDelayRange(minimum, maximum) {
+    const first = Math.max(0, Math.min(300, Math.round(Number(minimum) || 0)));
+    const second = Math.max(0, Math.min(300, Math.round(Number(maximum) || 0)));
+    return { min: Math.min(first, second), max: Math.max(first, second) };
   }
 
-  function saveManualAutoChatDelay(seconds) {
-    const value = Math.max(0, Math.min(300, Math.round(Number(seconds) || 0)));
-    try { localStorage.setItem(accountStorageKey(MANUAL_AUTO_CHAT_DELAY_KEY), String(value)); } catch (_) {}
-    return value;
+  function loadManualAutoChatDelayRange() {
+    try {
+      const legacy = loadAndMigrateScopedValue(MANUAL_AUTO_CHAT_DELAY_KEY);
+      const rawMin = loadAndMigrateScopedValue(MANUAL_AUTO_CHAT_DELAY_MIN_KEY);
+      const rawMax = loadAndMigrateScopedValue(MANUAL_AUTO_CHAT_DELAY_MAX_KEY);
+      const fallbackMin = legacy == null || legacy === '' ? 8 : Number(legacy);
+      const fallbackMax = legacy == null || legacy === '' ? 20 : Number(legacy);
+      return normalizedManualAutoChatDelayRange(rawMin == null || rawMin === '' ? fallbackMin : rawMin, rawMax == null || rawMax === '' ? fallbackMax : rawMax);
+    } catch (_) { return { min: 8, max: 20 }; }
+  }
+
+  function saveManualAutoChatDelayRange(minimum, maximum) {
+    const range = normalizedManualAutoChatDelayRange(minimum, maximum);
+    try {
+      localStorage.setItem(accountStorageKey(MANUAL_AUTO_CHAT_DELAY_MIN_KEY), String(range.min));
+      localStorage.setItem(accountStorageKey(MANUAL_AUTO_CHAT_DELAY_MAX_KEY), String(range.max));
+    } catch (_) {}
+    return range;
   }
 
   function loadManualAutoChatJob() {
@@ -692,7 +705,8 @@
     manualFavoriteChatCurrentId: (() => { try { return loadAndMigrateScopedValue(MANUAL_FAVORITE_CHAT_CURRENT_KEY) || ''; } catch (_) { return ''; } })(),
     manualFavoriteNextDismissed: false,
     manualAutoChatMessage: loadManualAutoChatMessage(),
-    manualAutoChatDelay: loadManualAutoChatDelay(),
+    manualAutoChatDelayMin: loadManualAutoChatDelayRange().min,
+    manualAutoChatDelayMax: loadManualAutoChatDelayRange().max,
     manualAutoChatRunning: Boolean(loadManualAutoChatJob() && !loadManualAutoChatJob()?.paused),
     manualAutoChatStopRequested: false,
     chatExportLoading: false,
@@ -826,7 +840,7 @@ roleStateReady = true;
     state.manualFavoriteChats = loadManualFavoriteChats();
     try { state.manualFavoriteChatCurrentId = loadAndMigrateScopedValue(MANUAL_FAVORITE_CHAT_CURRENT_KEY) || ''; } catch (_) { state.manualFavoriteChatCurrentId = ''; }
     state.manualAutoChatMessage = loadManualAutoChatMessage();
-    state.manualAutoChatDelay = loadManualAutoChatDelay();
+    ({ min: state.manualAutoChatDelayMin, max: state.manualAutoChatDelayMax } = loadManualAutoChatDelayRange());
     state.manualAutoChatRunning = Boolean(loadManualAutoChatJob() && !loadManualAutoChatJob()?.paused);
     state.manualAutoChatStopRequested = false;
     state.lastRoleReadIds = null;
@@ -1247,7 +1261,12 @@ roleStateReady = true;
   }
 
   async function waitManualAutoChatCooldown(job) {
-    const seconds = Math.max(0, Math.min(300, Number(job.delaySeconds ?? state.manualAutoChatDelay) || 0));
+    const legacy = job.delaySeconds;
+    const range = normalizedManualAutoChatDelayRange(
+      job.delayMin ?? legacy ?? state.manualAutoChatDelayMin,
+      job.delayMax ?? legacy ?? state.manualAutoChatDelayMax
+    );
+    const seconds = range.min + Math.floor(Math.random() * (range.max - range.min + 1));
     if (!seconds) return;
     const endAt = Date.now() + seconds * 1000;
     let lastShown = -1;
@@ -1431,16 +1450,17 @@ roleStateReady = true;
       return;
     }
     const message = saveManualAutoChatMessage(state.manualAutoChatMessage);
-    const delaySeconds = saveManualAutoChatDelay(state.manualAutoChatDelay);
+    const delayRange = saveManualAutoChatDelayRange(state.manualAutoChatDelayMin, state.manualAutoChatDelayMax);
     if (!message) return;
-    if (!pageWindow.confirm(`将依次给 ${state.manualFavoriteChats.length} 个普通收藏角色发送：\n\n${message}\n\n每个角色会等待完整回复，并额外冷却 ${delaySeconds} 秒后再进入下一个。确定开始吗？`)) return;
+    if (!pageWindow.confirm(`将依次给 ${state.manualFavoriteChats.length} 个普通收藏角色发送：\n\n${message}\n\n每个角色会等待完整回复，再随机冷却 ${delayRange.min}～${delayRange.max} 秒后进入下一个。确定开始吗？`)) return;
     const first = state.manualFavoriteChats[0];
     const job = {
       active: true,
       paused: false,
       phase: 'navigating',
       message,
-      delaySeconds,
+      delayMin: delayRange.min,
+      delayMax: delayRange.max,
       total: state.manualFavoriteChats.length,
       completed: 0,
       activeCharacterId: String(first?.characterId || ''),
@@ -8479,7 +8499,8 @@ roleStateReady = true;
     if (siteActions) siteActions.hidden = !(state.section === 'web' && (state.active === 'siteSearch' || state.active === 'siteAuthors'));
     const manualAutoActions = panel.querySelector('#mufy-recovery-manual-auto-actions');
     const manualAutoMessage = panel.querySelector('#mufy-recovery-manual-auto-message');
-    const manualAutoDelay = panel.querySelector('#mufy-recovery-manual-auto-delay');
+    const manualAutoDelayMin = panel.querySelector('#mufy-recovery-manual-auto-delay-min');
+    const manualAutoDelayMax = panel.querySelector('#mufy-recovery-manual-auto-delay-max');
     const manualAutoStart = panel.querySelector('#mufy-recovery-manual-auto-start');
     const manualAutoCancel = panel.querySelector('#mufy-recovery-manual-auto-cancel');
     const manualAutoJob = loadManualAutoChatJob();
@@ -8488,9 +8509,13 @@ roleStateReady = true;
       if (document.activeElement !== manualAutoMessage) manualAutoMessage.value = state.manualAutoChatMessage;
       manualAutoMessage.disabled = Boolean(manualAutoJob && !manualAutoJob.paused);
     }
-    if (manualAutoDelay) {
-      if (document.activeElement !== manualAutoDelay) manualAutoDelay.value = String(state.manualAutoChatDelay);
-      manualAutoDelay.disabled = Boolean(manualAutoJob && !manualAutoJob.paused);
+    if (manualAutoDelayMin) {
+      if (document.activeElement !== manualAutoDelayMin) manualAutoDelayMin.value = String(state.manualAutoChatDelayMin);
+      manualAutoDelayMin.disabled = Boolean(manualAutoJob && !manualAutoJob.paused);
+    }
+    if (manualAutoDelayMax) {
+      if (document.activeElement !== manualAutoDelayMax) manualAutoDelayMax.value = String(state.manualAutoChatDelayMax);
+      manualAutoDelayMax.disabled = Boolean(manualAutoJob && !manualAutoJob.paused);
     }
     if (manualAutoStart) {
       manualAutoStart.disabled = !manualAutoJob && !state.manualFavoriteChats.length;
@@ -9193,7 +9218,7 @@ roleStateReady = true;
         <div id="mufy-recovery-web-section" hidden>
           <div id="mufy-recovery-web-tabs"><button data-category="siteSearch">网站角色 (0)</button><button data-category="siteAuthors">网站作者 (0)</button><button data-category="manualFavoriteChats">普通待聊 (0)</button><button id="mufy-recovery-manual-chat-next" title="按普通待聊列表顺序打开角色；再次点击视为当前角色已处理并前往下一个">下一个</button></div>
           <div id="mufy-recovery-site-actions"><button id="mufy-recovery-refresh-favorite-states">获取收藏状态</button><button id="mufy-recovery-select-unfavorite-site">全选未收藏</button><button id="mufy-recovery-favorite-selected-site">立即收藏 (0)</button><button id="mufy-recovery-clear-site-selection">清空勾选</button><button id="mufy-recovery-refresh-site-rows" title="刷新当前网站页面并重新捕获，之后翻页会继续自动获取">重新获取</button><button id="mufy-recovery-clear-site-rows">清空结果</button></div>
-          <div id="mufy-recovery-manual-auto-actions" hidden><input id="mufy-recovery-manual-auto-message" type="text" maxlength="500" value="${esc(state.manualAutoChatMessage)}" aria-label="一键扣数发送内容"><label class="mufy-recovery-auto-delay">间隔 <input id="mufy-recovery-manual-auto-delay" type="number" min="0" max="300" step="1" value="${esc(state.manualAutoChatDelay)}" aria-label="每个角色完成后的冷却秒数"> 秒</label><button id="mufy-recovery-manual-auto-start">一键扣数</button><button id="mufy-recovery-manual-auto-cancel" hidden>取消任务</button></div>
+          <div id="mufy-recovery-manual-auto-actions" hidden><input id="mufy-recovery-manual-auto-message" type="text" maxlength="500" value="${esc(state.manualAutoChatMessage)}" aria-label="一键扣数发送内容"><label class="mufy-recovery-auto-delay">间隔 <input id="mufy-recovery-manual-auto-delay-min" type="number" min="0" max="300" step="1" value="${esc(state.manualAutoChatDelayMin)}" aria-label="随机冷却最短秒数">～<input id="mufy-recovery-manual-auto-delay-max" type="number" min="0" max="300" step="1" value="${esc(state.manualAutoChatDelayMax)}" aria-label="随机冷却最长秒数"> 秒</label><button id="mufy-recovery-manual-auto-start">一键扣数</button><button id="mufy-recovery-manual-auto-cancel" hidden>取消任务</button></div>
         </div>
         <div id="mufy-recovery-mask-section" hidden>
           <div id="mufy-recovery-mask-tabs"><button data-category="masks">面具 (0)</button><button data-category="library">面具库 (0)</button><button id="mufy-recovery-save-all" class="mufy-recovery-tab-action">全部存入面具库</button></div>
@@ -9557,14 +9582,19 @@ roleStateReady = true;
       state.manualAutoChatMessage = saveManualAutoChatMessage(event.target.value);
       event.target.value = state.manualAutoChatMessage;
     };
-    const manualAutoDelay = panel.querySelector('#mufy-recovery-manual-auto-delay');
-    manualAutoDelay.oninput = event => {
-      state.manualAutoChatDelay = Math.max(0, Math.min(300, Number(event.target.value) || 0));
+    const manualAutoDelayMin = panel.querySelector('#mufy-recovery-manual-auto-delay-min');
+    const manualAutoDelayMax = panel.querySelector('#mufy-recovery-manual-auto-delay-max');
+    const saveDelayInputs = () => {
+      const range = saveManualAutoChatDelayRange(manualAutoDelayMin.value, manualAutoDelayMax.value);
+      state.manualAutoChatDelayMin = range.min;
+      state.manualAutoChatDelayMax = range.max;
+      manualAutoDelayMin.value = String(range.min);
+      manualAutoDelayMax.value = String(range.max);
     };
-    manualAutoDelay.onchange = event => {
-      state.manualAutoChatDelay = saveManualAutoChatDelay(event.target.value);
-      event.target.value = String(state.manualAutoChatDelay);
-    };
+    manualAutoDelayMin.oninput = event => { state.manualAutoChatDelayMin = Number(event.target.value) || 0; };
+    manualAutoDelayMax.oninput = event => { state.manualAutoChatDelayMax = Number(event.target.value) || 0; };
+    manualAutoDelayMin.onchange = saveDelayInputs;
+    manualAutoDelayMax.onchange = saveDelayInputs;
     panel.querySelector('#mufy-recovery-manual-auto-start').onclick = startOrResumeManualAutoChat;
     panel.querySelector('#mufy-recovery-manual-auto-cancel').onclick = cancelManualAutoChatJob;
     panel.querySelectorAll('[data-category]').forEach(button => {
