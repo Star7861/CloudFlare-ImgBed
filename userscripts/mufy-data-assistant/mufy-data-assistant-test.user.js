@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.18
+// @version      3.0.0-dev.19
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.18';
+  const SCRIPT_VERSION = '3.0.0-dev.19';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const MASK_LIBRARY_KEY = 'mufy-recovery-mask-library-v1';
   const MASK_LIBRARY_BACKUP_KEY = 'mufy-recovery-mask-library-backup-v1';
@@ -420,7 +420,7 @@
           isFollowed: favoriteState === true,
           favoriteKnown: favoriteState !== null
         };
-      }) : [];
+      }).map(clearLegacyUnavailableStatus) : [];
       return {
         chatted: valid(cached.chatted),
         chattedNotFavorite: valid(cached.chattedNotFavorite),
@@ -2586,6 +2586,29 @@ roleStateReady = true;
     return { rows: [...found.values()], paused, nextPage };
   }
 
+  function clearLegacyUnavailableStatus(row) {
+    if (!row || typeof row !== 'object') return row;
+    const error = String(row.metadataError || '');
+    const wasLegacyGuess = (row.availability === '分享已失效' && /HTTP 503。角色的分享链接已经失效/.test(error))
+      || (row.availability === '角色已删除' && /HTTP 500。角色已被删除/.test(error));
+    if (!wasLegacyGuess) return row;
+    return { ...row, availability: '', metadataChecked: false, metadataError: '旧版仅根据 HTTP 状态码作出的失效判断，等待重新检测', metadataErrorCode: 0 };
+  }
+
+  function explicitCharacterUnavailable(body, raw = '') {
+    const codes = [body?.error, body?.errorCode, body?.reasonCode, body?.data?.error, body?.data?.errorCode]
+      .filter(value => value != null).map(value => String(value).trim().toLowerCase());
+    const text = `${codes.join(' ')} ${String(raw || '')}`.toLowerCase();
+    const shareExpired = codes.some(code => ['share_link_expired', 'share_expired', 'invalid_share_link'].includes(code))
+      || /分享(?:链接|码).{0,12}(?:失效|过期|不存在)/.test(text)
+      || /share.{0,16}(?:expired|invalid|not found)/i.test(text);
+    if (shareExpired) return '分享已失效';
+    const characterDeleted = codes.some(code => ['character_deleted', 'character_not_found', 'role_deleted', 'role_not_found'].includes(code))
+      || /角色.{0,12}(?:已删除|不存在|找不到|已下架)/.test(text)
+      || /(?:character|role).{0,18}(?:deleted|not found|does not exist)/i.test(text);
+    return characterDeleted ? '角色已删除' : '';
+  }
+
   async function requestCharacterDetail(characterId, signal) {
     const url = new URL('/api/characters/get', location.origin);
     url.searchParams.set('id', characterId);
@@ -2596,18 +2619,13 @@ roleStateReady = true;
       const raw = await response.text();
       let body = null;
       try { body = raw ? JSON.parse(raw) : null; } catch (_) {}
-      if (!response.ok) {
+      const apiSucceeded = response.ok && (body?.code == null || Number(body.code) === 200);
+      if (!apiSucceeded) {
         if (response.status === 429) throw new RateLimitError('角色详情');
         const error = new Error(`角色详情返回 HTTP ${response.status}${body?.message ? `：${body.message}` : body?.reason ? `：${body.reason}` : ''}`);
-        if (body?.error === 'share_link_expired' || response.status === 503) {
-          const explanation = body?.error === 'share_link_expired'
-            ? explainFailure(error)
-            : `HTTP 503。角色的分享链接已经失效，接口没有可恢复的当前链接。`;
-          return { availability: '分享已失效', metadataError: explanation, metadataErrorCode: response.status, metadataChecked: true };
-        }
-        if (response.status === 500) {
-          const explanation = `HTTP 500。角色已被删除，当前角色详情不存在。`;
-          return { availability: '角色已删除', metadataError: explanation, metadataErrorCode: response.status, metadataChecked: true };
+        const unavailable = explicitCharacterUnavailable(body, raw);
+        if (unavailable) {
+          return { availability: unavailable, metadataError: explainFailure(error), metadataErrorCode: response.status, metadataChecked: true };
         }
         const explanation = explainFailure(error);
         metadataFailureReasons.add(explanation);
