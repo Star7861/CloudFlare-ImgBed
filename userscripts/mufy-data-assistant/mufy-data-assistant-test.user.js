@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.19
+// @version      3.0.0-dev.20
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.19';
+  const SCRIPT_VERSION = '3.0.0-dev.20';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const MASK_LIBRARY_KEY = 'mufy-recovery-mask-library-v1';
   const MASK_LIBRARY_BACKUP_KEY = 'mufy-recovery-mask-library-backup-v1';
@@ -50,6 +50,8 @@
   const MODEL_MONITOR_SELECTION_KEY = 'mufy-role-links-only-model-monitor-selection-v1';
   const MODEL_MONITOR_SNAPSHOT_KEY = 'mufy-role-links-only-model-monitor-snapshot-v1';
   const MODEL_MONITOR_INTERVAL_MS = 5 * 60 * 1000;
+  const SESSIONLESS_ROLE_IDS_KEY = 'mufy-role-links-only-sessionless-role-ids-v1';
+  const ROLE_FALLBACK_PENDING_KEY = 'mufy-role-links-only-role-fallback-pending-v1';
   const DEFAULT_MANUAL_AUTO_CHAT_MESSAGE = '≽^⚈⩊⚈^≼';
   const AUTHOR_FOLDER_MIGRATION_KEY = 'mufy-recovery-author-folder-migration-v1';
   const AUTHOR_FOLDER_MAP_KEY = 'mufy-recovery-author-folder-map-v1';
@@ -205,6 +207,7 @@
     state.modelMonitorSelectedIds = loadModelMonitorSelection();
     state.modelMonitorRows = [];
     state.modelMonitorLastChecked = '';
+    state.sessionlessRoleIds = loadSessionlessRoleIds();
     reloadMaskAccountPartition(previousScope, nextScope);
   }
 
@@ -552,6 +555,17 @@
     try { localStorage.setItem(accountStorageKey(MODEL_MONITOR_SNAPSHOT_KEY), JSON.stringify({ rows, checkedAt })); } catch (_) {}
   }
 
+  function loadSessionlessRoleIds() {
+    try {
+      const ids = JSON.parse(loadAndMigrateScopedValue(SESSIONLESS_ROLE_IDS_KEY) || '[]');
+      return new Set(Array.isArray(ids) ? ids.map(String).filter(Boolean) : []);
+    } catch (_) { return new Set(); }
+  }
+
+  function saveSessionlessRoleIds() {
+    try { localStorage.setItem(accountStorageKey(SESSIONLESS_ROLE_IDS_KEY), JSON.stringify([...state.sessionlessRoleIds])); } catch (_) {}
+  }
+
   function goToNextManualFavoriteChat() {
     if (!state.manualFavoriteChats.length) {
       state.status = '普通待聊列表为空。';
@@ -608,6 +622,7 @@
     modelMonitorLoading: false,
     modelMonitorLastChecked: loadModelMonitorSnapshot().checkedAt || '',
     modelMonitorError: '',
+    sessionlessRoleIds: loadSessionlessRoleIds(),
     archived: cachedRoles?.archived || [],
     roleHistory: [],
     archiveCheckedCharacterIds: new Set(cachedRoles?.archiveCheckedCharacterIds || []),
@@ -1962,10 +1977,11 @@ roleStateReady = true;
     if (state.autoSwitch) scheduleAutoMaskSwitch();
   }
 
-  function sessionUrl(row) {
+  function sessionUrl(row, forceSession = false) {
     const url = new URL('/chat', location.origin);
     url.searchParams.set('roleId', row.characterId);
-    if (row.lastSessionId) url.searchParams.set('sessionId', row.lastSessionId);
+    const useSession = forceSession || !state.sessionlessRoleIds?.has(String(row.characterId));
+    if (useSession && row.lastSessionId) url.searchParams.set('sessionId', row.lastSessionId);
     return url.href;
   }
 
@@ -3186,6 +3202,85 @@ roleStateReady = true;
     };
   }
 
+  function fallbackInvalidMessage() {
+    const pattern = /角色(?:已)?(?:失效|删除|不存在|找不到|下架)|无法(?:找到|访问|加载)(?:该)?角色|character\s*(?:is\s*)?(?:invalid|deleted|not\s+found|unavailable)/i;
+    const nodes = document.querySelectorAll('h1,h2,h3,[role="alert"],[role="status"],p,span');
+    for (const node of nodes) {
+      if (!isVisibleElement(node)) continue;
+      const text = String(node.textContent || '').trim().replace(/\s+/g, ' ');
+      if (text && text.length <= 180 && pattern.test(text)) return text;
+    }
+    return '';
+  }
+
+  function updateFallbackRoleRecord(characterId, { sessionId = '', unavailable = '' } = {}) {
+    const id = String(characterId || '');
+    const update = row => {
+      if (String(row?.characterId || '') !== id) return row;
+      if (unavailable) return { ...row, availability: unavailable, metadataChecked: true, metadataError: '无 sessionId 的角色入口仍明确显示失效', metadataErrorCode: 0 };
+      return { ...row, ...(sessionId ? { lastSessionId: String(sessionId) } : {}), availability: '', metadataChecked: false, metadataError: '', metadataErrorCode: 0 };
+    };
+    state.chatted = state.chatted.map(update);
+    state.chattedNotFavorite = state.chattedNotFavorite.map(update);
+    state.favoriteOnly = state.favoriteOnly.map(update);
+    state.archived = state.archived.map(update);
+    state.roleHistory = state.roleHistory.map(update);
+    saveRoleCache();
+  }
+
+  function installRoleLinkFallback() {
+    if (pageWindow.location.pathname !== '/chat') return;
+    const context = currentRoleContext();
+    if (!context.characterId) return;
+    let pending = null;
+    try { pending = JSON.parse(sessionStorage.getItem(ROLE_FALLBACK_PENDING_KEY) || 'null'); } catch (_) {}
+    if (pending && (String(pending.characterId) !== context.characterId || Date.now() - Number(pending.startedAt || 0) > 120000)) {
+      try { sessionStorage.removeItem(ROLE_FALLBACK_PENDING_KEY); } catch (_) {}
+      pending = null;
+    }
+    let checks = 0;
+    const timer = setInterval(() => {
+      checks += 1;
+      const invalidText = fallbackInvalidMessage();
+      const textarea = findChatTextarea();
+      const ready = Boolean(textarea && !textarea.disabled && isVisibleElement(textarea));
+      if (pending) {
+        if (ready && checks >= 3) {
+          clearInterval(timer);
+          try { sessionStorage.removeItem(ROLE_FALLBACK_PENDING_KEY); } catch (_) {}
+          const latest = currentRoleContext();
+          const replacementSessionId = latest.sessionId && latest.sessionId !== String(pending.sessionId || '') ? latest.sessionId : '';
+          if (replacementSessionId) state.sessionlessRoleIds.delete(context.characterId);
+          else state.sessionlessRoleIds.add(context.characterId);
+          saveSessionlessRoleIds();
+          updateFallbackRoleRecord(context.characterId, { sessionId: replacementSessionId });
+          state.status = replacementSessionId
+            ? '旧会话失效，但角色入口可用；已把打开链接更新为新的可用会话。'
+            : '旧会话失效，但角色入口可用；以后将自动使用不含 sessionId 的角色链接。';
+          render();
+          return;
+        }
+        if (!ready && invalidText) {
+          clearInterval(timer);
+          try { sessionStorage.removeItem(ROLE_FALLBACK_PENDING_KEY); } catch (_) {}
+          updateFallbackRoleRecord(context.characterId, { unavailable: /删除|不存在|找不到|not\s+found|deleted/i.test(invalidText) ? '角色已删除' : '角色入口失效' });
+          state.status = `二次验证仍显示失效：${invalidText}`;
+          render();
+          return;
+        }
+      } else if (context.sessionId && !ready && invalidText) {
+        clearInterval(timer);
+        try { sessionStorage.setItem(ROLE_FALLBACK_PENDING_KEY, JSON.stringify({ characterId: context.characterId, sessionId: context.sessionId, startedAt: Date.now() })); } catch (_) {}
+        pageWindow.location.replace(roleUrl(context.characterId));
+        return;
+      }
+      if (checks >= 40) {
+        clearInterval(timer);
+        if (pending) try { sessionStorage.removeItem(ROLE_FALLBACK_PENDING_KEY); } catch (_) {}
+      }
+    }, 500);
+  }
+
   async function recordCurrentChatHistory() {
     if (pageWindow.location.pathname !== '/chat' || !roleStateReady) return;
     const { characterId, sessionId } = currentRoleContext();
@@ -4013,12 +4108,13 @@ roleStateReady = true;
   }
 
   function isUnavailable(row) {
-    return row.availability === '角色已删除' || row.availability === '分享已失效';
+    return row.availability === '角色已删除' || row.availability === '分享已失效' || row.availability === '角色入口失效';
   }
 
   function visibilityLabel(row) {
     if (row.availability === '分享已失效') return '分享已失效';
     if (row.availability === '角色已删除') return '角色已删除';
+    if (row.availability === '角色入口失效') return '角色入口失效';
     const visibility = visibilityFrom(row);
     return visibility;
   }
@@ -4029,7 +4125,7 @@ roleStateReady = true;
     return (filter === 'public' && status === '公开')
       || (filter === 'link' && status === '仅链接')
       || (filter === 'private' && status === '私密')
-      || (filter === 'expired' && status === '分享已失效')
+      || (filter === 'expired' && (status === '分享已失效' || status === '角色入口失效'))
       || (filter === 'deleted' && status === '角色已删除');
   }
 
@@ -4038,7 +4134,7 @@ roleStateReady = true;
       public: rows.filter(row => visibilityLabel(row) === '公开').length,
       link: rows.filter(row => visibilityLabel(row) === '仅链接').length,
       private: rows.filter(row => visibilityLabel(row) === '私密').length,
-      expired: rows.filter(row => visibilityLabel(row) === '分享已失效').length,
+      expired: rows.filter(row => ['分享已失效', '角色入口失效'].includes(visibilityLabel(row))).length,
       deleted: rows.filter(row => visibilityLabel(row) === '角色已删除').length,
       unknown: rows.filter(row => visibilityLabel(row) === '未知').length
     };
@@ -6680,7 +6776,7 @@ roleStateReady = true;
         createdAt: Date.now()
       }));
     } catch (_) {}
-    pageWindow.location.assign(sessionUrl(row));
+    pageWindow.location.assign(sessionUrl(row, true));
   }
 
   function matchingChatElement(target) {
@@ -7268,7 +7364,7 @@ roleStateReady = true;
     const className = visibility === '公开' ? 'public'
       : visibility === '仅链接' ? 'link'
         : visibility === '私密' ? 'private'
-          : visibility === '分享已失效' || visibility === '角色已删除' ? 'expired'
+      : visibility === '分享已失效' || visibility === '角色入口失效' || visibility === '角色已删除' ? 'expired'
             : 'unknown';
     const errorCode = visibility === '未知' && row.metadataErrorCode ? `（HTTP ${row.metadataErrorCode}）` : '';
     return `<span class="mufy-recovery-visibility ${className}">${esc(visibility + errorCode)}</span>`;
@@ -7303,10 +7399,13 @@ roleStateReady = true;
     const favoriteButton = `<button class="mufy-recovery-favorite-button ${row.isFavorite ? 'is-favorite' : ''}${favoritePending ? ' is-pending' : ''}" data-action="${favoriteAction}" data-index="${index}" data-character-id="${esc(row.characterId)}" title="${favoriteTitle}" aria-label="${favoriteTitle}" ${state.favoriteRunning || state.shareRecoveryLoading || favoritePending || favoriteUnknown ? 'disabled' : ''}>${favoriteIcon}</button>`;
     const rowTools = `<span class="mufy-recovery-role-tools">${archiveButton}${favoriteButton}</span>`;
     const archiveList = archiveOpen && !row.archive
-      ? `<div class="mufy-recovery-archives">${archiveRows.map((item, archiveIndex) => `<a href="${esc(sessionUrl(item))}" target="_blank" rel="noreferrer">旧档 ${archiveIndex + 1}${item.archiveRemark ? ` · ${esc(item.archiveRemark)}` : ''}${item.archiveUpdatedAt || item.archiveCreatedAt ? ` · ${esc(new Date(item.archiveUpdatedAt || item.archiveCreatedAt).toLocaleString('zh-CN'))}` : ''}</a>`).join('') || '<span>没有找到归档旧档</span>'}</div>`
+      ? `<div class="mufy-recovery-archives">${archiveRows.map((item, archiveIndex) => `<a href="${esc(sessionUrl(item, true))}" target="_blank" rel="noreferrer">旧档 ${archiveIndex + 1}${item.archiveRemark ? ` · ${esc(item.archiveRemark)}` : ''}${item.archiveUpdatedAt || item.archiveCreatedAt ? ` · ${esc(new Date(item.archiveUpdatedAt || item.archiveCreatedAt).toLocaleString('zh-CN'))}` : ''}</a>`).join('') || '<span>没有找到归档旧档</span>'}</div>`
       : '';
     const matchSnippet = row.chatMatchSnippet ? `<div class="mufy-recovery-chat-match"><b>${esc(chatRoleLabel(row.chatMatchRole))}${row.chatMatchTime ? ` · ${esc(new Date(row.chatMatchTime).toLocaleString('zh-CN'))}` : ''}</b><span>${markedChatSnippet(row.chatMatchSnippet, state.chatSearchQuery)}</span></div>` : '';
-    const openLabel = state.active === 'chatted' || state.active === 'chattedNotFavorite' || state.active === 'chatMatches' ? '打开匹配会话' : '打开角色';
+    const sessionlessFallback = state.sessionlessRoleIds.has(String(row.characterId));
+    const openLabel = sessionlessFallback
+      ? '打开角色（已避开失效会话）'
+      : state.active === 'chatted' || state.active === 'chattedNotFavorite' || state.active === 'chatMatches' ? '打开匹配会话' : '打开角色';
     const openLink = state.active === 'chatMatches'
       ? `<button class="mufy-recovery-chat-jump" data-action="jump-chat-match" data-index="${index}">${openLabel}</button>`
       : `<a href="${esc(sessionUrl(row))}" rel="noreferrer">${openLabel}</a>`;
@@ -7333,7 +7432,7 @@ roleStateReady = true;
       <div class="mufy-recovery-muted">${esc(row.authorName || '作者未知')} · ${esc(row.characterId)}</div>
       <div class="mufy-recovery-muted">最后记录：${esc(row.lastInteracted || row.lastSeenAt || '时间未知')}</div>
       ${roleTagButtons(row)}
-      <div class="mufy-recovery-row-actions"><a href="${esc(roleUrl(row.characterId))}" rel="noreferrer">打开角色</a>${row.lastSessionId ? `<a href="${esc(sessionUrl(row))}" rel="noreferrer">打开记录的会话</a>` : ''}${shareCode ? `<a href="${esc(shareUrlFromCode(shareCode))}" rel="noreferrer">打开分享链接</a>` : ''}</div>
+      <div class="mufy-recovery-row-actions"><a href="${esc(roleUrl(row.characterId))}" rel="noreferrer">打开角色</a>${row.lastSessionId ? `<a href="${esc(sessionUrl(row, true))}" rel="noreferrer">打开记录的会话</a>` : ''}${shareCode ? `<a href="${esc(shareUrlFromCode(shareCode))}" rel="noreferrer">打开分享链接</a>` : ''}</div>
     </div></div>`;
   }
 
@@ -9172,6 +9271,7 @@ roleStateReady = true;
       render();
     }, 1600);
     setTimeout(() => locatePendingChatJump(), 1400);
+    setTimeout(() => installRoleLinkFallback(), 700);
   }
 
   let bootTimer = 0;
