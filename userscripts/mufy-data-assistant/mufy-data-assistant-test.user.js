@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.31
+// @version      3.0.0-dev.32
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.31';
+  const SCRIPT_VERSION = '3.0.0-dev.32';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const MASK_LIBRARY_KEY = 'mufy-recovery-mask-library-v1';
   const MASK_LIBRARY_BACKUP_KEY = 'mufy-recovery-mask-library-backup-v1';
@@ -3106,7 +3106,18 @@ roleStateReady = true;
     const headers = { Accept: 'application/json' };
     if (authorization) headers.Authorization = authorization;
     try {
-      const response = await pageWindow.fetch(url.href, { method: 'GET', credentials: 'include', headers, signal });
+      let response = await pageWindow.fetch(url.href, { method: 'GET', credentials: 'include', headers, signal });
+      // 网页可能已经用 Cookie 刷新登录，但脚本内存里仍保留旧 Bearer。
+      // 服务端会优先校验这个旧令牌并返回 401/403，因此去掉它后用当前 Cookie 重试一次。
+      if ((response.status === 401 || response.status === 403) && headers.Authorization) {
+        authorization = '';
+        response = await pageWindow.fetch(url.href, {
+          method: 'GET',
+          credentials: 'include',
+          headers: { Accept: 'application/json' },
+          signal
+        });
+      }
       const raw = await response.text();
       let body = null;
       try { body = raw ? JSON.parse(raw) : null; } catch (_) {}
@@ -3146,7 +3157,16 @@ roleStateReady = true;
     const headers = { Accept: 'application/json' };
     if (authorization) headers.Authorization = authorization;
     try {
-      const response = await pageWindow.fetch(url.href, { method: 'GET', credentials: 'include', headers, signal });
+      let response = await pageWindow.fetch(url.href, { method: 'GET', credentials: 'include', headers, signal });
+      if ((response.status === 401 || response.status === 403) && headers.Authorization) {
+        authorization = '';
+        response = await pageWindow.fetch(url.href, {
+          method: 'GET',
+          credentials: 'include',
+          headers: { Accept: 'application/json' },
+          signal
+        });
+      }
       if (response.status === 429) throw new RateLimitError('作者资料');
       const raw = await response.text();
       let body = null;
@@ -4819,12 +4839,13 @@ roleStateReady = true;
     if (pressed === 'false') return false;
     if (/^(on|active|true|checked|selected)$/i.test(String(dataState || ''))) return true;
     if (/^(off|inactive|false|unchecked|unselected)$/i.test(String(dataState || ''))) return false;
-    if (/取消收藏|已收藏|取消关注|unfollow|unfavorite|remove from favorites|is-favorite|favorited|followed/i.test(meta)) return true;
+    // Mufy 的不同角色页分别使用“收藏”和“关注”文案；完整聊天页常直接显示“已关注”。
+    if (/已收藏|取消收藏|已关注|取消关注|unfollow|unfavorite|remove from favorites|is-favorite|favorited|followed/i.test(`${meta} ${iconText}`)) return true;
     const labelMeta = [
       element.getAttribute('aria-label'), element.getAttribute('title'),
       element.getAttribute('data-tooltip'), element.getAttribute('data-tooltip-content')
     ].filter(Boolean).join(' ').toLowerCase();
-    if (/未收藏|添加收藏|加入收藏|收藏角色|add to favorites|favorite this|follow this/i.test(labelMeta)) return false;
+    if (/未收藏|添加收藏|加入收藏|收藏角色|^关注$|关注角色|add to favorites|favorite this|follow this/i.test(`${labelMeta} ${iconText}`.trim())) return false;
     const svg = element.querySelector?.('svg');
     const fill = String(svg?.getAttribute?.('fill') || svg?.style?.fill || '').trim().toLowerCase();
     if (fill && !['none', 'transparent'].includes(fill)) return true;
