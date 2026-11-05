@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.5
+// @version      3.0.0-dev.6
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.5';
+  const SCRIPT_VERSION = '3.0.0-dev.6';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const MASK_LIBRARY_KEY = 'mufy-recovery-mask-library-v1';
   const MASK_LIBRARY_BACKUP_KEY = 'mufy-recovery-mask-library-backup-v1';
@@ -71,6 +71,8 @@
   let shareFavoriteJobCache = null;
   let shareFavoriteJobStoragePromise = null;
   let shareFavoriteJobStorageGeneration = 0;
+  const AUTH_HOOK_MARK = '__mufyRecoveryAuthHookedV3Test';
+  let authCaptureLogged = false;
 
   function decodeJwtPayload(authValue) {
     try {
@@ -204,11 +206,18 @@
   function captureAuthorization(headers, requestUrl) {
     try {
       const url = new URL(String(requestUrl || ''), location.href);
-      if (url.origin !== location.origin || !/(?:^|\/)api(?:\/|$)/i.test(url.pathname)) return;
+      const hostname = String(url.hostname || '').toLowerCase();
+      const isMufyHost = hostname === 'mufy.ai' || hostname.endsWith('.mufy.ai')
+        || hostname === 'mufyai.com' || hostname.endsWith('.mufyai.com');
+      if (!isMufyHost || !/(?:^|\/)api(?:\/|$)/i.test(url.pathname)) return;
       const candidate = new pageWindow.Headers(headers || {}).get('authorization') || '';
       if (/^Bearer\s+\S+/i.test(candidate)) {
         authorization = candidate;
         adoptMaskAccountFromAuthorization(candidate);
+        if (!authCaptureLogged) {
+          authCaptureLogged = true;
+          appendRunLog('info', `已从 Mufy API 请求捕获登录凭证（${url.hostname}${url.pathname}；不记录凭证内容）。`);
+        }
         setTimeout(() => scheduleAutoMaskSwitch(), 0);
       }
     } catch (_) {}
@@ -253,8 +262,8 @@
 
   function installAuthCapture() {
     const XHR = pageWindow.XMLHttpRequest;
-    if (XHR && !XHR.prototype.__mufyRecoveryHooked) {
-      XHR.prototype.__mufyRecoveryHooked = true;
+    if (XHR && !XHR.prototype[AUTH_HOOK_MARK]) {
+      XHR.prototype[AUTH_HOOK_MARK] = true;
       const originalOpen = XHR.prototype.open;
       const originalSetRequestHeader = XHR.prototype.setRequestHeader;
       XHR.prototype.open = function (method, url, ...rest) {
@@ -273,7 +282,7 @@
         return originalSetRequestHeader.call(this, name, value);
       };
     }
-    if (pageWindow.fetch && !pageWindow.fetch.__mufyRecoveryHooked) {
+    if (pageWindow.fetch && !pageWindow.fetch[AUTH_HOOK_MARK]) {
       const originalFetch = pageWindow.fetch;
       const wrappedFetch = function (input, init) {
         let requestUrl = '';
@@ -293,7 +302,7 @@
           return result;
         }
       };
-      wrappedFetch.__mufyRecoveryHooked = true;
+      wrappedFetch[AUTH_HOOK_MARK] = true;
       pageWindow.fetch = wrappedFetch;
     }
   }
