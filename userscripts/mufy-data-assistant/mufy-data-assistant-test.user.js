@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.15
+// @version      3.0.0-dev.16
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.15';
+  const SCRIPT_VERSION = '3.0.0-dev.16';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const MASK_LIBRARY_KEY = 'mufy-recovery-mask-library-v1';
   const MASK_LIBRARY_BACKUP_KEY = 'mufy-recovery-mask-library-backup-v1';
@@ -8204,17 +8204,6 @@ roleStateReady = true;
       #mufy-recovery-quote-editor-text:focus{border-color:#9585e2;box-shadow:0 0 0 2px #786bd433}
       #mufy-recovery-quote-editor-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:0 12px 12px}
       #mufy-recovery-quote-editor-save{background:#786bd4!important;border-color:#9c91e7!important;font-weight:700}
-      #mufy-recovery-quote-library-body{flex:1;min-height:0;display:grid;grid-template-columns:minmax(145px,.82fr) minmax(0,1.4fr);overflow:hidden}
-      #mufy-recovery-quote-list{min-height:0;overflow:auto;padding:8px;border-right:1px solid #44424e;background:#1c1c21}
-      .mufy-quote-group{display:grid;gap:5px;margin-bottom:11px}.mufy-quote-group-head{display:flex;align-items:center;gap:6px;padding:3px;color:#ddd}
-      .mufy-quote-group-head img{width:22px;height:22px;border-radius:50%;object-fit:cover}.mufy-quote-group-head b{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px}.mufy-quote-group-head span{margin-left:auto;color:#999;font-size:9px;white-space:nowrap}
-      .mufy-quote-list-item{width:100%;display:grid!important;gap:4px;text-align:left!important;padding:8px!important;border-color:#444!important;background:#29292f!important}
-      .mufy-quote-list-item.active{border-color:#9585e2!important;background:#3b3554!important}.mufy-quote-list-item span{overflow:hidden;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;color:#eee;font:11px/1.45 system-ui}.mufy-quote-list-item small{color:#8f8f99;font-size:9px}
-      #mufy-recovery-quote-workspace{min-width:0;min-height:0;overflow:auto;display:grid;align-content:start;gap:10px;padding:11px}
-      #mufy-recovery-quote-preview{position:relative;box-sizing:border-box;min-height:260px;display:flex;flex-direction:column;justify-content:center;gap:15px;overflow:hidden;padding:28px 24px;border:2px solid var(--quote-accent);border-radius:16px;background:var(--quote-bg);color:var(--quote-color);font-family:var(--quote-font);font-size:var(--quote-size);text-align:var(--quote-align);line-height:1.65;box-shadow:inset 0 0 0 5px color-mix(in srgb,var(--quote-accent) 24%,transparent),0 10px 26px #0006}
-      #mufy-recovery-quote-preview.theme-tarot:before,#mufy-recovery-quote-preview.theme-rose:before{content:'✦';position:absolute;inset:10px;border:1px solid color-mix(in srgb,var(--quote-accent) 58%,transparent);border-radius:11px;color:var(--quote-accent);padding:4px;font-size:13px;pointer-events:none}
-      #mufy-recovery-quote-preview.theme-paper{background:linear-gradient(#ffffff14 1px,transparent 1px),var(--quote-bg);background-size:100% 30px;border-radius:7px;box-shadow:4px 5px 0 color-mix(in srgb,var(--quote-accent) 45%,#000)}
-      #mufy-recovery-quote-preview.theme-rose{background:radial-gradient(circle at 15% 15%,color-mix(in srgb,var(--quote-accent) 32%,transparent),transparent 35%),var(--quote-bg)}
       .mufy-quote-preview-role{position:relative;z-index:1;display:flex;align-items:center;justify-content:center;gap:8px;color:var(--quote-accent);font-size:.82em;font-weight:700;letter-spacing:.08em}.mufy-quote-preview-role img{width:34px;height:34px;border:1px solid var(--quote-accent);border-radius:50%;object-fit:cover}
       .mufy-quote-preview-text{position:relative;z-index:1;white-space:pre-wrap;overflow-wrap:anywhere}.mufy-quote-preview-mark{position:absolute;right:19px;bottom:14px;color:var(--quote-accent);font:9px/1 system-ui;letter-spacing:.12em;opacity:.75}
       #mufy-recovery-quote-style{display:grid;grid-template-columns:1fr 1fr;gap:7px}.mufy-quote-style-field{display:grid;gap:4px;color:#bbb;font-size:10px}.mufy-quote-style-field select,.mufy-quote-style-field input[type="range"]{box-sizing:border-box;width:100%;min-width:0;border:1px solid #555;border-radius:6px;background:#18181c;color:#fff;padding:5px;font:inherit}.mufy-quote-style-field input[type="color"]{box-sizing:border-box;width:100%;height:30px;border:1px solid #555;border-radius:6px;background:#18181c;padding:2px}.mufy-quote-style-check{grid-column:1/-1;display:flex;align-items:center;gap:6px;color:#ccc;font-size:11px}.mufy-quote-style-check input{accent-color:#786bd4}
@@ -8233,11 +8222,14 @@ roleStateReady = true;
       #mufy-recovery-quote-stage-panel{box-sizing:border-box;width:min(100%,430px);max-height:100%;overflow:auto;padding:12px;border:1px solid #766bb1;border-radius:13px;background:#24242c;box-shadow:0 18px 50px #000d}
       #mufy-recovery-quote-stage-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;color:#eee}#mufy-recovery-quote-stage-head small{color:#aaa;font-weight:400}#mufy-recovery-quote-stage-close{padding:1px 7px!important;border:0!important;background:transparent!important;font-size:21px!important}
       #mufy-recovery-quote-preview{width:260px;height:410px;min-height:0;margin:4px auto 12px;padding:0;border:0;border-radius:17px;background:transparent;box-shadow:none;cursor:pointer;perspective:1200px;overflow:visible}
-      #mufy-recovery-quote-preview.theme-tarot,#mufy-recovery-quote-preview.theme-dark,#mufy-recovery-quote-preview.theme-paper,#mufy-recovery-quote-preview.theme-rose{background:transparent;box-shadow:none;border-radius:17px}#mufy-recovery-quote-preview.theme-tarot:before,#mufy-recovery-quote-preview.theme-rose:before{content:none}
       .mufy-quote-card-inner{position:relative;width:100%;height:100%;transform-style:preserve-3d;transition:transform .65s cubic-bezier(.2,.75,.2,1)}#mufy-recovery-quote-preview.is-flipped .mufy-quote-card-inner{transform:rotateY(180deg)}
       .mufy-quote-card-face{position:absolute;inset:0;box-sizing:border-box;overflow:hidden;border:2px solid var(--quote-accent);border-radius:17px;backface-visibility:hidden;box-shadow:inset 0 0 0 6px color-mix(in srgb,var(--quote-accent) 24%,transparent),0 13px 30px #000a}
       .mufy-quote-card-image{background:var(--quote-bg)}.mufy-quote-card-image>img{width:100%;height:100%;object-fit:cover}.mufy-quote-card-image-fallback{display:flex;height:100%;align-items:center;justify-content:center;color:var(--quote-accent);font-size:64px}.mufy-quote-card-image-shade{position:absolute;inset:0;background:linear-gradient(transparent 52%,#000d)}.mufy-quote-card-image strong{position:absolute;left:20px;right:20px;bottom:45px;text-align:center;color:#fff;font:700 22px/1.2 Georgia,"Noto Serif SC",serif;text-shadow:0 2px 6px #000}.mufy-quote-card-image small{position:absolute;left:15px;right:15px;bottom:23px;text-align:center;color:#ffffffb8;font-size:10px}
       .mufy-quote-card-content{display:flex;flex-direction:column;justify-content:center;gap:14px;padding:25px 21px;background:var(--quote-bg);color:var(--quote-color);font-family:var(--quote-font);font-size:var(--quote-size);text-align:var(--quote-align);line-height:1.6;transform:rotateY(180deg)}.mufy-quote-card-content:before{content:'✦';position:absolute;inset:9px;border:1px solid color-mix(in srgb,var(--quote-accent) 55%,transparent);border-radius:11px;color:var(--quote-accent);padding:4px;font-size:12px;pointer-events:none}.mufy-quote-card-content .mufy-quote-preview-text{position:relative;z-index:1;flex:1;min-height:0;overflow-y:auto;white-space:pre-wrap}.mufy-quote-card-content .mufy-quote-preview-mark{right:18px;bottom:14px}
+      #mufy-recovery-quote-preview.theme-dark .mufy-quote-card-content:before{content:'';border-style:dashed;opacity:.55}
+      #mufy-recovery-quote-preview.theme-paper .mufy-quote-card-content{background:linear-gradient(#ffffff14 1px,transparent 1px),var(--quote-bg);background-size:100% 28px}
+      #mufy-recovery-quote-preview.theme-paper .mufy-quote-card-content:before{content:'';border-radius:3px}
+      #mufy-recovery-quote-preview.theme-rose .mufy-quote-card-content{background:radial-gradient(circle at 15% 15%,color-mix(in srgb,var(--quote-accent) 32%,transparent),transparent 36%),radial-gradient(circle at 85% 85%,color-mix(in srgb,var(--quote-accent) 20%,transparent),transparent 35%),var(--quote-bg)}
       #mufy-recovery-quote-inline-editor{position:relative;z-index:2;box-sizing:border-box;flex:1;min-height:0;width:100%;resize:none;overflow-y:auto;border:1px dashed var(--quote-accent);border-radius:8px;background:#0000001f;color:var(--quote-color);padding:7px;font:inherit;line-height:inherit;text-align:inherit;outline:none}#mufy-recovery-quote-inline-editor:focus{box-shadow:0 0 0 2px color-mix(in srgb,var(--quote-accent) 35%,transparent)}
       #mufy-recovery-quote-stage-edit-actions{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin:8px 0}#mufy-recovery-quote-update{background:#62539a!important;border-color:#8878c5!important}
       #mufy-recovery-quote-stage .mufy-quote-style-field,#mufy-recovery-quote-stage .mufy-quote-style-check{margin-top:6px}#mufy-recovery-quote-card-actions{grid-template-columns:repeat(3,1fr);margin-top:8px}
