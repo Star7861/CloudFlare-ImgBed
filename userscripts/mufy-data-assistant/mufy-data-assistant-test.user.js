@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.22
+// @version      3.0.0-dev.23
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.22';
+  const SCRIPT_VERSION = '3.0.0-dev.23';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const MASK_LIBRARY_KEY = 'mufy-recovery-mask-library-v1';
   const MASK_LIBRARY_BACKUP_KEY = 'mufy-recovery-mask-library-backup-v1';
@@ -50,6 +50,8 @@
   const MODEL_MONITOR_SELECTION_KEY = 'mufy-role-links-only-model-monitor-selection-v1';
   const MODEL_MONITOR_SNAPSHOT_KEY = 'mufy-role-links-only-model-monitor-snapshot-v1';
   const MODEL_MONITOR_INTERVAL_MS = 5 * 60 * 1000;
+  const SESSIONLESS_ROLE_IDS_KEY = 'mufy-role-links-only-sessionless-role-ids-v1';
+  const ROLE_FALLBACK_PENDING_KEY = 'mufy-role-links-only-role-fallback-pending-v1';
   const DEFAULT_MANUAL_AUTO_CHAT_MESSAGE = '≽^⚈⩊⚈^≼';
   const AUTHOR_FOLDER_MIGRATION_KEY = 'mufy-recovery-author-folder-migration-v1';
   const AUTHOR_FOLDER_MAP_KEY = 'mufy-recovery-author-folder-map-v1';
@@ -205,6 +207,7 @@
     state.modelMonitorSelectedIds = loadModelMonitorSelection();
     state.modelMonitorRows = [];
     state.modelMonitorLastChecked = '';
+    state.sessionlessRoleIds = loadSessionlessRoleIds();
     reloadMaskAccountPartition(previousScope, nextScope);
   }
 
@@ -552,6 +555,17 @@
     try { localStorage.setItem(accountStorageKey(MODEL_MONITOR_SNAPSHOT_KEY), JSON.stringify({ rows, checkedAt })); } catch (_) {}
   }
 
+  function loadSessionlessRoleIds() {
+    try {
+      const ids = JSON.parse(loadAndMigrateScopedValue(SESSIONLESS_ROLE_IDS_KEY) || '[]');
+      return new Set(Array.isArray(ids) ? ids.map(String).filter(Boolean) : []);
+    } catch (_) { return new Set(); }
+  }
+
+  function saveSessionlessRoleIds() {
+    try { localStorage.setItem(accountStorageKey(SESSIONLESS_ROLE_IDS_KEY), JSON.stringify([...state.sessionlessRoleIds])); } catch (_) {}
+  }
+
 
   function goToNextManualFavoriteChat() {
     if (!state.manualFavoriteChats.length) {
@@ -609,6 +623,7 @@
     modelMonitorLoading: false,
     modelMonitorLastChecked: loadModelMonitorSnapshot().checkedAt || '',
     modelMonitorError: '',
+    sessionlessRoleIds: loadSessionlessRoleIds(),
     archived: cachedRoles?.archived || [],
     roleHistory: [],
     archiveCheckedCharacterIds: new Set(cachedRoles?.archiveCheckedCharacterIds || []),
@@ -671,13 +686,6 @@
   };
   if (maskLibraryStorageWarning) state.status = maskLibraryStorageWarning;
 roleStateReady = true;
-  try {
-    for (let index = localStorage.length - 1; index >= 0; index -= 1) {
-      const key = String(localStorage.key(index) || '');
-      if (key.startsWith('mufy-role-links-only-sessionless-role-ids-v1')) localStorage.removeItem(key);
-    }
-    sessionStorage.removeItem('mufy-role-links-only-role-fallback-pending-v1');
-  } catch (_) {}
   if (pendingSiteCaptureRows.length) {
     pendingSiteCaptureRows.splice(0).forEach(item => addCapturedSiteRows(item.rows, item.pageScope));
   }
@@ -1970,10 +1978,11 @@ roleStateReady = true;
     if (state.autoSwitch) scheduleAutoMaskSwitch();
   }
 
-  function sessionUrl(row) {
+  function sessionUrl(row, forceSession = false) {
     const url = new URL('/chat', location.origin);
     url.searchParams.set('roleId', row.characterId);
-    if (row.lastSessionId) url.searchParams.set('sessionId', row.lastSessionId);
+    const useSession = forceSession || !state.sessionlessRoleIds?.has(String(row.characterId));
+    if (useSession && row.lastSessionId) url.searchParams.set('sessionId', row.lastSessionId);
     return url.href;
   }
 
@@ -2597,7 +2606,7 @@ roleStateReady = true;
   function clearLegacyUnavailableStatus(row) {
     if (!row || typeof row !== 'object') return row;
     const error = String(row.metadataError || '');
-    const wasLegacyGuess = row.availability === '分享已失效'
+    const wasLegacyGuess = (row.availability === '分享已失效' && /HTTP 503。角色的分享链接已经失效/.test(error))
       || (row.availability === '角色已删除' && /HTTP 500。角色已被删除/.test(error));
     if (!wasLegacyGuess) return row;
     return { ...row, availability: '', metadataChecked: false, metadataError: '旧版把分享状态或 HTTP 状态误作角色状态，等待重新检测', metadataErrorCode: 0 };
@@ -2639,9 +2648,10 @@ roleStateReady = true;
           return { availability: '角色已删除', metadataError: explainFailure(error), metadataErrorCode: response.status, metadataChecked: true };
         }
         if (isShareLinkResponse(body, raw)) {
-          const explanation = '角色详情接口返回分享链接失效；分享码只属于分享/收藏流程，不能据此判断角色或历史会话失效。';
-          metadataFailureReasons.add(explanation);
-          return { metadataError: explanation, metadataErrorCode: response.status, metadataChecked: false };
+          state.sessionlessRoleIds.add(String(characterId));
+          saveSessionlessRoleIds();
+          const explanation = '角色详情明确返回 share_link_expired；已只对该角色改用不含 sessionId 的链接，等待打开后二次验证。';
+          return { availability: '分享已失效', metadataError: explanation, metadataErrorCode: response.status, metadataChecked: true };
         }
         const explanation = explainFailure(error);
         metadataFailureReasons.add(explanation);
@@ -3200,6 +3210,114 @@ roleStateReady = true;
       characterId: url.searchParams.get('roleId') || '',
       sessionId: url.searchParams.get('sessionId') || ''
     };
+  }
+
+  function exactRoleFailureOnPage() {
+    const nodes = document.querySelectorAll('h1,h2,h3,[role="alert"],[role="status"],p,span,pre');
+    for (const node of nodes) {
+      if (!isVisibleElement(node)) continue;
+      const text = String(node.textContent || '').trim().replace(/\s+/g, ' ');
+      if (!text || text.length > 240) continue;
+      if (/share_link_expired|分享链接已失效/i.test(text)) return { type: 'share', text };
+      if (/character removed by creator|该角色已被创作者删除/i.test(text)) return { type: 'deleted', text };
+    }
+    return null;
+  }
+
+  function updateRoleFallbackRecord(characterId, availability = '') {
+    const id = String(characterId || '');
+    const update = row => String(row?.characterId || '') !== id ? row : {
+      ...row,
+      availability,
+      metadataChecked: true,
+      metadataError: availability
+        ? (availability === '角色已删除' ? '页面明确显示角色已被创作者删除' : '去掉 sessionId 后仍明确显示分享链接已失效')
+        : '',
+      metadataErrorCode: 0
+    };
+    state.chatted = state.chatted.map(update);
+    state.chattedNotFavorite = state.chattedNotFavorite.map(update);
+    state.favoriteOnly = state.favoriteOnly.map(update);
+    state.archived = state.archived.map(update);
+    state.roleHistory = state.roleHistory.map(update);
+    state.siteSearchRows = state.siteSearchRows.map(update);
+    saveRoleCache();
+  }
+
+  function installExactRoleFallback() {
+    if (pageWindow.location.pathname !== '/chat') return;
+    const context = currentRoleContext();
+    if (!context.characterId) return;
+    let pending = null;
+    try { pending = JSON.parse(sessionStorage.getItem(ROLE_FALLBACK_PENDING_KEY) || 'null'); } catch (_) {}
+    if (pending && (String(pending.characterId) !== context.characterId || Date.now() - Number(pending.startedAt || 0) > 120000)) {
+      try { sessionStorage.removeItem(ROLE_FALLBACK_PENDING_KEY); } catch (_) {}
+      pending = null;
+    }
+    let checks = 0;
+    const timer = setInterval(() => {
+      checks += 1;
+      const failure = exactRoleFailureOnPage();
+      const textarea = findChatTextarea();
+      const ready = Boolean(textarea && !textarea.disabled && isVisibleElement(textarea));
+      if (pending) {
+        if (ready && checks >= 3) {
+          clearInterval(timer);
+          try { sessionStorage.removeItem(ROLE_FALLBACK_PENDING_KEY); } catch (_) {}
+          state.sessionlessRoleIds.add(context.characterId);
+          saveSessionlessRoleIds();
+          updateRoleFallbackRecord(context.characterId, '');
+          state.status = '原会话链接失效，但纯角色链接可以打开；以后该角色将自动使用不含 sessionId 的链接。';
+          render();
+          return;
+        }
+        if (!ready && failure) {
+          clearInterval(timer);
+          try { sessionStorage.removeItem(ROLE_FALLBACK_PENDING_KEY); } catch (_) {}
+          const availability = failure.type === 'deleted' ? '角色已删除' : '分享已失效';
+          updateRoleFallbackRecord(context.characterId, availability);
+          state.status = `纯角色链接二次验证仍然失效：${failure.text}`;
+          render();
+          return;
+        }
+      } else if (context.sessionId && !ready && failure?.type === 'share') {
+        clearInterval(timer);
+        try {
+          sessionStorage.setItem(ROLE_FALLBACK_PENDING_KEY, JSON.stringify({
+            characterId: context.characterId,
+            sessionId: context.sessionId,
+            startedAt: Date.now()
+          }));
+        } catch (_) {}
+        pageWindow.location.replace(roleUrl(context.characterId));
+        return;
+      } else if (!context.sessionId && state.sessionlessRoleIds.has(context.characterId)) {
+        if (ready && checks >= 3) {
+          clearInterval(timer);
+          updateRoleFallbackRecord(context.characterId, '');
+          state.status = '纯角色链接验证成功；已清除该角色的失效标记。';
+          render();
+          return;
+        }
+        if (!ready && failure) {
+          clearInterval(timer);
+          updateRoleFallbackRecord(context.characterId, failure.type === 'deleted' ? '角色已删除' : '分享已失效');
+          state.status = `纯角色链接二次验证仍然失效：${failure.text}`;
+          render();
+          return;
+        }
+      } else if (!ready && failure?.type === 'deleted') {
+        clearInterval(timer);
+        updateRoleFallbackRecord(context.characterId, '角色已删除');
+        state.status = `角色已被创作者删除：${failure.text}`;
+        render();
+        return;
+      }
+      if (checks >= 40) {
+        clearInterval(timer);
+        if (pending) try { sessionStorage.removeItem(ROLE_FALLBACK_PENDING_KEY); } catch (_) {}
+      }
+    }, 500);
   }
 
   async function recordCurrentChatHistory() {
@@ -4033,6 +4151,7 @@ roleStateReady = true;
   }
 
   function visibilityLabel(row) {
+    if (row.availability === '分享已失效') return '分享已失效';
     if (row.availability === '角色已删除') return '角色已删除';
     const visibility = visibilityFrom(row);
     return visibility;
@@ -4044,6 +4163,7 @@ roleStateReady = true;
     return (filter === 'public' && status === '公开')
       || (filter === 'link' && status === '仅链接')
       || (filter === 'private' && status === '私密')
+      || (filter === 'expired' && status === '分享已失效')
       || (filter === 'deleted' && status === '角色已删除');
   }
 
@@ -4052,6 +4172,7 @@ roleStateReady = true;
       public: rows.filter(row => visibilityLabel(row) === '公开').length,
       link: rows.filter(row => visibilityLabel(row) === '仅链接').length,
       private: rows.filter(row => visibilityLabel(row) === '私密').length,
+      expired: rows.filter(row => visibilityLabel(row) === '分享已失效').length,
       deleted: rows.filter(row => visibilityLabel(row) === '角色已删除').length,
       unknown: rows.filter(row => visibilityLabel(row) === '未知').length
     };
@@ -7281,7 +7402,7 @@ roleStateReady = true;
     const className = visibility === '公开' ? 'public'
       : visibility === '仅链接' ? 'link'
         : visibility === '私密' ? 'private'
-      : visibility === '角色已删除' ? 'expired'
+      : visibility === '分享已失效' || visibility === '角色已删除' ? 'expired'
             : 'unknown';
     const errorCode = visibility === '未知' && row.metadataErrorCode ? `（HTTP ${row.metadataErrorCode}）` : '';
     return `<span class="mufy-recovery-visibility ${className}">${esc(visibility + errorCode)}</span>`;
@@ -7319,7 +7440,10 @@ roleStateReady = true;
       ? `<div class="mufy-recovery-archives">${archiveRows.map((item, archiveIndex) => `<a href="${esc(sessionUrl(item))}" target="_blank" rel="noreferrer">旧档 ${archiveIndex + 1}${item.archiveRemark ? ` · ${esc(item.archiveRemark)}` : ''}${item.archiveUpdatedAt || item.archiveCreatedAt ? ` · ${esc(new Date(item.archiveUpdatedAt || item.archiveCreatedAt).toLocaleString('zh-CN'))}` : ''}</a>`).join('') || '<span>没有找到归档旧档</span>'}</div>`
       : '';
     const matchSnippet = row.chatMatchSnippet ? `<div class="mufy-recovery-chat-match"><b>${esc(chatRoleLabel(row.chatMatchRole))}${row.chatMatchTime ? ` · ${esc(new Date(row.chatMatchTime).toLocaleString('zh-CN'))}` : ''}</b><span>${markedChatSnippet(row.chatMatchSnippet, state.chatSearchQuery)}</span></div>` : '';
-    const openLabel = state.active === 'chatted' || state.active === 'chattedNotFavorite' || state.active === 'chatMatches' ? '打开匹配会话' : '打开角色';
+    const sessionlessFallback = state.sessionlessRoleIds.has(String(row.characterId));
+    const openLabel = sessionlessFallback
+      ? '打开角色（二次验证）'
+      : state.active === 'chatted' || state.active === 'chattedNotFavorite' || state.active === 'chatMatches' ? '打开匹配会话' : '打开角色';
     const openLink = state.active === 'chatMatches'
       ? `<button class="mufy-recovery-chat-jump" data-action="jump-chat-match" data-index="${index}">${openLabel}</button>`
       : `<a href="${esc(sessionUrl(row))}" rel="noreferrer">${openLabel}</a>`;
@@ -7978,10 +8102,10 @@ roleStateReady = true;
         ['public', '公开', statusCounts.public],
         ['link', '仅链接', statusCounts.link],
         ['private', '私密', statusCounts.private],
+        ['expired', '分享已失效', statusCounts.expired],
         ['deleted', '角色已删除', statusCounts.deleted]
       ];
       statusFilter.innerHTML = statusOptions.map(([value, label, count]) => `<option value="${value}">${label}（${count}）</option>`).join('');
-      if (state.statusFilter === 'expired') state.statusFilter = 'all';
       statusFilter.value = state.statusFilter;
     }
     const query = isMaskView ? state.maskQuery : (isWebView ? '' : state.roleQuery);
@@ -9185,6 +9309,7 @@ roleStateReady = true;
       render();
     }, 1600);
     setTimeout(() => locatePendingChatJump(), 1400);
+    setTimeout(() => installExactRoleFallback(), 700);
   }
 
   let bootTimer = 0;
