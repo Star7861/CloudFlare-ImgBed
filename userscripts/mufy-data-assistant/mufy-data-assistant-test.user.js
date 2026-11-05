@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.4
+// @version      3.0.0-dev.5
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.4';
+  const SCRIPT_VERSION = '3.0.0-dev.5';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const MASK_LIBRARY_KEY = 'mufy-recovery-mask-library-v1';
   const MASK_LIBRARY_BACKUP_KEY = 'mufy-recovery-mask-library-backup-v1';
@@ -2589,7 +2589,7 @@ roleStateReady = true;
     const url = new URL('/api/masks/query', location.origin);
     const headers = { Accept: 'application/json', 'Content-Type': 'application/json' };
     if (authorization) headers.Authorization = authorization;
-    const response = await pageWindow.fetch(url.href, {
+    const requestOptions = {
       method: 'POST',
       credentials: 'include',
       cache: 'no-store',
@@ -2600,9 +2600,22 @@ roleStateReady = true;
         priorityMaskIds: state.currentSiteMasks.map(row => Number(row.maskId)).filter(Number.isFinite),
         ...(search ? { search } : {})
       })
-    });
+    };
+    let response = await pageWindow.fetch(url.href, requestOptions);
+    // Mufy 页面加载后偶尔会保留或发出一枚旧 Bearer。服务器会优先拒绝
+    // 这枚旧令牌，即使当前浏览器的 Cookie 登录仍然有效；去掉它重试可避免
+    // 出现“页面未加载完能读取，加载完成反而显示没有登录权限”的误报。
+    if ((response.status === 401 || response.status === 403) && authorization) {
+      const cookieHeaders = new pageWindow.Headers(headers);
+      cookieHeaders.delete('Authorization');
+      response = await pageWindow.fetch(url.href, { ...requestOptions, headers: cookieHeaders });
+      if (response.ok) {
+        authorization = '';
+        appendRunLog('warn', '面具接口拒绝了页面令牌，已改用当前登录 Cookie 并读取成功。');
+      }
+    }
     if (response.status === 401 || response.status === 403) {
-      throw new Error('面具接口没有获得登录权限，请刷新 Mufy 页面后重试');
+      throw new Error(`面具接口没有获得登录权限（HTTP ${response.status}）。已同时尝试页面令牌和当前登录 Cookie，请重新登录 Mufy 后再试`);
     }
     if (!response.ok) throw new Error(`面具接口请求失败（HTTP ${response.status}）`);
     const body = await response.json();
