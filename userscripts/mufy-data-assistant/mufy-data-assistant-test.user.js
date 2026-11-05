@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.8
+// @version      3.0.0-dev.9
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.8';
+  const SCRIPT_VERSION = '3.0.0-dev.9';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const MASK_LIBRARY_KEY = 'mufy-recovery-mask-library-v1';
   const MASK_LIBRARY_BACKUP_KEY = 'mufy-recovery-mask-library-backup-v1';
@@ -6405,45 +6405,24 @@ roleStateReady = true;
 
   function makeChatExportFiles(result, context, characterName) {
     const exportedAt = new Date().toISOString();
-    const manifest = {
-      schemaVersion: 1,
-      exportedAt,
-      sourceUrl: pageWindow.location.href,
-      characterName,
-      characterId: context.characterId,
-      sessionId: context.sessionId,
-      complete: result.complete,
-      expectedTotal: result.expectedTotal,
-      exportedCount: result.rows.length,
-      pagesRead: result.pagesRead,
-      pageSize: result.pageSize,
-      duplicatesRemoved: result.duplicates,
-      totalsObserved: result.totals,
-      checks: {
-        reachedPaginationEnd: result.reachedEnd,
-        countMatchesServerTotal: result.countMatchesTotal,
-        serverTotalStayedStable: result.totals.length === 1
-      }
-    };
     const warning = result.complete
       ? '完整性校验通过：已到达分页末尾，去重后的消息数与服务器 total 完全一致。'
-      : '警告：完整性校验未通过。文件仍保留已读取内容，但不能视为完整备份。';
+      : '警告：完整性校验未通过。页面仍保留已读取内容，但不能视为完整导出。';
+    const checkText = `分页末尾：${result.reachedEnd ? '已到达' : '未确认'} · 数量一致：${result.countMatchesTotal ? '是' : '否'} · 总数稳定：${result.totals.length === 1 ? '是' : '否'} · 去重：${result.duplicates} 条`;
     const text = [
       `角色：${characterName}`,
-      `会话 ID：${context.sessionId}`,
       `导出时间：${new Date(exportedAt).toLocaleString('zh-CN')}`,
       `消息：${result.rows.length}/${result.expectedTotal ?? '未知'}`,
       warning,
+      checkText,
       '',
       ...result.rows.flatMap(row => [`[${row.createdTime || row.updatedTime || ''}] ${chatRoleLabel(row.role)}`, plainDialogContent(row), ''])
     ].join('\n');
     const articles = result.rows.map(row => `<article class="message ${esc(row.role || '')}"><header><b>${esc(chatRoleLabel(row.role))}</b><time>${esc(row.createdTime || row.updatedTime || '')}</time></header><div class="content">${safeDialogHtml(row)}</div></article>`).join('\n');
-    const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(characterName)} - Mufy 聊天导出</title><style>body{max-width:960px;margin:auto;padding:24px;background:#17171b;color:#eee;font:15px/1.65 system-ui}h1{font-size:22px}.summary,.message{padding:14px 16px;margin:12px 0;border:1px solid #444;border-radius:10px;background:#23232a}.summary.ok{border-color:#398b5d}.summary.warn{border-color:#b88435}.message header{display:flex;justify-content:space-between;gap:12px;color:#bdb8ef}.message.user{border-left:4px solid #6d9df7}.message.assistant{border-left:4px solid #a879e8}.content{overflow-wrap:anywhere}.content img{max-width:100%;height:auto}time{font-size:12px;color:#999}pre{white-space:pre-wrap}</style></head><body><h1>${esc(characterName)}</h1><section class="summary ${result.complete ? 'ok' : 'warn'}"><b>${esc(warning)}</b><div>消息：${result.rows.length}/${result.expectedTotal ?? '未知'} · 会话：${esc(context.sessionId)} · 导出：${esc(new Date(exportedAt).toLocaleString('zh-CN'))}</div></section>${articles}</body></html>`;
+    const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(characterName)} - Mufy 聊天导出</title><style>body{max-width:960px;margin:auto;padding:24px;background:#17171b;color:#eee;font:15px/1.65 system-ui}h1{font-size:22px}.summary,.message{padding:14px 16px;margin:12px 0;border:1px solid #444;border-radius:10px;background:#23232a}.summary.ok{border-color:#398b5d}.summary.warn{border-color:#b88435}.checks{margin-top:8px;color:#aaa;font-size:12px}.message header{display:flex;justify-content:space-between;gap:12px;color:#bdb8ef}.message.user{border-left:4px solid #6d9df7}.message.assistant{border-left:4px solid #a879e8}.content{overflow-wrap:anywhere}.content img{max-width:100%;height:auto}time{font-size:12px;color:#999}pre{white-space:pre-wrap}@media(max-width:600px){body{padding:10px}.message{padding:11px 12px}}</style></head><body><h1>${esc(characterName)}</h1><section class="summary ${result.complete ? 'ok' : 'warn'}"><b>${esc(warning)}</b><div>消息：${result.rows.length}/${result.expectedTotal ?? '未知'} · 导出：${esc(new Date(exportedAt).toLocaleString('zh-CN'))}</div><div class="checks">${esc(checkText)}</div></section>${articles}</body></html>`;
     return [
-      { name: '完整性报告.json', content: JSON.stringify(manifest, null, 2) },
-      { name: '聊天记录.json', content: JSON.stringify({ manifest, messages: result.rows }, null, 2) },
-      { name: '聊天记录.txt', content: text },
-      { name: '聊天记录.html', content: html }
+      { name: '聊天记录.html', content: html },
+      { name: '聊天记录.txt', content: text }
     ];
   }
 
@@ -6482,7 +6461,7 @@ roleStateReady = true;
       downloadBlob(`mufy-chat-${chatExportName(characterName)}-${date}.zip`, storedZip(files));
       state.status = result.complete
         ? `当前聊天已完整导出：${result.rows.length}/${result.expectedTotal} 条，分页末尾和服务器总数校验均通过。`
-        : `聊天导出完成但校验未通过：读取 ${result.rows.length}/${result.expectedTotal ?? '未知'} 条；压缩包内已写明不完整原因。`;
+        : `聊天导出完成但校验未通过：读取 ${result.rows.length}/${result.expectedTotal ?? '未知'} 条；HTML 和 TXT 顶部均已标明不完整。`;
       appendRunLog(result.complete ? 'info' : 'warn', state.status);
     } catch (error) {
       if (error?.name === 'AbortError' || state.chatExportStopRequested) state.status = '已停止聊天导出，未生成不完整文件。';
@@ -7648,7 +7627,7 @@ roleStateReady = true;
 <li><strong>整理或删除收藏夹：</strong>点击角色区域的“收藏夹”，可以按作者创建或复用收藏夹并整理角色，也可以进入管理界面核对角色数量、筛选空收藏夹或批量删除。删除收藏夹不会取消角色收藏，且不能由脚本撤回。</li>
 <li><strong>普通收藏：</strong>角色卡片右侧的星星可以收藏或取消收藏。收藏时会优先使用并保存当前账号的分享链接；没有分享链接时会提示并改用普通收藏。批量收藏结束会弹窗显示分享链接收藏数和普通收藏数。</li>
 <li><strong>普通角色一键扣数：</strong>进入“网页”→“普通待聊”，可以修改默认发送内容并启动“一键扣数”。脚本会逐个打开角色、发送一次消息，并等待回复生成结束且 URL 出现 sessionId 后再进入下一个；任务可以停止、继续或取消。</li>
-<li><strong>完整导出当前聊天：</strong>进入一段已有 sessionId 的具体聊天，点击面板顶部“导出聊天”。脚本会直接分页读取服务器记录，按消息 ID 去重，并用服务器 total 与分页末尾双重校验；压缩包包含原始 JSON、可阅读 HTML、纯文本和完整性报告。再次点击可停止导出。</li>
+<li><strong>完整导出当前聊天：</strong>进入一段已有 sessionId 的具体聊天，点击面板顶部“导出聊天”。脚本会直接分页读取服务器记录，按消息 ID 去重，并用服务器 total 与分页末尾双重校验；最终下载一个 ZIP，内含适合手机浏览器阅读的 HTML 和纯文字 TXT，不包含 JSON。再次点击可停止导出。</li>
 <li><strong>导出分享链接：</strong>点击“导出角色”，再选择“仅分享链接 TXT”。角色 JSON/CSV 也会附带已保存的分享链接；独立 TXT 会导出当前账号缓存中的全部分享链接，包括当前角色列表里已经找不到但本地仍有记录的角色。</li>
 <li><strong>收藏未聊转为链接收藏：</strong>进入“收藏未聊”，点击“检测未记录角色”。分享链接记录按账号隔离，本账号已有记录的角色会直接跳过；其余角色严格一次处理一个：先保存分享链接，再取消原收藏，从分享链接进入并重新收藏。任务可以中断、继续或彻底取消。</li>
 <li><strong>中断收藏：</strong>收藏任务运行时可点击“中断收藏”，选择保留剩余队列或彻底取消。脚本开关、浏览器关闭等原因留下的未完成任务不会自行恢复，必须手动选择“继续收藏”，也可以直接“取消任务”。</li>
@@ -8227,3 +8206,4 @@ roleStateReady = true;
     mountGuard.observe(document.documentElement, { childList: true, subtree: true });
   } catch (_) {}
 })();
+
