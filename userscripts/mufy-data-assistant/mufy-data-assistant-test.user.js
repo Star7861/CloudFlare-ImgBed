@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.36
+// @version      3.0.0-dev.37
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.36';
+  const SCRIPT_VERSION = '3.0.0-dev.37';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const MASK_LIBRARY_KEY = 'mufy-recovery-mask-library-v1';
   const MASK_LIBRARY_BACKUP_KEY = 'mufy-recovery-mask-library-backup-v1';
@@ -51,6 +51,7 @@
   const CHAT_JUMP_KEY = 'mufy-role-links-only-chat-jump-v1';
   const QUOTE_CARD_KEY = 'mufy-role-links-only-quote-cards-v1';
   const QUOTE_STYLE_KEY = 'mufy-role-links-only-quote-style-v1';
+  const REGEX_RULES_KEY = 'mufy-role-links-only-regex-rules-v1';
   const MODEL_MONITOR_SELECTION_KEY = 'mufy-role-links-only-model-monitor-selection-v1';
   const MODEL_MONITOR_SNAPSHOT_KEY = 'mufy-role-links-only-model-monitor-snapshot-v1';
   const MODEL_MONITOR_INTERVAL_MS = 5 * 60 * 1000;
@@ -210,6 +211,8 @@
     state.quoteCards = loadQuoteCards();
     state.quoteStyle = loadQuoteStyle();
     state.quoteSelectedId = '';
+    state.regexRules = loadRegexRules();
+    setTimeout(() => refreshRegexOnPage(), 0);
     state.modelMonitorSelectedIds = loadModelMonitorSelection();
     state.modelMonitorRows = [];
     state.modelMonitorLastChecked = '';
@@ -635,6 +638,131 @@
     try { localStorage.setItem(accountStorageKey(QUOTE_STYLE_KEY), JSON.stringify(state.quoteStyle)); } catch (_) {}
   }
 
+  function normalizeRegexRule(row = {}) {
+    return {
+      id: String(row.id || pageWindow.crypto?.randomUUID?.() || `regex-${Date.now()}-${Math.random().toString(36).slice(2)}`),
+      name: String(row.name || '未命名规则').trim() || '未命名规则',
+      pattern: String(row.pattern || ''),
+      replacement: String(row.replacement || ''),
+      flags: String(row.flags || 'g').replace(/[^dgimsuvy]/g, ''),
+      enabled: row.enabled !== false
+    };
+  }
+
+  function loadRegexRules() {
+    try {
+      const rows = JSON.parse(loadAndMigrateScopedValue(REGEX_RULES_KEY) || '[]');
+      return Array.isArray(rows) ? rows.filter(row => row && typeof row === 'object').map(normalizeRegexRule) : [];
+    } catch (_) { return []; }
+  }
+
+  function saveRegexRules() {
+    try {
+      localStorage.setItem(accountStorageKey(REGEX_RULES_KEY), JSON.stringify(state.regexRules));
+      return true;
+    } catch (error) {
+      appendRunLog('error', '正则规则保存失败', error);
+      state.status = '正则规则未能保存，可能是浏览器本地空间不足。';
+      return false;
+    }
+  }
+
+  function compiledRegexRule(rule) {
+    if (!rule?.pattern) return { regex: null, error: '查找表达式为空' };
+    try { return { regex: new RegExp(rule.pattern, rule.flags), error: '' }; }
+    catch (error) { return { regex: null, error: String(error?.message || error) }; }
+  }
+
+  function applyRegexRulesToText(text) {
+    let output = String(text ?? '');
+    for (const rule of state.regexRules) {
+      if (!rule.enabled) continue;
+      const compiled = compiledRegexRule(rule);
+      if (!compiled.regex) continue;
+      try {
+        const next = output.replace(compiled.regex, rule.replacement);
+        if (next.length > Math.max(20000, output.length * 8 + 2000)) continue;
+        output = next;
+      } catch (_) {}
+    }
+    return output;
+  }
+
+  const regexTextState = new WeakMap();
+  let regexApplying = false;
+
+  function applyRegexToTextNode(node) {
+    if (!node || node.nodeType !== Node.TEXT_NODE || !node.parentElement?.closest?.('.react-markdown')) return;
+    if (node.parentElement.closest('#mufy-recovery-panel,script,style,textarea,input,[contenteditable="true"]')) return;
+    const current = String(node.nodeValue || '');
+    const previous = regexTextState.get(node);
+    const original = previous && current === previous.applied ? previous.original : current;
+    const applied = applyRegexRulesToText(original);
+    regexTextState.set(node, { original, applied });
+    if (current !== applied) node.nodeValue = applied;
+  }
+
+  function applyRegexInRoot(root = document) {
+    if (regexApplying || !root) return;
+    regexApplying = true;
+    try {
+      if (root.nodeType === Node.TEXT_NODE) {
+        applyRegexToTextNode(root);
+        return;
+      }
+      const markdownRoots = [];
+      if (root.matches?.('.react-markdown')) markdownRoots.push(root);
+      root.querySelectorAll?.('.react-markdown').forEach(item => markdownRoots.push(item));
+      if (root.closest?.('.react-markdown')) markdownRoots.push(root.closest('.react-markdown'));
+      [...new Set(markdownRoots)].forEach(markdown => {
+        const walker = document.createTreeWalker(markdown, NodeFilter.SHOW_TEXT);
+        let node;
+        while ((node = walker.nextNode())) applyRegexToTextNode(node);
+      });
+    } finally {
+      regexApplying = false;
+    }
+  }
+
+  function refreshRegexOnPage() {
+    applyRegexInRoot(document);
+    renderRegexSection();
+  }
+
+  function renderRegexSection() {
+    const list = panel?.querySelector('#mufy-recovery-regex-list');
+    if (!list) return;
+    list.innerHTML = state.regexRules.map((rule, index) => {
+      const error = compiledRegexRule(rule).error;
+      return `<div class="mufy-regex-rule ${rule.enabled ? 'is-enabled' : ''}"><label><input type="checkbox" data-regex-toggle="${esc(rule.id)}" ${rule.enabled ? 'checked' : ''}><span><b>${esc(rule.name)}</b><small>/${esc(rule.pattern)}/${esc(rule.flags)} → ${esc(rule.replacement || '（删除匹配内容）')}</small>${error ? `<em>${esc(error)}</em>` : ''}</span></label><span class="mufy-regex-rule-actions"><button data-regex-edit="${esc(rule.id)}">编辑</button><button data-regex-delete="${esc(rule.id)}">删除</button><button data-regex-up="${esc(rule.id)}" ${index === 0 ? 'disabled' : ''}>上移</button></span></div>`;
+    }).join('') || '<div class="mufy-recovery-empty">还没有正则规则。点击“新增规则”创建第一条。</div>';
+    const sample = panel.querySelector('#mufy-recovery-regex-test-input');
+    const output = panel.querySelector('#mufy-recovery-regex-test-output');
+    if (sample && output) output.value = applyRegexRulesToText(sample.value);
+  }
+
+  function editRegexRule(existingId = '') {
+    const existing = state.regexRules.find(row => row.id === existingId);
+    const name = pageWindow.prompt('规则名称', existing?.name || '新规则');
+    if (name == null) return;
+    const pattern = pageWindow.prompt('查找表达式（不需要输入两侧的 /）', existing?.pattern || '');
+    if (pattern == null) return;
+    const replacement = pageWindow.prompt('替换内容；可以使用 $1、$2 等捕获组。留空表示删除匹配内容。', existing?.replacement || '');
+    if (replacement == null) return;
+    const flags = pageWindow.prompt('flags，例如 g、gi、gim', existing?.flags || 'g');
+    if (flags == null) return;
+    const next = normalizeRegexRule({ ...existing, id: existing?.id, name, pattern, replacement, flags, enabled: existing?.enabled !== false });
+    const error = compiledRegexRule(next).error;
+    if (error) {
+      pageWindow.alert(`正则表达式无效：${error}`);
+      return;
+    }
+    if (existing) state.regexRules = state.regexRules.map(row => row.id === existing.id ? next : row);
+    else state.regexRules.push(next);
+    saveRegexRules();
+    refreshRegexOnPage();
+  }
+
   function loadModelMonitorSelection() {
     try {
       const ids = JSON.parse(loadAndMigrateScopedValue(MODEL_MONITOR_SELECTION_KEY) || '[]');
@@ -722,6 +850,7 @@
     quoteCards: loadQuoteCards(),
     quoteStyle: loadQuoteStyle(),
     quoteSelectedId: '',
+    regexRules: loadRegexRules(),
     modelMonitorRows: loadModelMonitorSnapshot().rows || [],
     modelMonitorSelectedIds: loadModelMonitorSelection(),
     modelMonitorLoading: false,
@@ -8125,20 +8254,24 @@ roleStateReady = true;
 
   function installMessageQuoteButtons() {
     injectMessageQuoteButtons();
+    applyRegexInRoot(document);
     messageQuoteObserver?.disconnect();
     messageQuoteObserver = new MutationObserver(mutations => {
       for (const mutation of mutations) {
+        if (mutation.type === 'characterData') applyRegexToTextNode(mutation.target);
         const targetBox = mutation.target?.closest?.('[id="mufy_message_actions_box"]');
         if (targetBox) injectMessageQuoteButtons(targetBox);
         for (const node of mutation.addedNodes) {
+          if (node.nodeType === Node.TEXT_NODE) { applyRegexToTextNode(node); continue; }
           if (node.nodeType !== 1) continue;
           const addedBox = node.matches?.('[id="mufy_message_actions_box"]') ? node : node.closest?.('[id="mufy_message_actions_box"]');
           if (addedBox) injectMessageQuoteButtons(addedBox);
           else if (node.querySelector?.('[id="mufy_message_actions_box"]')) injectMessageQuoteButtons(node);
+          applyRegexInRoot(node);
         }
       }
     });
-    messageQuoteObserver.observe(document.body, { childList: true, subtree: true });
+    messageQuoteObserver.observe(document.body, { childList: true, characterData: true, subtree: true });
   }
 
   function quoteCardGroups() {
@@ -8592,12 +8725,14 @@ roleStateReady = true;
     const roleSection = panel.querySelector('#mufy-recovery-role-section');
     const favoriteSection = panel.querySelector('#mufy-recovery-favorite-section');
     const chatSection = panel.querySelector('#mufy-recovery-chat-section');
+    const beautySection = panel.querySelector('#mufy-recovery-beauty-section');
+    const regexSection = panel.querySelector('#mufy-recovery-regex-section');
     const maskSection = panel.querySelector('#mufy-recovery-mask-section');
     const webSection = panel.querySelector('#mufy-recovery-web-section');
     const sectionHome = panel.querySelector('#mufy-recovery-section-home');
     const sectionNav = panel.querySelector('#mufy-recovery-section-nav');
     const sectionTitle = panel.querySelector('#mufy-recovery-section-title');
-    const sectionNames = { roles: '角色', favorites: '收藏', chats: '聊天记录', masks: '面具', web: '网页' };
+    const sectionNames = { roles: '角色', favorites: '收藏', chats: '聊天记录', beauty: '美化', regex: '正则', masks: '面具', web: '网页' };
     if (sectionHome) sectionHome.hidden = state.section !== 'home';
     if (sectionNav) sectionNav.hidden = state.section === 'home';
     if (sectionTitle) sectionTitle.textContent = sectionNames[state.section] || '';
@@ -8609,10 +8744,12 @@ roleStateReady = true;
     if (roleSection) roleSection.hidden = state.section !== 'roles';
     if (favoriteSection) favoriteSection.hidden = state.section !== 'favorites';
     if (chatSection) chatSection.hidden = state.section !== 'chats';
+    if (beautySection) beautySection.hidden = state.section !== 'beauty';
+    if (regexSection) regexSection.hidden = state.section !== 'regex';
     if (maskSection) maskSection.hidden = state.section !== 'masks';
     if (webSection) webSection.hidden = state.section !== 'web';
     const resultList = panel.querySelector('#mufy-recovery-list');
-    if (resultList) resultList.hidden = state.section === 'home';
+    if (resultList) resultList.hidden = ['home', 'beauty', 'regex'].includes(state.section);
     const roleFilterRow = panel.querySelector('#mufy-recovery-role-filter-row');
     const maskSearch = panel.querySelector('#mufy-recovery-mask-search');
     if (roleFilterRow) roleFilterRow.hidden = state.section !== 'roles';
@@ -8655,6 +8792,8 @@ roleStateReady = true;
     const groups = state.active === 'authors' || state.active === 'siteAuthors' ? authorGroups(statusSource, query) : [];
     panel.querySelector('#mufy-recovery-count').textContent = state.section === 'home'
       ? '选择功能'
+      : state.section === 'beauty' ? '美化设置'
+        : state.section === 'regex' ? `${state.regexRules.length} 条规则`
       : state.active === 'authors' || state.active === 'siteAuthors'
         ? `${groups.length} 位作者`
         : `${rows.length}/${statusSource.length}`;
@@ -8765,6 +8904,7 @@ roleStateReady = true;
     if (isMaskView && !maskStorageReady) {
       panel.querySelectorAll('#mufy-recovery-list button:not([data-action="copy-mask"])').forEach(button => { button.disabled = true; });
     }
+    if (state.section === 'regex') renderRegexSection();
   }
 
   function mount() {
@@ -8913,7 +9053,7 @@ roleStateReady = true;
       #mufy-recovery-controls.is-section-home{flex:1;max-height:none;align-content:start}
       #mufy-recovery-role-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;align-items:stretch}
       #mufy-recovery-favorite-actions{display:grid;grid-template-columns:1fr;gap:6px;align-items:stretch}
-      #mufy-recovery-chat-tools{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;align-items:stretch}
+      #mufy-recovery-chat-tools{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;align-items:stretch}
       #mufy-recovery-mask-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
       #mufy-recovery-role-actions > button,#mufy-recovery-mask-actions > button{min-width:0;white-space:normal;line-height:1.25}
       #mufy-recovery-favorite-visible{width:100%}
@@ -8967,7 +9107,11 @@ roleStateReady = true;
       #mufy-recovery-mask-tabs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
       #mufy-recovery-tabs button.active,#mufy-recovery-favorite-tabs button.active,#mufy-recovery-chat-tabs button.active,#mufy-recovery-mask-tabs button.active,#mufy-recovery-web-tabs button.active{background:#786bd4;border-color:#8f84dd;color:#fff}
       #mufy-recovery-tabs .mufy-recovery-tab-action,#mufy-recovery-mask-tabs .mufy-recovery-tab-action{background:#453d69;border-color:#8578c8;color:#f4efff}
-      #mufy-recovery-role-section,#mufy-recovery-favorite-section,#mufy-recovery-chat-section,#mufy-recovery-mask-section,#mufy-recovery-web-section{display:flex;flex-direction:column;gap:8px}
+      #mufy-recovery-role-section,#mufy-recovery-favorite-section,#mufy-recovery-chat-section,#mufy-recovery-beauty-section,#mufy-recovery-regex-section,#mufy-recovery-mask-section,#mufy-recovery-web-section{display:flex;flex-direction:column;gap:8px}
+      .mufy-recovery-section-note{display:grid;gap:4px;padding:10px 11px;border:1px solid #4d4962;border-radius:8px;background:#292733}.mufy-recovery-section-note span{color:#aaa;font-size:11px;line-height:1.5}
+      #mufy-recovery-regex-tools{display:grid;grid-template-columns:1fr 1fr;gap:6px}#mufy-recovery-regex-add{background:#5e4f91!important;border-color:#8373bb!important;font-weight:700}
+      #mufy-recovery-regex-test{display:grid;grid-template-columns:1fr 1fr;gap:7px}#mufy-recovery-regex-test label{display:grid;gap:4px;color:#aaa;font-size:10px}#mufy-recovery-regex-test textarea{box-sizing:border-box;width:100%;min-height:72px;resize:vertical;border:1px solid #555;border-radius:7px;background:#18181c;color:#eee;padding:7px;font:11px/1.45 system-ui}
+      #mufy-recovery-regex-list{display:grid;gap:6px;max-height:230px;overflow:auto}.mufy-regex-rule{display:flex;align-items:flex-start;justify-content:space-between;gap:7px;padding:8px;border:1px solid #444;border-radius:7px;background:#27272e}.mufy-regex-rule.is-enabled{border-color:#665b91}.mufy-regex-rule>label{display:flex;align-items:flex-start;gap:7px;min-width:0}.mufy-regex-rule>label input{margin-top:3px;accent-color:#8272cc}.mufy-regex-rule>label span{display:grid;gap:2px;min-width:0}.mufy-regex-rule small{color:#aaa;word-break:break-all}.mufy-regex-rule em{color:#ff9b9b;font-size:10px}.mufy-regex-rule-actions{display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end}.mufy-regex-rule-actions button{padding:3px 6px!important;font-size:10px}
       #mufy-recovery-list{flex:1 1 auto;min-height:0;overflow:auto;border-top:1px solid #444;padding:0 10px 16px}
       .mufy-recovery-row{display:flex;gap:8px;padding:7px 2px;border-bottom:1px solid #3e3e45}
       .mufy-recovery-row img{width:40px;height:40px;flex:none;border-radius:10px;object-fit:cover}
@@ -9074,6 +9218,7 @@ roleStateReady = true;
         #mufy-recovery-mask-actions{grid-template-columns:repeat(3,minmax(0,1fr));gap:5px}
         #mufy-recovery-site-actions{grid-template-columns:repeat(2,minmax(0,1fr));gap:5px}
         #mufy-recovery-manual-auto-actions{grid-template-columns:1fr 1fr}
+        #mufy-recovery-regex-test{grid-template-columns:1fr}
         #mufy-recovery-manual-auto-message{grid-column:1/-1}
         #mufy-recovery-tabs button,#mufy-recovery-favorite-tabs button,#mufy-recovery-chat-tabs button,#mufy-recovery-mask-tabs button,#mufy-recovery-web-tabs button{padding:6px 4px;font-size:11px}
         #mufy-recovery-export-options{gap:6px;padding:10px}
@@ -9213,7 +9358,9 @@ roleStateReady = true;
 <li><strong>普通角色一键扣数：</strong>进入“收藏”→“普通待聊”，可以修改默认发送内容并启动“一键扣数”。脚本会逐个打开角色、发送一次消息，并等待回复生成结束且 URL 出现 sessionId 后再进入下一个；任务可以停止、继续或取消。</li>
 <li><strong>完整导出当前聊天：</strong>进入一段已有 sessionId 的具体聊天，再到“聊天记录”点击“导出当前聊天”。脚本会直接分页读取服务器记录，按消息 ID 去重，并用服务器 total 与分页末尾双重校验；最终下载一个 ZIP，内含适合手机浏览器阅读的 HTML 和纯文字 TXT，不包含 JSON。再次点击可停止导出。</li>
 <li><strong>根据聊天内容找角色：</strong>进入“聊天记录”点击“搜索聊天记录”，可选择搜索所有角色或指定单个角色。单角色允许搜索 1 个字，所有角色至少需要 2 个字。结果会标记关键词；点击“打开并定位”后进入原会话，自动向上加载并尝试滚动到对应消息。</li>
-<li><strong>角色回复摘录：</strong>在角色回复里选中文字，展开该消息的省略号操作栏并点击“摘录”；不选文字时会把整条回复放进编辑框。摘录按角色组成牌组，进入“聊天记录”点击“摘录牌组”可查看、调整卡片样式或返回原聊天位置。当前只支持角色回复，暂不处理自己的消息。</li>
+<li><strong>角色回复摘录：</strong>在角色回复里选中文字，展开该消息的省略号操作栏并点击“摘录”；不选文字时会把整条回复放进编辑框。摘录按角色组成牌组，进入“美化”点击摘录牌组可查看、调整卡片样式或返回原聊天位置。当前只支持角色回复，暂不处理自己的消息。</li>
+<li><strong>美化：</strong>进入“美化”可打开摘录牌组并调整牌面样式。之后新增的网站字体、背景和面板主题也会集中放在这个分区。</li>
+<li><strong>聊天显示正则：</strong>进入“正则”新增查找和替换规则。表达式不需要输入两侧斜杠；替换内容支持 <code>$1</code>、<code>$2</code> 等捕获组。规则只改变当前网页显示的聊天正文，不修改服务器聊天记录；关闭或删除规则后会从保留的原文重新处理。</li>
 <li><strong>模型可用性监控：</strong>点击顶部“模型”，勾选需要监控的模型。脚本每 5 分钟读取一次网站模型状态；悬浮按钮上方用绿、黄、红、灰色圆点分别表示流畅、拥堵、中断和暂时未知。点击状态点可查看响应时长、成功率和最后检测时间。</li>
 <li><strong>导出分享链接：</strong>点击“导出角色”，再选择“仅分享链接 TXT”。角色 JSON/CSV 也会附带已保存的分享链接；独立 TXT 会导出当前账号缓存中的全部分享链接，包括当前角色列表里已经找不到但本地仍有记录的角色。</li>
 <li><strong>收藏未聊转为链接收藏：</strong>进入“角色”→“收藏未聊”，点击“检测未记录角色”。分享链接记录按账号隔离，本账号已有记录的角色会直接跳过；其余角色严格一次处理一个：先保存分享链接，再取消原收藏，从分享链接进入并重新收藏。任务可以中断、继续或彻底取消。</li>
@@ -9261,7 +9408,7 @@ roleStateReady = true;
       </div>
       <div id="mufy-recovery-model-modal" hidden><div id="mufy-recovery-model-head"><span><strong>模型可用性监控</strong><small id="mufy-recovery-model-summary">每 5 分钟检测一次</small></span><button id="mufy-recovery-model-close" title="关闭">×</button></div><div id="mufy-recovery-model-tools"><input id="mufy-recovery-model-search" placeholder="搜索模型名称"><button id="mufy-recovery-model-refresh">立即检测</button></div><div id="mufy-recovery-model-list"><div class="mufy-recovery-empty">正在读取模型状态…</div></div></div>
       <div id="mufy-recovery-controls">
-        <div id="mufy-recovery-section-home"><div id="mufy-recovery-section-home-head"><strong>选择功能分区</strong><small>进入后可通过返回按钮切换到其他分区</small></div><div id="mufy-recovery-section-cards"><button class="mufy-recovery-section-card" data-section="roles"><strong>角色</strong><small>找回、状态、收藏未聊、作者与标签</small></button><button class="mufy-recovery-section-card" data-section="favorites"><strong>收藏</strong><small>普通待聊、一键扣数与收藏夹</small></button><button class="mufy-recovery-section-card" data-section="chats"><strong>聊天记录</strong><small>内容搜索、完整导出与摘录牌组</small></button><button class="mufy-recovery-section-card" data-section="masks"><strong>面具</strong><small>面具库、编辑、绑定与导入导出</small></button><button class="mufy-recovery-section-card" data-section="web"><strong>网页</strong><small>捕获当前网页角色并批量收藏</small></button></div></div>
+        <div id="mufy-recovery-section-home"><div id="mufy-recovery-section-home-head"><strong>选择功能分区</strong><small>进入后可通过返回按钮切换到其他分区</small></div><div id="mufy-recovery-section-cards"><button class="mufy-recovery-section-card" data-section="roles"><strong>角色</strong><small>找回、状态、收藏未聊、作者与标签</small></button><button class="mufy-recovery-section-card" data-section="favorites"><strong>收藏</strong><small>普通待聊、一键扣数与收藏夹</small></button><button class="mufy-recovery-section-card" data-section="chats"><strong>聊天记录</strong><small>内容搜索与完整导出</small></button><button class="mufy-recovery-section-card" data-section="beauty"><strong>美化</strong><small>摘录牌面与后续主题设置</small></button><button class="mufy-recovery-section-card" data-section="regex"><strong>正则</strong><small>用查找和替换处理聊天显示文字</small></button><button class="mufy-recovery-section-card" data-section="masks"><strong>面具</strong><small>面具库、编辑、绑定与导入导出</small></button><button class="mufy-recovery-section-card" data-section="web"><strong>网页</strong><small>捕获当前网页角色并批量收藏</small></button></div></div>
         <div id="mufy-recovery-section-nav" hidden><button id="mufy-recovery-section-back">← 返回</button><strong id="mufy-recovery-section-title"></strong></div>
         <div id="mufy-recovery-status"></div>
         <div id="mufy-recovery-favorite-task-controls" hidden><button id="mufy-recovery-favorite-task-main">中断收藏</button><button id="mufy-recovery-favorite-task-cancel">取消任务</button></div>
@@ -9284,7 +9431,14 @@ roleStateReady = true;
         </div>
         <div id="mufy-recovery-chat-section" hidden>
           <div id="mufy-recovery-chat-tabs"><button data-category="chatMatches">搜索结果 (0)</button></div>
-          <div id="mufy-recovery-chat-tools"><button id="mufy-recovery-chat-search" title="根据聊天内容查找角色">搜索聊天记录</button><button id="mufy-recovery-export-chat" title="进入一段具体聊天后可完整导出当前会话">导出当前聊天</button><button id="mufy-recovery-quote-entry" title="查看角色摘录牌组">摘录牌组</button></div>
+          <div id="mufy-recovery-chat-tools"><button id="mufy-recovery-chat-search" title="根据聊天内容查找角色">搜索聊天记录</button><button id="mufy-recovery-export-chat" title="进入一段具体聊天后可完整导出当前会话">导出当前聊天</button></div>
+        </div>
+        <div id="mufy-recovery-beauty-section" hidden><div class="mufy-recovery-section-note"><strong>摘录牌美化</strong><span>调整塔罗牌样式、字体、颜色、字号和对齐方式，并导出当前牌面。</span></div><button id="mufy-recovery-quote-entry" title="查看并美化角色摘录牌组">打开摘录牌组与美化设置</button></div>
+        <div id="mufy-recovery-regex-section" hidden>
+          <div class="mufy-recovery-section-note"><strong>聊天显示正则</strong><span>只改变网页当前显示的聊天正文，不修改服务器原文。按列表顺序依次执行。</span></div>
+          <div id="mufy-recovery-regex-tools"><button id="mufy-recovery-regex-add">新增规则</button><button id="mufy-recovery-regex-refresh">重新应用</button></div>
+          <div id="mufy-recovery-regex-test"><label>测试原文<textarea id="mufy-recovery-regex-test-input" placeholder="输入一段文字，立即查看全部已启用规则的结果"></textarea></label><label>处理结果<textarea id="mufy-recovery-regex-test-output" readonly></textarea></label></div>
+          <div id="mufy-recovery-regex-list"></div>
         </div>
         <div id="mufy-recovery-web-section" hidden>
           <div id="mufy-recovery-web-tabs"><button data-category="siteSearch">网站角色 (0)</button><button data-category="siteAuthors">网站作者 (0)</button></div>
@@ -9438,6 +9592,44 @@ roleStateReady = true;
     panel.querySelector('#mufy-recovery-quote-source').onclick = openSelectedQuoteSource;
     panel.querySelector('#mufy-recovery-quote-update').onclick = updateSelectedQuoteText;
     panel.querySelector('#mufy-recovery-quote-export').onclick = exportSelectedQuoteImage;
+    panel.querySelector('#mufy-recovery-regex-add').onclick = () => editRegexRule();
+    panel.querySelector('#mufy-recovery-regex-refresh').onclick = () => {
+      refreshRegexOnPage();
+      state.status = '已重新对当前页面聊天正文应用全部启用的正则规则。';
+      render();
+    };
+    panel.querySelector('#mufy-recovery-regex-test-input').oninput = renderRegexSection;
+    panel.querySelector('#mufy-recovery-regex-list').onchange = event => {
+      const toggle = event.target.closest?.('[data-regex-toggle]');
+      if (!toggle) return;
+      const rule = state.regexRules.find(row => row.id === String(toggle.dataset.regexToggle || ''));
+      if (!rule) return;
+      rule.enabled = Boolean(toggle.checked);
+      saveRegexRules();
+      refreshRegexOnPage();
+    };
+    panel.querySelector('#mufy-recovery-regex-list').onclick = event => {
+      const edit = event.target.closest?.('[data-regex-edit]');
+      if (edit) { editRegexRule(String(edit.dataset.regexEdit || '')); return; }
+      const remove = event.target.closest?.('[data-regex-delete]');
+      if (remove) {
+        const id = String(remove.dataset.regexDelete || '');
+        const rule = state.regexRules.find(row => row.id === id);
+        if (!rule || !pageWindow.confirm(`确定删除正则规则“${rule.name}”吗？`)) return;
+        state.regexRules = state.regexRules.filter(row => row.id !== id);
+        saveRegexRules();
+        refreshRegexOnPage();
+        return;
+      }
+      const up = event.target.closest?.('[data-regex-up]');
+      if (up) {
+        const index = state.regexRules.findIndex(row => row.id === String(up.dataset.regexUp || ''));
+        if (index <= 0) return;
+        [state.regexRules[index - 1], state.regexRules[index]] = [state.regexRules[index], state.regexRules[index - 1]];
+        saveRegexRules();
+        refreshRegexOnPage();
+      }
+    };
     const modelModal = panel.querySelector('#mufy-recovery-model-modal');
     const openModelMonitor = () => {
       panel.style.display = 'flex';
@@ -9636,10 +9828,12 @@ roleStateReady = true;
     panel.querySelectorAll('[data-section]').forEach(button => {
       button.onclick = () => {
         const nextSection = button.dataset.section;
-        state.section = ['roles', 'favorites', 'chats', 'masks', 'web'].includes(nextSection) ? nextSection : 'roles';
+        state.section = ['roles', 'favorites', 'chats', 'beauty', 'regex', 'masks', 'web'].includes(nextSection) ? nextSection : 'roles';
         if (state.section === 'roles' && !['allRoles', 'chatted', 'chattedNotFavorite', 'favoriteOnly', 'roleHistory', 'authors'].includes(state.active)) state.active = 'allRoles';
         if (state.section === 'favorites' && state.active !== 'manualFavoriteChats') state.active = 'manualFavoriteChats';
         if (state.section === 'chats' && state.active !== 'chatMatches') state.active = 'chatMatches';
+        if (state.section === 'beauty') state.active = 'beauty';
+        if (state.section === 'regex') state.active = 'regex';
         if (state.section === 'masks' && state.active !== 'masks' && state.active !== 'library') state.active = 'masks';
         if (state.section === 'web' && state.active !== 'siteSearch' && state.active !== 'siteAuthors') state.active = 'siteSearch';
         render();
