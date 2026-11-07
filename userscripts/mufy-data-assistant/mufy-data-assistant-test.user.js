@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.69
+// @version      3.0.0-dev.70
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.69';
+  const SCRIPT_VERSION = '3.0.0-dev.70';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -373,9 +373,10 @@
         if (passwordInput && submitButton && !submitButton.disabled
           && (String(passwordInput.value || '').length > 0 || browserHadTimeToAutofill)) {
           clearInterval(timer);
-          state.status = `正在使用 Edge 为“${pending.label || pending.email}”显示的已保存密码自动登录…`;
+          state.status = `正在通过 Mufy 官方登录表单切换到“${pending.label || pending.email}”…`;
           showManualAutoChatToast(state.status, { tone: 'success', duration: 6000 });
-          submitButton.click();
+          if (typeof form.requestSubmit === 'function') form.requestSubmit(submitButton);
+          else submitButton.click();
           return;
         }
         if (!emailNoticeShown) {
