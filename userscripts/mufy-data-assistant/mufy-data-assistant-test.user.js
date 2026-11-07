@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.56
+// @version      3.0.0-dev.57
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.56';
+  const SCRIPT_VERSION = '3.0.0-dev.57';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -1424,8 +1424,25 @@
   }
 
   function exportRegexRules() {
-    const rules = state.regexRules.map(rule => ({ ...rule, outputRequirement: regexOutputRequirement(rule) }));
-    download(`mufy-regex-rules-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify({ version: 1, rules }, null, 2), 'application/json;charset=utf-8');
+    const includeRequirements = pageWindow.confirm('是否同时导出输出要求？\n\n确定：导出规则代码和输出要求，适合本脚本备份\n取消：只导出官方兼容的正则代码');
+    const date = new Date().toISOString().slice(0, 10);
+    if (includeRequirements) {
+      const rules = state.regexRules.map(rule => ({ ...rule, outputRequirement: regexOutputRequirement(rule) }));
+      download(`mufy-regex-rules-with-requirements-${date}.json`, JSON.stringify({ version: 1, rules }, null, 2), 'application/json;charset=utf-8');
+      showRecoveryNotice(`已导出 ${rules.length} 条正则及输出要求。`);
+      return;
+    }
+    const officialRules = state.regexRules.map(rule => ({
+      ruleName: rule.name,
+      regexPattern: `/${rule.pattern}/${rule.flags}`,
+      replaceString: rule.replacement,
+      targetSymbol: rule.targetSymbol || '',
+      mode: Number(rule.mode) || 0,
+      enabled: rule.enabled !== false,
+      visibility: rule.visibility !== false
+    }));
+    download(`mufy-regex-rules-official-${date}.json`, JSON.stringify(officialRules, null, 2), 'application/json;charset=utf-8');
+    showRecoveryNotice(`已导出 ${officialRules.length} 条官方兼容正则代码，不含输出要求和图片数据。`);
   }
 
   function insertRegexOutputRequirement(ruleId) {
