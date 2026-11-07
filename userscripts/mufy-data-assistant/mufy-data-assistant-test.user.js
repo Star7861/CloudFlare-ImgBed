@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.59
+// @version      3.0.0-dev.60
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.59';
+  const SCRIPT_VERSION = '3.0.0-dev.60';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -989,7 +989,9 @@
     if (!data || data.type !== 'mufy-regex-sandbox-storage' || !data.ruleId || !data.data || typeof data.data !== 'object') return;
     const frame = [...document.querySelectorAll('iframe.mufy-rich-regex-frame, #mufy-recovery-regex-html-preview')].find(item => item.contentWindow === event.source);
     if (!frame || String(frame.dataset.mufyRegexRuleId || '') !== String(data.ruleId)) return;
+    if (Number(frame.dataset.mufyStorageSyncReloadUntil || 0) > Date.now()) return;
     if (!state.regexRules.some(rule => rule.id === String(data.ruleId))) return;
+    if (sameMaskDataSnapshot(state.regexSandboxStorage?.[String(data.ruleId)] || {}, data.data)) return;
     state.regexSandboxStorage[String(data.ruleId)] = cloneValue(data.data);
     clearTimeout(regexSandboxStoragePersistTimer);
     regexSandboxStoragePersistTimer = setTimeout(() => queueContentStoragePersist('正则关联数据'), 250);
@@ -997,7 +999,10 @@
     regexSandboxSiblingRefreshTimers.set(String(data.ruleId), setTimeout(() => {
       const frames = [...document.querySelectorAll('iframe.mufy-rich-regex-frame, #mufy-recovery-regex-html-preview')]
         .filter(item => item !== frame && String(item.dataset.mufyRegexRuleId || '') === String(data.ruleId) && typeof item.__mufyRegexOriginalHtml === 'string');
-      frames.forEach(item => { item.srcdoc = sandboxRichRegexHtml(item.__mufyRegexOriginalHtml, String(data.ruleId)); });
+      frames.forEach(item => {
+        item.dataset.mufyStorageSyncReloadUntil = String(Date.now() + 1800);
+        item.srcdoc = sandboxRichRegexHtml(item.__mufyRegexOriginalHtml, String(data.ruleId));
+      });
       regexSandboxSiblingRefreshTimers.delete(String(data.ruleId));
     }, 320));
   }
@@ -1005,7 +1010,10 @@
   function reloadRegexSandboxFrames() {
     document.querySelectorAll('iframe.mufy-rich-regex-frame, #mufy-recovery-regex-html-preview').forEach(frame => {
       const ruleId = String(frame.dataset.mufyRegexRuleId || '');
-      if (ruleId && typeof frame.__mufyRegexOriginalHtml === 'string') frame.srcdoc = sandboxRichRegexHtml(frame.__mufyRegexOriginalHtml, ruleId);
+      if (ruleId && typeof frame.__mufyRegexOriginalHtml === 'string') {
+        frame.dataset.mufyStorageSyncReloadUntil = String(Date.now() + 1800);
+        frame.srcdoc = sandboxRichRegexHtml(frame.__mufyRegexOriginalHtml, ruleId);
+      }
     });
   }
 
