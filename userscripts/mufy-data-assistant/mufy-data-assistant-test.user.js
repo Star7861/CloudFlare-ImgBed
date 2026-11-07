@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.60
+// @version      3.0.0-dev.61
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.60';
+  const SCRIPT_VERSION = '3.0.0-dev.61';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -60,6 +60,9 @@
   const REGEX_RICH_RENDER_LIMIT_KEY = 'mufy-role-links-only-regex-rich-render-limit-v1';
   const PROMPT_LIBRARY_KEY = 'mufy-role-links-only-prompt-library-v1';
   const EXTRA_LIBRARY_KEY = 'mufy-role-links-only-extra-library-v1';
+  const ACCOUNT_SWITCH_PROFILES_KEY = 'mufy-recovery-account-switch-profiles-v1';
+  const ACCOUNT_SWITCH_PENDING_KEY = 'mufy-recovery-account-switch-pending-v1';
+  const REGEX_FEATURE_ENABLED = false;
   const CONTENT_LIBRARY_RECORD_PREFIX = 'content-library:';
   const MODEL_MONITOR_SELECTION_KEY = 'mufy-role-links-only-model-monitor-selection-v1';
   const MODEL_MONITOR_SNAPSHOT_KEY = 'mufy-role-links-only-model-monitor-snapshot-v1';
@@ -212,6 +215,134 @@
 
   function maskAccountLabel() {
     return maskAccountScope ? `账号分区 ${maskAccountScope.slice(-7)}` : '未识别账号（暂用旧版公共分区）';
+  }
+
+  function accountIdentityFromAuthorization(authValue = authorization) {
+    const payload = decodeJwtPayload(authValue) || {};
+    const user = payload.user && typeof payload.user === 'object' ? payload.user : {};
+    const email = String(payload.email ?? payload.userEmail ?? payload.user_email ?? user.email ?? '').trim();
+    const label = String(payload.nickname ?? payload.nickName ?? payload.name ?? payload.username
+      ?? payload.displayName ?? user.nickname ?? user.nickName ?? user.name ?? user.username ?? '').trim();
+    return { email, label, scope: maskAccountScopeFromAuthorization(authValue) };
+  }
+
+  function loadAccountSwitchProfiles() {
+    try {
+      const rows = JSON.parse(localStorage.getItem(ACCOUNT_SWITCH_PROFILES_KEY) || '[]');
+      return Array.isArray(rows) ? rows.filter(row => row && row.id && row.email).map(row => ({
+        id: String(row.id),
+        email: String(row.email || '').trim(),
+        label: String(row.label || row.email || '').trim(),
+        scope: String(row.scope || ''),
+        createdAt: Number(row.createdAt || Date.now()),
+        lastUsedAt: Number(row.lastUsedAt || 0)
+      })).filter(row => row.email) : [];
+    } catch (_) { return []; }
+  }
+
+  function saveAccountSwitchProfiles(rows = []) {
+    const normalized = Array.isArray(rows) ? rows.slice(0, 30) : [];
+    localStorage.setItem(ACCOUNT_SWITCH_PROFILES_KEY, JSON.stringify(normalized));
+    if (roleStateReady) state.accountSwitchProfiles = normalized;
+  }
+
+  function pendingAccountSwitch() {
+    try {
+      const value = JSON.parse(sessionStorage.getItem(ACCOUNT_SWITCH_PENDING_KEY) || 'null');
+      return value && value.email && Date.now() - Number(value.startedAt || 0) < 10 * 60 * 1000 ? value : null;
+    } catch (_) { return null; }
+  }
+
+  function completePendingAccountSwitch(authValue = authorization) {
+    const pending = pendingAccountSwitch();
+    if (!pending) return;
+    const identity = accountIdentityFromAuthorization(authValue);
+    if (identity.email && identity.email.toLowerCase() !== String(pending.email).toLowerCase()) return;
+    try { sessionStorage.removeItem(ACCOUNT_SWITCH_PENDING_KEY); } catch (_) {}
+    const rows = loadAccountSwitchProfiles().map(row => row.id === pending.id ? { ...row, lastUsedAt: Date.now(), scope: identity.scope || row.scope } : row);
+    saveAccountSwitchProfiles(rows);
+    showManualAutoChatToast(`已切换到“${pending.label || pending.email}”。`, { tone: 'success', duration: 5000 });
+  }
+
+  function saveCurrentAccountShortcut() {
+    scanStoredAuthorization();
+    const identity = accountIdentityFromAuthorization();
+    const email = String(pageWindow.prompt('请输入这个 Mufy 账号的登录邮箱：\n只保存在当前浏览器本地，不保存密码。', identity.email || '') || '').trim();
+    if (!email) return;
+    const label = String(pageWindow.prompt('给这个账号起一个便于识别的名称：', identity.label || email.split('@')[0] || email) || '').trim() || email;
+    const rows = loadAccountSwitchProfiles();
+    const existing = rows.find(row => row.email.toLowerCase() === email.toLowerCase());
+    if (existing) {
+      existing.label = label;
+      existing.scope = identity.scope || existing.scope;
+      existing.lastUsedAt = Date.now();
+    } else {
+      rows.push({ id: pageWindow.crypto?.randomUUID?.() || `account-${Date.now()}`, email, label, scope: identity.scope, createdAt: Date.now(), lastUsedAt: Date.now() });
+    }
+    saveAccountSwitchProfiles(rows);
+    state.status = `已保存账号“${label}”；仅保存邮箱和备注，不保存密码、Cookie 或登录令牌。`;
+    render();
+  }
+
+  function setWebsiteInputValue(input, value) {
+    const descriptor = Object.getOwnPropertyDescriptor(pageWindow.HTMLInputElement.prototype, 'value');
+    descriptor?.set?.call(input, value);
+    input.dispatchEvent(new pageWindow.Event('input', { bubbles: true }));
+    input.dispatchEvent(new pageWindow.Event('change', { bubbles: true }));
+  }
+
+  function installAccountSwitchLoginAssist() {
+    const pending = pendingAccountSwitch();
+    if (!pending) return;
+    let attempts = 0;
+    const timer = setInterval(() => {
+      attempts += 1;
+      const emailInput = [...document.querySelectorAll('input')].find(input => input.type === 'email'
+        || /邮箱|email/i.test(`${input.placeholder || ''} ${input.name || ''} ${input.autocomplete || ''}`));
+      if (emailInput) {
+        if (String(emailInput.value || '').trim() !== String(pending.email)) setWebsiteInputValue(emailInput, pending.email);
+        emailInput.focus();
+        clearInterval(timer);
+        showManualAutoChatToast(`已填入“${pending.label || pending.email}”的邮箱；请使用 Edge 保存的密码或手动输入密码登录。`, { tone: 'success', duration: 8000 });
+        return;
+      }
+      if (attempts === 2) {
+        const loginButton = [...document.querySelectorAll('button,[role="button"]')].find(item => !item.closest('#mufy-recovery-panel') && /^(登录|登入|login)$/i.test(String(item.textContent || '').trim()));
+        loginButton?.click();
+      }
+      if (attempts >= 30) {
+        clearInterval(timer);
+        showManualAutoChatToast('没有找到 Mufy 登录邮箱框，请手动打开网站登录窗口；账号邮箱仍会在本次页面停留期间等待填入。', { tone: 'warn', duration: 8000 });
+      }
+    }, 500);
+  }
+
+  function clearWebsiteAuthStorage() {
+    for (const storage of [pageWindow.localStorage, pageWindow.sessionStorage]) {
+      try {
+        const keys = Array.from({ length: storage.length }, (_, index) => String(storage.key(index) || ''));
+        for (const key of keys) {
+          if (key.startsWith('mufy-')) continue;
+          const value = String(storage.getItem(key) || '');
+          if (/(^|[-_:])(token|authorization|access.?token|refresh.?token|jwt|auth)([-_:]|$)/i.test(key)
+            || /"(?:accessToken|access_token|refreshToken|refresh_token|authorization|jwt)"\s*:/i.test(value)) storage.removeItem(key);
+        }
+      } catch (_) {}
+    }
+    authorization = '';
+  }
+
+  function switchToSavedAccount(accountId) {
+    const row = loadAccountSwitchProfiles().find(item => item.id === String(accountId || ''));
+    if (!row) return;
+    if (!pageWindow.confirm(`切换到“${row.label}”？\n\n脚本会退出当前 Mufy 登录并打开官方登录窗口，自动填入邮箱；密码仍由 Edge 或你本人填写。`)) return;
+    try { sessionStorage.setItem(ACCOUNT_SWITCH_PENDING_KEY, JSON.stringify({ id: row.id, email: row.email, label: row.label, startedAt: Date.now() })); } catch (_) {}
+    clearWebsiteAuthStorage();
+    const logout = [...document.querySelectorAll('button,a,[role="button"]')].find(item => !item.closest('#mufy-recovery-panel')
+      && /^(退出登录|退出账号|登出|logout|sign out)$/i.test(String(item.textContent || '').replace(/\s+/g, ' ').trim()));
+    state.status = `正在切换到“${row.label}”…`;
+    if (logout) logout.click();
+    else pageWindow.location.assign('/');
   }
 
   function loadUpdateCheckSnapshot() {
@@ -386,6 +517,7 @@
       if (/^Bearer\s+\S+/i.test(candidate)) {
         authorization = candidate;
         adoptMaskAccountFromAuthorization(candidate);
+        completePendingAccountSwitch(candidate);
         if (!authCaptureLogged) {
           authCaptureLogged = true;
           appendRunLog('info', `已从 Mufy API 请求捕获登录凭证（${url.hostname}${url.pathname}；不记录凭证内容）。`);
@@ -504,6 +636,7 @@
   let rawDialogRenderTimer = 0;
 
   function scheduleRawRichRegexRender() {
+    if (!REGEX_FEATURE_ENABLED) return;
     if (!roleStateReady) return;
     clearTimeout(rawDialogRenderTimer);
     rawDialogRenderTimer = setTimeout(() => {
@@ -513,6 +646,7 @@
   }
 
   function captureRawDialogPayload(requestUrl, payload) {
+    if (!REGEX_FEATURE_ENABLED) return;
     try {
       const url = new URL(String(requestUrl || ''), location.href);
       if (!/\/api\/dialogs\/query$/i.test(url.pathname)) return;
@@ -985,6 +1119,7 @@
   }
 
   function handleRegexSandboxStorageMessage(event) {
+    if (!REGEX_FEATURE_ENABLED) return;
     const data = event?.data;
     if (!data || data.type !== 'mufy-regex-sandbox-storage' || !data.ruleId || !data.data || typeof data.data !== 'object') return;
     const frame = [...document.querySelectorAll('iframe.mufy-rich-regex-frame, #mufy-recovery-regex-html-preview')].find(item => item.contentWindow === event.source);
@@ -1160,6 +1295,7 @@
   }
 
   function applyRichRegexInRoot(root = document) {
+    if (!REGEX_FEATURE_ENABLED) return;
     if (!root) return;
     const markdownRoots = [];
     if (root.matches?.('.react-markdown')) markdownRoots.push(root);
@@ -1236,6 +1372,7 @@
   }
 
   function applyRawRichRegexToPage() {
+    if (!REGEX_FEATURE_ENABLED) return;
     if (!roleStateReady || !state?.regexRules?.some(rule => rule.enabled && isRichHtmlRegexRule(rule))) return;
     const context = currentRoleContext();
     if (!context.sessionId) return;
@@ -1277,6 +1414,7 @@
   let regexApplying = false;
 
   function applyRegexToTextNode(node) {
+    if (!REGEX_FEATURE_ENABLED) return;
     if (!node || node.nodeType !== Node.TEXT_NODE || !node.parentElement?.closest?.('.react-markdown')) return;
     if (node.parentElement.closest('#mufy-recovery-panel,script,style,textarea,input,[contenteditable="true"]')) return;
     const current = String(node.nodeValue || '');
@@ -1288,6 +1426,7 @@
   }
 
   function applyRegexInRoot(root = document) {
+    if (!REGEX_FEATURE_ENABLED) return;
     if (regexApplying || !root) return;
     regexApplying = true;
     try {
@@ -1310,6 +1449,7 @@
   }
 
   function refreshRegexOnPage() {
+    if (!REGEX_FEATURE_ENABLED) return;
     applyRegexInRoot(document);
     applyRichRegexInRoot(document);
     hydrateRecentRawDialogsForRegex();
@@ -1539,6 +1679,43 @@
     list.innerHTML = rows.map(row => `<article class="mufy-material-card" data-material-fill="${esc(row.id)}" title="点击填入聊天输入框"><div><strong>${esc(row.title)}</strong><small>${esc(regexRulePreview(row.content, 260))}</small></div><span><button data-material-edit="${esc(row.id)}">编辑</button><button data-material-delete="${esc(row.id)}">删除</button></span></article>`).join('') || `<div class="mufy-recovery-empty">还没有${label}。点击“新增${label}”保存常用内容。</div>`;
   }
 
+  function renderAccountSection() {
+    const list = panel?.querySelector('#mufy-recovery-account-list');
+    if (!list) return;
+    scanStoredAuthorization();
+    const current = accountIdentityFromAuthorization();
+    state.accountSwitchProfiles = loadAccountSwitchProfiles();
+    const currentBox = panel.querySelector('#mufy-recovery-account-current');
+    if (currentBox) currentBox.innerHTML = `<strong>当前账号</strong><span>${esc(current.label || current.email || maskAccountLabel())}</span><small>${esc(current.email || '网站令牌没有提供邮箱，可用“保存当前账号”手动填写')}</small>`;
+    list.innerHTML = state.accountSwitchProfiles.map(row => {
+      const active = Boolean((current.scope && row.scope === current.scope) || (current.email && row.email.toLowerCase() === current.email.toLowerCase()));
+      return `<article class="mufy-account-card ${active ? 'is-current' : ''}"><div><strong>${esc(row.label)}</strong><small>${esc(row.email)}</small>${active ? '<em>当前登录</em>' : ''}</div><span>${active ? '' : `<button data-account-switch="${esc(row.id)}">切换</button>`}<button data-account-edit="${esc(row.id)}">修改</button><button data-account-delete="${esc(row.id)}">删除</button></span></article>`;
+    }).join('') || '<div class="mufy-recovery-empty">还没有保存账号。先登录一个 Mufy 账号，再点“保存当前账号”。</div>';
+  }
+
+  function editSavedAccount(accountId) {
+    const rows = loadAccountSwitchProfiles();
+    const row = rows.find(item => item.id === String(accountId || ''));
+    if (!row) return;
+    const email = String(pageWindow.prompt('登录邮箱：', row.email) || '').trim();
+    if (!email) return;
+    const label = String(pageWindow.prompt('账号名称：', row.label) || '').trim() || email;
+    row.email = email;
+    row.label = label;
+    saveAccountSwitchProfiles(rows);
+    renderAccountSection();
+  }
+
+  function deleteSavedAccount(accountId) {
+    const rows = loadAccountSwitchProfiles();
+    const row = rows.find(item => item.id === String(accountId || ''));
+    if (!row || !pageWindow.confirm(`只删除快速切换列表中的“${row.label}”？\n不会删除 Mufy 账号和其他脚本数据。`)) return;
+    saveAccountSwitchProfiles(rows.filter(item => item.id !== row.id));
+    state.status = `已从快速切换列表删除“${row.label}”。`;
+    renderAccountSection();
+    render();
+  }
+
   function openMaterialEditor(itemId = '') {
     const row = activeMaterialRows().find(item => item.id === String(itemId || ''));
     state.materialEditingId = row?.id || '';
@@ -1731,6 +1908,7 @@
     extraLibrary: loadMaterialLibrary(EXTRA_LIBRARY_KEY, 'extra'),
     materialKind: 'prompt',
     materialEditingId: '',
+    accountSwitchProfiles: loadAccountSwitchProfiles(),
     modelMonitorRows: loadModelMonitorSnapshot().rows || [],
     modelMonitorSelectedIds: loadModelMonitorSelection(),
     modelMonitorLoading: false,
@@ -8227,6 +8405,7 @@ roleStateReady = true;
   }
 
   async function hydrateRecentRawDialogsForRegex() {
+    if (!REGEX_FEATURE_ENABLED) return;
     if (rawRegexHydrating || !state.regexRules.some(rule => rule.enabled && isRichHtmlRegexRule(rule))) return;
     const context = currentRoleContext();
     if (!context.sessionId || !context.characterId) return;
@@ -9892,13 +10071,14 @@ roleStateReady = true;
     const favoriteSection = panel.querySelector('#mufy-recovery-favorite-section');
     const chatSection = panel.querySelector('#mufy-recovery-chat-section');
     const beautySection = panel.querySelector('#mufy-recovery-beauty-section');
+    const accountSection = panel.querySelector('#mufy-recovery-account-section');
     const regexSection = panel.querySelector('#mufy-recovery-regex-section');
     const materialSection = panel.querySelector('#mufy-recovery-material-section');
     const maskSection = panel.querySelector('#mufy-recovery-mask-section');
     const sectionHome = panel.querySelector('#mufy-recovery-section-home');
     const sectionNav = panel.querySelector('#mufy-recovery-section-nav');
     const sectionTitle = panel.querySelector('#mufy-recovery-section-title');
-    const sectionNames = { roles: '角色', favorites: '收藏', chats: '聊天记录', beauty: '美化', regex: '正则', materials: '素材库', masks: '面具' };
+    const sectionNames = { roles: '角色', favorites: '收藏', chats: '聊天记录', beauty: '美化', accounts: '账号切换', materials: '素材库', masks: '面具' };
     if (sectionHome) sectionHome.hidden = state.section !== 'home';
     if (sectionNav) sectionNav.hidden = state.section === 'home';
     if (sectionTitle) sectionTitle.textContent = state.section === 'materials'
@@ -9907,7 +10087,7 @@ roleStateReady = true;
     const controls = panel.querySelector('#mufy-recovery-controls');
     if (controls) {
       controls.classList.toggle('is-section-home', state.section === 'home');
-      controls.classList.toggle('is-standalone-section', ['beauty', 'regex', 'materials'].includes(state.section));
+      controls.classList.toggle('is-standalone-section', ['beauty', 'accounts', 'materials'].includes(state.section));
     }
     const statusBox = panel.querySelector('#mufy-recovery-status');
     if (statusBox) statusBox.hidden = state.section === 'home';
@@ -9916,12 +10096,14 @@ roleStateReady = true;
     if (favoriteSection) favoriteSection.hidden = state.section !== 'favorites';
     if (chatSection) chatSection.hidden = state.section !== 'chats';
     if (beautySection) beautySection.hidden = state.section !== 'beauty';
-    if (regexSection) regexSection.hidden = state.section !== 'regex';
+    if (accountSection) accountSection.hidden = state.section !== 'accounts';
+    if (regexSection) regexSection.hidden = true;
     if (materialSection) materialSection.hidden = state.section !== 'materials';
     if (maskSection) maskSection.hidden = state.section !== 'masks';
     const resultList = panel.querySelector('#mufy-recovery-list');
-    if (resultList) resultList.hidden = ['home', 'beauty', 'regex', 'materials'].includes(state.section);
+    if (resultList) resultList.hidden = ['home', 'beauty', 'accounts', 'materials'].includes(state.section);
     if (state.section === 'materials') renderMaterialSection();
+    if (state.section === 'accounts') renderAccountSection();
     const roleFilterRow = panel.querySelector('#mufy-recovery-role-filter-row');
     const maskSearch = panel.querySelector('#mufy-recovery-mask-search');
     if (roleFilterRow) roleFilterRow.hidden = state.section !== 'roles';
@@ -9965,7 +10147,7 @@ roleStateReady = true;
     panel.querySelector('#mufy-recovery-count').textContent = state.section === 'home'
       ? '选择功能'
       : state.section === 'beauty' ? '美化设置'
-        : state.section === 'regex' ? `${state.regexRules.length} 条规则`
+        : state.section === 'accounts' ? `${state.accountSwitchProfiles.length} 个账号`
         : state.section === 'materials' ? `${activeMaterialRows().length} 条${state.materialKind === 'extra' ? '番外' : '指令'}`
           : state.active === 'authors' || state.active === 'siteAuthors'
             ? `${groups.length} 位作者`
@@ -10288,7 +10470,8 @@ roleStateReady = true;
       #mufy-recovery-mask-tabs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
       #mufy-recovery-tabs button.active,#mufy-recovery-favorite-tabs button.active,#mufy-recovery-chat-tabs button.active,#mufy-recovery-mask-tabs button.active{background:#786bd4;border-color:#8f84dd;color:#fff}
       #mufy-recovery-tabs .mufy-recovery-tab-action,#mufy-recovery-mask-tabs .mufy-recovery-tab-action{background:#453d69;border-color:#8578c8;color:#f4efff}
-      #mufy-recovery-role-section,#mufy-recovery-favorite-section,#mufy-recovery-chat-section,#mufy-recovery-beauty-section,#mufy-recovery-regex-section,#mufy-recovery-material-section,#mufy-recovery-mask-section{display:flex;flex-direction:column;gap:8px}
+      #mufy-recovery-role-section,#mufy-recovery-favorite-section,#mufy-recovery-chat-section,#mufy-recovery-beauty-section,#mufy-recovery-account-section,#mufy-recovery-regex-section,#mufy-recovery-material-section,#mufy-recovery-mask-section{display:flex;flex-direction:column;gap:8px}
+      #mufy-recovery-account-current{display:grid;gap:3px;padding:12px;border:1px solid #766bb155;border-radius:12px;background:linear-gradient(145deg,#4c407055,#24232d)}#mufy-recovery-account-current strong{font-size:11px;color:#aaa3c6}#mufy-recovery-account-current span{font-size:15px;color:#f5f2ff;font-weight:700}#mufy-recovery-account-current small{color:#aaa;overflow-wrap:anywhere}#mufy-recovery-account-tools{display:grid;grid-template-columns:1fr;gap:6px}#mufy-recovery-account-save{background:#6654a4!important;border-color:#927fd3!important;font-weight:700}#mufy-recovery-account-list{display:grid;align-content:start;gap:7px;overflow:auto;padding-bottom:12px}.mufy-account-card{display:flex;align-items:center;justify-content:space-between;gap:9px;padding:10px 11px;border:1px solid #494653;border-radius:11px;background:#272630}.mufy-account-card.is-current{border-color:#68ba8a88;box-shadow:inset 3px 0 #59b17f}.mufy-account-card>div{display:grid;min-width:0;gap:3px}.mufy-account-card strong{color:#f0edff}.mufy-account-card small{color:#aaa;overflow-wrap:anywhere}.mufy-account-card em{width:max-content;padding:2px 6px;border-radius:9px;background:#24553a;color:#a8e7bd;font-size:9px;font-style:normal}.mufy-account-card>span{display:flex;flex:none;gap:4px;flex-wrap:wrap;justify-content:flex-end}.mufy-account-card button{padding:4px 7px!important;font-size:10px!important}.mufy-recovery-account-hint{display:block;color:#8f8a9c;line-height:1.55}
       #mufy-recovery-material-tabs{display:grid;grid-template-columns:1fr 1fr;gap:6px}#mufy-recovery-material-tabs button.active{background:#786bd4;border-color:#8f84dd;color:#fff}#mufy-recovery-material-tools{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}#mufy-recovery-material-add{background:#5e4f91!important;border-color:#8373bb!important;font-weight:700}
       #mufy-recovery-material-list{display:grid;align-content:start;gap:7px;overflow:auto;padding-bottom:20px}.mufy-material-card{display:flex;align-items:flex-start;justify-content:space-between;gap:9px;padding:10px 11px;border:1px solid #4c485d;border-radius:10px;background:#272630;cursor:pointer}.mufy-material-card:hover{border-color:#8c7bd1;background:#302d40}.mufy-material-card>div{min-width:0;display:grid;gap:4px}.mufy-material-card strong{color:#f0edff}.mufy-material-card small{display:-webkit-box;overflow:hidden;color:#aaa;font-size:10px;line-height:1.5;-webkit-line-clamp:4;-webkit-box-orient:vertical;white-space:pre-wrap;overflow-wrap:anywhere}.mufy-material-card>span{display:flex;flex:none;gap:5px}.mufy-material-card>span button{padding:4px 7px!important;font-size:10px!important}
       #mufy-recovery-material-editor{position:absolute;inset:48px 10px 10px;z-index:14;display:flex;flex-direction:column;overflow:hidden;border:1px solid #766bb1;border-radius:12px;background:#292930;box-shadow:0 16px 45px #000c}#mufy-recovery-material-editor[hidden]{display:none}#mufy-recovery-material-editor-head{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid #4b4b55;background:#35353e}#mufy-recovery-material-editor-head button{padding:1px 7px!important;font-size:20px!important}#mufy-recovery-material-editor-body{flex:1;min-height:0;display:grid;grid-template-rows:auto minmax(0,1fr);gap:10px;padding:12px}#mufy-recovery-material-editor-body label{display:grid;grid-template-rows:auto auto;align-content:start;min-height:0;gap:5px;color:#bbb;font-size:11px}#mufy-recovery-material-editor-body label:last-child{grid-template-rows:auto minmax(180px,1fr)}#mufy-recovery-material-editor-body input,#mufy-recovery-material-editor-body textarea{box-sizing:border-box;width:100%;border:1px solid #555;border-radius:8px;background:#18181c;color:#fff;padding:9px;font:13px/1.55 system-ui;outline:none}#mufy-recovery-material-editor-body textarea{height:100%;min-height:180px;resize:none}#mufy-recovery-material-editor-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:0 12px 12px}#mufy-recovery-material-editor-save{background:#62539a!important;border-color:#8878c5!important}
@@ -10566,7 +10749,7 @@ roleStateReady = true;
 <li><strong>根据聊天内容找角色：</strong>进入“聊天记录”点击“搜索聊天记录”，可选择搜索所有角色或指定单个角色。单角色允许搜索 1 个字，所有角色至少需要 2 个字。结果会标记关键词；点击“打开并定位”后进入原会话，自动向上加载并尝试滚动到对应消息。</li>
 <li><strong>角色回复摘录：</strong>在角色回复里选中文字，展开该消息的省略号操作栏并点击“摘录”；不选文字时会把整条回复放进编辑框。摘录按角色组成牌组，进入“美化”点击摘录牌组可查看、调整卡片样式或返回原聊天位置。当前只支持角色回复，暂不处理自己的消息。</li>
 <li><strong>美化：</strong>进入“美化”可打开摘录牌组并调整牌面样式。之后新增的网站字体、背景和面板主题也会集中放在这个分区。</li>
-<li><strong>聊天显示正则：</strong>进入“正则”新增查找和替换规则。表达式不需要输入两侧斜杠；替换内容支持 <code>$1</code>、<code>$2</code> 等捕获组。每条规则还可以保存输出要求，启用后点击“写入要求”会填入当前聊天输入框但不会自动发送。支持导入和导出 JSON；规则只改变当前网页显示的聊天正文，不修改服务器聊天记录。</li>
+<li><strong>账号快速切换：</strong>进入“账号切换”保存当前账号的邮箱与备注。切换时脚本会退出当前登录、打开 Mufy 官方登录窗口并填入目标邮箱；不会保存密码、Cookie 或登录令牌。</li>
 <li><strong>模型可用性监控：</strong>在功能首页底部点击“模型监控”，勾选需要监控的模型。脚本每 5 分钟读取一次网站模型状态；悬浮按钮上方用绿、黄、红、灰色圆点分别表示流畅、拥堵、中断和暂时未知。点击状态点可查看响应时长、成功率和最后检测时间。</li>
 <li><strong>导出分享链接：</strong>点击“导出角色”，再选择“仅分享链接 TXT”。角色 JSON/CSV 也会附带已保存的分享链接；独立 TXT 会导出当前账号缓存中的全部分享链接，包括当前角色列表里已经找不到但本地仍有记录的角色。</li>
 <li><strong>收藏未聊转为链接收藏：</strong>进入“角色”→“收藏未聊”，点击“检测未记录角色”。分享链接记录按账号隔离，本账号已有记录的角色会直接跳过；其余角色严格一次处理一个：先保存分享链接，再取消原收藏，从分享链接进入并重新收藏。任务可以中断、继续或彻底取消。</li>
@@ -10615,7 +10798,7 @@ roleStateReady = true;
       <div id="mufy-recovery-model-modal" hidden><div id="mufy-recovery-model-head"><span><strong>模型可用性监控</strong><small id="mufy-recovery-model-summary">每 5 分钟检测一次</small></span><button id="mufy-recovery-model-close" title="关闭">×</button></div><div id="mufy-recovery-model-tools"><input id="mufy-recovery-model-search" placeholder="搜索模型名称"><button id="mufy-recovery-model-refresh">立即检测</button><label id="mufy-recovery-model-notify-label"><input id="mufy-recovery-model-notify" type="checkbox"><span id="mufy-recovery-model-notify-text">异常通知（可选）</span><small>仅在已选模型由正常变为拥堵或中断时提醒</small></label></div><div id="mufy-recovery-model-list"><div class="mufy-recovery-empty">正在读取模型状态…</div></div></div>
       <div id="mufy-recovery-material-editor" hidden><div id="mufy-recovery-material-editor-head"><strong id="mufy-recovery-material-editor-title">新增指令</strong><button id="mufy-recovery-material-editor-close" title="关闭">×</button></div><div id="mufy-recovery-material-editor-body"><label>标题<input id="mufy-recovery-material-title" maxlength="120" placeholder="例如：总结当前剧情"></label><label>内容<textarea id="mufy-recovery-material-content" maxlength="50000" placeholder="输入要填入聊天框的完整内容"></textarea></label></div><div id="mufy-recovery-material-editor-actions"><button id="mufy-recovery-material-editor-cancel">取消</button><button id="mufy-recovery-material-editor-save">保存</button></div></div>
       <div id="mufy-recovery-controls">
-        <div id="mufy-recovery-section-home"><div id="mufy-recovery-section-home-head"><strong>选择功能分区</strong><small>进入后可通过返回按钮切换到其他分区</small></div><div id="mufy-recovery-section-cards"><button class="mufy-recovery-section-card" data-section="roles"><strong>角色</strong><small>找回、状态、收藏未聊、作者与标签</small></button><button class="mufy-recovery-section-card" data-section="favorites"><strong>收藏</strong><small>网页角色、普通待聊、一键扣数与收藏夹</small></button><button class="mufy-recovery-section-card" data-section="chats"><strong>聊天记录</strong><small>内容搜索与完整导出</small></button><button class="mufy-recovery-section-card" data-section="beauty"><strong>美化</strong><small>摘录与整体界面美化</small></button><button class="mufy-recovery-section-card" data-section="masks"><strong>面具</strong><small>面具库、编辑、绑定与导入导出</small></button><button class="mufy-recovery-section-card" data-section="regex"><strong>正则</strong><small>回复替换、规则导入与输出要求</small></button><button class="mufy-recovery-section-card" data-section="materials" data-material-home-kind="prompt"><strong>指令库</strong><small>保存常用指令，点击填入聊天输入框</small></button><button class="mufy-recovery-section-card" data-section="materials" data-material-home-kind="extra"><strong>番外库</strong><small>保存番外模板或内容，点击快速填入</small></button><button id="mufy-recovery-model-entry" class="mufy-recovery-section-card" title="选择并监控模型状态"><strong>模型监控</strong><small>选择模型并查看可用性、响应时间和成功率</small></button><button id="mufy-recovery-update-entry" class="mufy-recovery-section-card" title="检查并安装测试版更新"><strong>检查更新</strong><small id="mufy-recovery-update-text">当前 ${esc(SCRIPT_VERSION)} · 点击检查</small></button></div></div>
+        <div id="mufy-recovery-section-home"><div id="mufy-recovery-section-home-head"><strong>选择功能分区</strong><small>进入后可通过返回按钮切换到其他分区</small></div><div id="mufy-recovery-section-cards"><button class="mufy-recovery-section-card" data-section="roles"><strong>角色</strong><small>找回、状态、收藏未聊、作者与标签</small></button><button class="mufy-recovery-section-card" data-section="favorites"><strong>收藏</strong><small>网页角色、普通待聊、一键扣数与收藏夹</small></button><button class="mufy-recovery-section-card" data-section="chats"><strong>聊天记录</strong><small>内容搜索与完整导出</small></button><button class="mufy-recovery-section-card" data-section="beauty"><strong>美化</strong><small>摘录与整体界面美化</small></button><button class="mufy-recovery-section-card" data-section="masks"><strong>面具</strong><small>面具库、编辑、绑定与导入导出</small></button><button class="mufy-recovery-section-card" data-section="accounts"><strong>账号切换</strong><small>一次登录一个账号，快速退出并填入另一个账号邮箱</small></button><button class="mufy-recovery-section-card" data-section="materials" data-material-home-kind="prompt"><strong>指令库</strong><small>保存常用指令，点击填入聊天输入框</small></button><button class="mufy-recovery-section-card" data-section="materials" data-material-home-kind="extra"><strong>番外库</strong><small>保存番外模板或内容，点击快速填入</small></button><button id="mufy-recovery-model-entry" class="mufy-recovery-section-card" title="选择并监控模型状态"><strong>模型监控</strong><small>选择模型并查看可用性、响应时间和成功率</small></button><button id="mufy-recovery-update-entry" class="mufy-recovery-section-card" title="检查并安装测试版更新"><strong>检查更新</strong><small id="mufy-recovery-update-text">当前 ${esc(SCRIPT_VERSION)} · 点击检查</small></button></div></div>
         <div id="mufy-recovery-section-nav" hidden><button id="mufy-recovery-section-back">← 返回</button><strong id="mufy-recovery-section-title"></strong></div>
         <div id="mufy-recovery-status"></div>
         <div id="mufy-recovery-favorite-task-controls" hidden><button id="mufy-recovery-favorite-task-main">中断收藏</button><button id="mufy-recovery-favorite-task-cancel">取消任务</button></div>
@@ -10643,6 +10826,7 @@ roleStateReady = true;
           <div id="mufy-recovery-chat-tools"><button id="mufy-recovery-chat-search" title="根据聊天内容查找角色">搜索聊天记录</button><button id="mufy-recovery-export-chat" title="进入一段具体聊天后可完整导出当前会话">导出当前聊天</button></div>
         </div>
         <div id="mufy-recovery-beauty-section" hidden><div class="mufy-recovery-section-note"><strong>摘录牌美化</strong><span>调整塔罗牌样式、字体、颜色、字号和对齐方式，并导出当前牌面。</span></div><button id="mufy-recovery-quote-entry" title="查看并美化角色摘录牌组">打开摘录牌组与美化设置</button></div>
+        <div id="mufy-recovery-account-section" hidden><div class="mufy-recovery-section-note"><strong>账号快速切换</strong><span>一次只登录一个账号。脚本仅在本机保存邮箱与备注，不保存密码、Cookie 或登录令牌。</span></div><div id="mufy-recovery-account-current"></div><div id="mufy-recovery-account-tools"><button id="mufy-recovery-account-save">保存当前账号</button></div><div id="mufy-recovery-account-list"></div><small class="mufy-recovery-account-hint">点击“切换”后会退出当前登录、打开 Mufy 官方登录窗口并填入目标邮箱；密码仍由 Edge 自动填充或由你手动输入。</small></div>
         <div id="mufy-recovery-regex-section" hidden>
           <div class="mufy-recovery-section-note"><strong>聊天显示正则</strong><span>只改变网页当前显示的聊天正文，不修改服务器原文。按列表顺序依次执行。</span></div>
           <div id="mufy-recovery-regex-tools"><button id="mufy-recovery-regex-add">新增规则</button><button id="mufy-recovery-regex-import">导入 JSON</button><button id="mufy-recovery-regex-export">导出 JSON</button><button id="mufy-recovery-regex-refresh">重新应用</button><label id="mufy-recovery-regex-rich-limit-label">仅检查最近 <input id="mufy-recovery-regex-rich-limit" type="number" min="1" max="10" value="${esc(state.regexRichRenderLimit)}"> 楼角色回复 <span>你方消息不计数，范围外界面自动卸载</span></label><input id="mufy-recovery-regex-file" type="file" accept=".json,application/json" hidden></div>
@@ -10898,6 +11082,15 @@ roleStateReady = true;
       const card = event.target.closest?.('[data-material-fill]');
       if (card) fillMaterialIntoComposer(String(card.dataset.materialFill || ''));
     };
+    panel.querySelector('#mufy-recovery-account-save').onclick = saveCurrentAccountShortcut;
+    panel.querySelector('#mufy-recovery-account-list').onclick = event => {
+      const switchButton = event.target.closest?.('[data-account-switch]');
+      if (switchButton) { switchToSavedAccount(String(switchButton.dataset.accountSwitch || '')); return; }
+      const editButton = event.target.closest?.('[data-account-edit]');
+      if (editButton) { editSavedAccount(String(editButton.dataset.accountEdit || '')); return; }
+      const deleteButton = event.target.closest?.('[data-account-delete]');
+      if (deleteButton) deleteSavedAccount(String(deleteButton.dataset.accountDelete || ''));
+    };
     const modelModal = panel.querySelector('#mufy-recovery-model-modal');
     const openModelMonitor = () => {
       panel.style.display = 'flex';
@@ -11099,12 +11292,12 @@ roleStateReady = true;
     panel.querySelectorAll('[data-section]').forEach(button => {
       button.onclick = () => {
         const nextSection = button.dataset.section;
-        state.section = ['roles', 'favorites', 'chats', 'beauty', 'regex', 'materials', 'masks'].includes(nextSection) ? nextSection : 'roles';
+        state.section = ['roles', 'favorites', 'chats', 'beauty', 'accounts', 'materials', 'masks'].includes(nextSection) ? nextSection : 'roles';
         if (state.section === 'roles' && !['allRoles', 'chatted', 'chattedNotFavorite', 'favoriteOnly', 'roleHistory', 'authors'].includes(state.active)) state.active = 'allRoles';
         if (state.section === 'favorites' && !['manualFavoriteChats', 'siteSearch', 'siteAuthors'].includes(state.active)) state.active = 'manualFavoriteChats';
         if (state.section === 'chats' && state.active !== 'chatMatches') state.active = 'chatMatches';
         if (state.section === 'beauty') state.active = 'beauty';
-        if (state.section === 'regex') state.active = 'regex';
+        if (state.section === 'accounts') state.active = 'accounts';
         if (state.section === 'materials') {
           state.active = 'materials';
           state.materialKind = button.dataset.materialHomeKind === 'extra' ? 'extra' : 'prompt';
@@ -11280,9 +11473,10 @@ roleStateReady = true;
       if (!previousFavoriteResult.completionNotified) pageWindow.alert(state.status);
     }
     installAutoMaskSwitch();
-    addMountedGlobalListener(window, 'message', handleRegexSandboxStorageMessage);
+    if (REGEX_FEATURE_ENABLED) addMountedGlobalListener(window, 'message', handleRegexSandboxStorageMessage);
     addMountedGlobalListener(document, 'selectionchange', rememberQuoteSelection);
     installMessageQuoteButtons();
+    installAccountSwitchLoginAssist();
     startModelMonitor();
     startScriptUpdateCheck();
     render();
