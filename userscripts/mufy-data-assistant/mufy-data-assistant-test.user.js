@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.43
+// @version      3.0.0-dev.44
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.43';
+  const SCRIPT_VERSION = '3.0.0-dev.44';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const MASK_LIBRARY_KEY = 'mufy-recovery-mask-library-v1';
   const MASK_LIBRARY_BACKUP_KEY = 'mufy-recovery-mask-library-backup-v1';
@@ -52,6 +52,7 @@
   const QUOTE_CARD_KEY = 'mufy-role-links-only-quote-cards-v1';
   const QUOTE_STYLE_KEY = 'mufy-role-links-only-quote-style-v1';
   const REGEX_RULES_KEY = 'mufy-role-links-only-regex-rules-v1';
+  const REGEX_RICH_RENDER_LIMIT_KEY = 'mufy-role-links-only-regex-rich-render-limit-v1';
   const MODEL_MONITOR_SELECTION_KEY = 'mufy-role-links-only-model-monitor-selection-v1';
   const MODEL_MONITOR_SNAPSHOT_KEY = 'mufy-role-links-only-model-monitor-snapshot-v1';
   const MODEL_MONITOR_NOTIFY_KEY = 'mufy-role-links-only-model-monitor-notify-v1';
@@ -213,8 +214,10 @@
     state.quoteStyle = loadQuoteStyle();
     state.quoteSelectedId = '';
     state.regexRules = loadRegexRules();
+    state.regexRichRenderLimit = loadRegexRichRenderLimit();
     rawDialogRows.clear();
     rawDialogRichCache.clear();
+    rawRegexHydratedPages.clear();
     setTimeout(() => refreshRegexOnPage(), 0);
     state.modelMonitorSelectedIds = loadModelMonitorSelection();
     state.modelMonitorRows = [];
@@ -408,6 +411,8 @@
   let siteCapturePageKey = '';
   const rawDialogRows = new Map();
   const rawDialogRichCache = new Map();
+  const rawRegexHydratedPages = new Map();
+  let rawRegexHydrating = false;
   let rawDialogRenderTimer = 0;
 
   function scheduleRawRichRegexRender() {
@@ -718,6 +723,18 @@
     } catch (_) { return []; }
   }
 
+  function loadRegexRichRenderLimit() {
+    try { return Math.max(1, Math.min(10, Number(loadAndMigrateScopedValue(REGEX_RICH_RENDER_LIMIT_KEY)) || 3)); }
+    catch (_) { return 3; }
+  }
+
+  function saveRegexRichRenderLimit(value) {
+    const limit = Math.max(1, Math.min(10, Number(value) || 3));
+    state.regexRichRenderLimit = limit;
+    try { localStorage.setItem(accountStorageKey(REGEX_RICH_RENDER_LIMIT_KEY), String(limit)); } catch (_) {}
+    return limit;
+  }
+
   function saveRegexRules() {
     try {
       localStorage.setItem(accountStorageKey(REGEX_RULES_KEY), JSON.stringify(state.regexRules));
@@ -790,9 +807,10 @@
 
   function sandboxRichRegexHtml(html) {
     const storageShim = `<script>(()=>{const data=new Map();window.__mufySafeStorage={get length(){return data.size},key:i=>[...data.keys()][i]??null,getItem:k=>data.has(String(k))?data.get(String(k)):null,setItem:(k,v)=>data.set(String(k),String(v)),removeItem:k=>data.delete(String(k)),clear:()=>data.clear()};})();<\/script>`;
+    const transparentShim = '<style id="mufy-transparent-host">html,body{margin:0!important;background:transparent!important;background-color:transparent!important}body{overflow-x:hidden!important}</style>';
     let safeHtml = String(html || '').replace(/(?:window\.)?localStorage\b/g, 'window.__mufySafeStorage');
-    if (/<head(?:\s[^>]*)?>/i.test(safeHtml)) safeHtml = safeHtml.replace(/<head(\s[^>]*)?>/i, match => `${match}<base target="_blank">${storageShim}`);
-    else safeHtml = `${storageShim}${safeHtml}`;
+    if (/<head(?:\s[^>]*)?>/i.test(safeHtml)) safeHtml = safeHtml.replace(/<head(\s[^>]*)?>/i, match => `${match}<base target="_blank">${transparentShim}${storageShim}`);
+    else safeHtml = `${transparentShim}${storageShim}${safeHtml}`;
     return safeHtml;
   }
 
@@ -852,8 +870,19 @@
     root.querySelectorAll?.('.react-markdown').forEach(item => markdownRoots.push(item));
     if (root.closest?.('.react-markdown')) markdownRoots.push(root.closest('.react-markdown'));
     [...new Set(markdownRoots)].forEach(applyRichRegexToElement);
+    trimRichRegexFrames();
     const insidePanel = root.nodeType === 1 && (root.matches?.('#mufy-recovery-panel') || root.closest?.('#mufy-recovery-panel'));
     if (rawDialogRows.size && !insidePanel) scheduleRawRichRegexRender();
+  }
+
+  function trimRichRegexFrames() {
+    const limit = Math.max(1, Number(state.regexRichRenderLimit) || 3);
+    const wrappers = [...document.querySelectorAll('.mufy-rich-regex-frame-wrap')].filter(item => !item.closest('#mufy-recovery-panel'));
+    wrappers.slice(0, Math.max(0, wrappers.length - limit)).forEach(wrapper => {
+      const source = wrapper.previousElementSibling;
+      if (source && richRegexState.get(source)?.wrapper === wrapper) restoreRichRegexElement(source);
+      else wrapper.remove();
+    });
   }
 
   function rawRichRegexMatch(row) {
@@ -912,7 +941,8 @@
       .filter(row => !row.sessionId || String(row.sessionId) === String(context.sessionId))
       .map(row => ({ row, match: rawRichRegexMatch(row) }))
       .filter(item => item.match)
-      .sort((a, b) => String(a.row.createdTime || '').localeCompare(String(b.row.createdTime || '')));
+      .sort((a, b) => String(a.row.createdTime || '').localeCompare(String(b.row.createdTime || '')))
+      .slice(-Math.max(1, Number(state.regexRichRenderLimit) || 3));
     for (const item of rows) {
       const dialogId = String(item.row.dialogsId || item.row.dialogId || item.row.id || '');
       const fingerprints = rawRegexFingerprintParts(item.match.visibleText);
@@ -933,6 +963,7 @@
       const previous = richRegexState.get(element);
       if (previous?.source === 'raw' && !used.has(element)) restoreRichRegexElement(element);
     }
+    trimRichRegexFrames();
   }
 
   const regexTextState = new WeakMap();
@@ -974,6 +1005,7 @@
   function refreshRegexOnPage() {
     applyRegexInRoot(document);
     applyRichRegexInRoot(document);
+    hydrateRecentRawDialogsForRegex();
     renderRegexSection();
   }
 
@@ -991,6 +1023,8 @@
     const sample = panel.querySelector('#mufy-recovery-regex-test-input');
     const output = panel.querySelector('#mufy-recovery-regex-test-output');
     const preview = panel.querySelector('#mufy-recovery-regex-html-preview');
+    const limitInput = panel.querySelector('#mufy-recovery-regex-rich-limit');
+    if (limitInput && document.activeElement !== limitInput) limitInput.value = String(state.regexRichRenderLimit);
     if (sample && output && preview) {
       let richPreview = null;
       for (const rule of state.regexRules) {
@@ -1204,6 +1238,7 @@
     quoteStyle: loadQuoteStyle(),
     quoteSelectedId: '',
     regexRules: loadRegexRules(),
+    regexRichRenderLimit: loadRegexRichRenderLimit(),
     modelMonitorRows: loadModelMonitorSnapshot().rows || [],
     modelMonitorSelectedIds: loadModelMonitorSelection(),
     modelMonitorLoading: false,
@@ -7531,6 +7566,35 @@ roleStateReady = true;
     return body.data;
   }
 
+  async function hydrateRecentRawDialogsForRegex() {
+    if (rawRegexHydrating || !state.regexRules.some(rule => rule.enabled && isRichHtmlRegexRule(rule))) return;
+    const context = currentRoleContext();
+    if (!context.sessionId || !context.characterId) return;
+    rawRegexHydrating = true;
+    const sessionKey = String(context.sessionId);
+    if (!rawRegexHydratedPages.has(sessionKey)) rawRegexHydratedPages.set(sessionKey, new Set());
+    const loadedPages = rawRegexHydratedPages.get(sessionKey);
+    try {
+      for (let pageNum = 1; pageNum <= 8; pageNum += 1) {
+        if (!loadedPages.has(pageNum)) {
+          const data = await requestDialogPage(context, pageNum, 16);
+          loadedPages.add(pageNum);
+          captureRawDialogPayload('/api/dialogs/query', { code: 200, data });
+          const pageRows = dialogRowsFromPage(data);
+          if (!pageRows.length || data?.hasNext === false || data?.hasMore === false) break;
+        }
+        const matchCount = [...rawDialogRows.values()].filter(row => (!row.sessionId || String(row.sessionId) === sessionKey) && rawRichRegexMatch(row)).length;
+        if (pageNum >= 2 && matchCount >= Math.max(1, Number(state.regexRichRenderLimit) || 3)) break;
+        await wait(70);
+      }
+    } catch (error) {
+      appendRunLog('warn', '读取近期聊天原文用于 HTML 正则失败', error);
+    } finally {
+      rawRegexHydrating = false;
+      scheduleRawRichRegexRender();
+    }
+  }
+
   async function readCompleteDialogHistory(context, pageSize) {
     const collected = [];
     const ids = new Set();
@@ -8610,6 +8674,7 @@ roleStateReady = true;
     injectMessageQuoteButtons();
     applyRegexInRoot(document);
     applyRichRegexInRoot(document);
+    hydrateRecentRawDialogsForRegex();
     messageQuoteObserver?.disconnect();
     messageQuoteObserver = new MutationObserver(mutations => {
       for (const mutation of mutations) {
@@ -9529,11 +9594,11 @@ roleStateReady = true;
       #mufy-recovery-tabs .mufy-recovery-tab-action,#mufy-recovery-mask-tabs .mufy-recovery-tab-action{background:#453d69;border-color:#8578c8;color:#f4efff}
       #mufy-recovery-role-section,#mufy-recovery-favorite-section,#mufy-recovery-chat-section,#mufy-recovery-beauty-section,#mufy-recovery-regex-section,#mufy-recovery-mask-section,#mufy-recovery-web-section{display:flex;flex-direction:column;gap:8px}
       .mufy-recovery-section-note{display:grid;gap:4px;padding:10px 11px;border:1px solid #4d4962;border-radius:8px;background:#292733}.mufy-recovery-section-note span{color:#aaa;font-size:11px;line-height:1.5}
-      #mufy-recovery-regex-tools{display:grid;grid-template-columns:1fr 1fr;gap:6px}#mufy-recovery-regex-add{background:#5e4f91!important;border-color:#8373bb!important;font-weight:700}
+      #mufy-recovery-regex-tools{display:grid;grid-template-columns:1fr 1fr;gap:6px}#mufy-recovery-regex-add{background:#5e4f91!important;border-color:#8373bb!important;font-weight:700}#mufy-recovery-regex-rich-limit-label{grid-column:1/-1;display:flex;align-items:center;gap:7px;padding:3px 2px;color:#aaa;font-size:10px}#mufy-recovery-regex-rich-limit{width:54px!important;padding:5px 6px!important;text-align:center}
       #mufy-recovery-regex-test{display:grid;grid-template-columns:1fr 1fr;gap:7px}#mufy-recovery-regex-test label{display:grid;gap:4px;color:#aaa;font-size:10px}#mufy-recovery-regex-test textarea{box-sizing:border-box;width:100%;min-height:72px;resize:vertical;border:1px solid #555;border-radius:7px;background:#18181c;color:#eee;padding:7px;font:11px/1.45 system-ui}
-      #mufy-recovery-regex-html-preview{box-sizing:border-box;width:100%;height:clamp(520px,70vh,760px);border:1px solid #766bb1;border-radius:16px;background:#fff;box-shadow:0 16px 40px #0008}#mufy-recovery-regex-html-preview[hidden]{display:none}
+      #mufy-recovery-regex-html-preview{box-sizing:border-box;width:100%;height:clamp(520px,70vh,760px);border:1px solid #766bb1;border-radius:16px;background:transparent;box-shadow:0 16px 40px #0008}#mufy-recovery-regex-html-preview[hidden]{display:none}
       #mufy-recovery-regex-list{display:grid;gap:6px}.mufy-regex-rule{display:flex;align-items:flex-start;justify-content:space-between;gap:7px;padding:8px;border:1px solid #444;border-radius:7px;background:#27272e}.mufy-regex-rule.is-enabled{border-color:#665b91}.mufy-regex-rule>label{display:flex;align-items:flex-start;gap:7px;min-width:0}.mufy-regex-rule>label input{margin-top:3px;accent-color:#8272cc}.mufy-regex-rule>label span{display:grid;gap:2px;min-width:0}.mufy-regex-rule small{color:#aaa;word-break:break-all}.mufy-regex-output-requirement{color:#d6c9ff!important;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}.mufy-regex-rule em{color:#ff9b9b;font-size:10px}.mufy-regex-rule .mufy-regex-html-status{color:#9fd8b1}.mufy-regex-rule-actions{display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end}.mufy-regex-rule-actions button{padding:3px 6px!important;font-size:10px}
-      .mufy-rich-regex-frame-wrap{box-sizing:border-box;width:100%;height:clamp(520px,76vh,760px);margin:10px 0;overflow:hidden;border:1px solid #766bb1;border-radius:12px;background:#17171c;box-shadow:0 9px 28px #0007}.mufy-rich-regex-frame{display:block;width:100%;height:100%;border:0;background:#fff}
+      .mufy-rich-regex-frame-wrap{box-sizing:border-box;width:100%;height:clamp(520px,76vh,760px);margin:10px 0;overflow:hidden;border:0;background:transparent}.mufy-rich-regex-frame{display:block;width:100%;height:100%;border:0;background:transparent}
       #mufy-recovery-list{flex:1 1 auto;min-height:0;overflow:auto;border-top:1px solid #444;padding:0 10px 16px}
       .mufy-recovery-row{display:flex;gap:8px;padding:7px 2px;border-bottom:1px solid #3e3e45}
       .mufy-recovery-row img{width:40px;height:40px;flex:none;border-radius:10px;object-fit:cover}
@@ -9873,7 +9938,7 @@ roleStateReady = true;
         <div id="mufy-recovery-beauty-section" hidden><div class="mufy-recovery-section-note"><strong>摘录牌美化</strong><span>调整塔罗牌样式、字体、颜色、字号和对齐方式，并导出当前牌面。</span></div><button id="mufy-recovery-quote-entry" title="查看并美化角色摘录牌组">打开摘录牌组与美化设置</button></div>
         <div id="mufy-recovery-regex-section" hidden>
           <div class="mufy-recovery-section-note"><strong>聊天显示正则</strong><span>只改变网页当前显示的聊天正文，不修改服务器原文。按列表顺序依次执行。</span></div>
-          <div id="mufy-recovery-regex-tools"><button id="mufy-recovery-regex-add">新增规则</button><button id="mufy-recovery-regex-import">导入 JSON</button><button id="mufy-recovery-regex-export">导出 JSON</button><button id="mufy-recovery-regex-refresh">重新应用</button><input id="mufy-recovery-regex-file" type="file" accept=".json,application/json" hidden></div>
+          <div id="mufy-recovery-regex-tools"><button id="mufy-recovery-regex-add">新增规则</button><button id="mufy-recovery-regex-import">导入 JSON</button><button id="mufy-recovery-regex-export">导出 JSON</button><button id="mufy-recovery-regex-refresh">重新应用</button><label id="mufy-recovery-regex-rich-limit-label">HTML 最近渲染 <input id="mufy-recovery-regex-rich-limit" type="number" min="1" max="10" value="${esc(state.regexRichRenderLimit)}"> 条 <span>旧界面自动卸载，减少长聊天内存占用</span></label><input id="mufy-recovery-regex-file" type="file" accept=".json,application/json" hidden></div>
           <div id="mufy-recovery-regex-test"><label>测试原文<textarea id="mufy-recovery-regex-test-input" placeholder="输入一段文字，立即查看全部已启用规则的结果"></textarea></label><label>处理结果<textarea id="mufy-recovery-regex-test-output" readonly></textarea></label></div><iframe id="mufy-recovery-regex-html-preview" title="HTML 正则交互预览" sandbox="allow-scripts allow-forms allow-modals allow-popups allow-downloads" referrerpolicy="no-referrer" hidden></iframe>
           <div id="mufy-recovery-regex-list"></div>
         </div>
@@ -10042,6 +10107,10 @@ roleStateReady = true;
       render();
     };
     panel.querySelector('#mufy-recovery-regex-test-input').oninput = renderRegexSection;
+    panel.querySelector('#mufy-recovery-regex-rich-limit').onchange = event => {
+      event.target.value = String(saveRegexRichRenderLimit(event.target.value));
+      refreshRegexOnPage();
+    };
     panel.querySelector('#mufy-recovery-regex-list').onchange = event => {
       const toggle = event.target.closest?.('[data-regex-toggle]');
       if (!toggle) return;
