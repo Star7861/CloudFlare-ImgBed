@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.68
+// @version      3.0.0-dev.69
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.68';
+  const SCRIPT_VERSION = '3.0.0-dev.69';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -353,6 +353,7 @@
     let attempts = 0;
     let sawEmailInput = false;
     let emailNoticeShown = false;
+    let emailReadyAt = 0;
     const timer = setInterval(() => {
       attempts += 1;
       const officialDialog = document.querySelector('div[role="dialog"][aria-modal="true"][data-state="open"]');
@@ -361,13 +362,18 @@
         || /邮箱|email/i.test(`${input.placeholder || ''} ${input.name || ''} ${input.autocomplete || ''}`));
       if (emailInput) {
         sawEmailInput = true;
-        if (String(emailInput.value || '').trim() !== String(pending.email)) setWebsiteInputValue(emailInput, pending.email);
+        if (String(emailInput.value || '').trim() !== String(pending.email)) {
+          setWebsiteInputValue(emailInput, pending.email);
+          emailReadyAt = Date.now();
+        } else if (!emailReadyAt) emailReadyAt = Date.now();
         const form = emailInput.closest('form') || officialDialog?.querySelector('form');
         const passwordInput = form?.querySelector('input[type="password"][name="password"],input[type="password"]');
         const submitButton = form?.querySelector('button[type="submit"],input[type="submit"]');
-        if (passwordInput && String(passwordInput.value || '').length > 0 && submitButton && !submitButton.disabled) {
+        const browserHadTimeToAutofill = emailReadyAt && Date.now() - emailReadyAt >= 1200;
+        if (passwordInput && submitButton && !submitButton.disabled
+          && (String(passwordInput.value || '').length > 0 || browserHadTimeToAutofill)) {
           clearInterval(timer);
-          state.status = `Edge 已补全“${pending.label || pending.email}”的密码，正在自动登录…`;
+          state.status = `正在使用 Edge 为“${pending.label || pending.email}”显示的已保存密码自动登录…`;
           showManualAutoChatToast(state.status, { tone: 'success', duration: 6000 });
           submitButton.click();
           return;
