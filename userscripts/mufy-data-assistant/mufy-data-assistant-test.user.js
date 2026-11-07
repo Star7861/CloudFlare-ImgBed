@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.61
+// @version      3.0.0-dev.62
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.61';
+  const SCRIPT_VERSION = '3.0.0-dev.62';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -62,6 +62,7 @@
   const EXTRA_LIBRARY_KEY = 'mufy-role-links-only-extra-library-v1';
   const ACCOUNT_SWITCH_PROFILES_KEY = 'mufy-recovery-account-switch-profiles-v1';
   const ACCOUNT_SWITCH_PENDING_KEY = 'mufy-recovery-account-switch-pending-v1';
+  const ACCOUNT_SWITCH_CURRENT_ID_KEY = 'mufy-recovery-account-switch-current-id-v1';
   const REGEX_FEATURE_ENABLED = false;
   const CONTENT_LIBRARY_RECORD_PREFIX = 'content-library:';
   const MODEL_MONITOR_SELECTION_KEY = 'mufy-role-links-only-model-monitor-selection-v1';
@@ -246,6 +247,17 @@
     if (roleStateReady) state.accountSwitchProfiles = normalized;
   }
 
+  function currentAccountSwitchId() {
+    try { return String(localStorage.getItem(ACCOUNT_SWITCH_CURRENT_ID_KEY) || ''); } catch (_) { return ''; }
+  }
+
+  function setCurrentAccountSwitchId(accountId) {
+    try {
+      if (accountId) localStorage.setItem(ACCOUNT_SWITCH_CURRENT_ID_KEY, String(accountId));
+      else localStorage.removeItem(ACCOUNT_SWITCH_CURRENT_ID_KEY);
+    } catch (_) {}
+  }
+
   function pendingAccountSwitch() {
     try {
       const value = JSON.parse(sessionStorage.getItem(ACCOUNT_SWITCH_PENDING_KEY) || 'null');
@@ -261,6 +273,7 @@
     try { sessionStorage.removeItem(ACCOUNT_SWITCH_PENDING_KEY); } catch (_) {}
     const rows = loadAccountSwitchProfiles().map(row => row.id === pending.id ? { ...row, lastUsedAt: Date.now(), scope: identity.scope || row.scope } : row);
     saveAccountSwitchProfiles(rows);
+    setCurrentAccountSwitchId(pending.id);
     showManualAutoChatToast(`已切换到“${pending.label || pending.email}”。`, { tone: 'success', duration: 5000 });
   }
 
@@ -272,14 +285,19 @@
     const label = String(pageWindow.prompt('给这个账号起一个便于识别的名称：', identity.label || email.split('@')[0] || email) || '').trim() || email;
     const rows = loadAccountSwitchProfiles();
     const existing = rows.find(row => row.email.toLowerCase() === email.toLowerCase());
+    let savedId = '';
     if (existing) {
       existing.label = label;
       existing.scope = identity.scope || existing.scope;
       existing.lastUsedAt = Date.now();
+      savedId = existing.id;
     } else {
-      rows.push({ id: pageWindow.crypto?.randomUUID?.() || `account-${Date.now()}`, email, label, scope: identity.scope, createdAt: Date.now(), lastUsedAt: Date.now() });
+      const next = { id: pageWindow.crypto?.randomUUID?.() || `account-${Date.now()}`, email, label, scope: identity.scope, createdAt: Date.now(), lastUsedAt: Date.now() };
+      rows.push(next);
+      savedId = next.id;
     }
     saveAccountSwitchProfiles(rows);
+    setCurrentAccountSwitchId(savedId);
     state.status = `已保存账号“${label}”；仅保存邮箱和备注，不保存密码、Cookie 或登录令牌。`;
     render();
   }
@@ -1685,10 +1703,17 @@
     scanStoredAuthorization();
     const current = accountIdentityFromAuthorization();
     state.accountSwitchProfiles = loadAccountSwitchProfiles();
+    let currentId = currentAccountSwitchId();
+    if (!state.accountSwitchProfiles.some(row => row.id === currentId)) {
+      const scopeMatches = current.scope ? state.accountSwitchProfiles.filter(row => row.scope === current.scope) : [];
+      currentId = scopeMatches.length === 1 ? scopeMatches[0].id : '';
+      if (currentId) setCurrentAccountSwitchId(currentId);
+    }
+    const currentSaved = state.accountSwitchProfiles.find(row => row.id === currentId);
     const currentBox = panel.querySelector('#mufy-recovery-account-current');
-    if (currentBox) currentBox.innerHTML = `<strong>当前账号</strong><span>${esc(current.label || current.email || maskAccountLabel())}</span><small>${esc(current.email || '网站令牌没有提供邮箱，可用“保存当前账号”手动填写')}</small>`;
+    if (currentBox) currentBox.innerHTML = `<strong>当前账号</strong><span>${esc(currentSaved?.label || current.label || current.email || maskAccountLabel())}</span><small>${esc(currentSaved?.email || current.email || '网站令牌没有提供邮箱，可用“保存当前账号”手动填写')}</small>`;
     list.innerHTML = state.accountSwitchProfiles.map(row => {
-      const active = Boolean((current.scope && row.scope === current.scope) || (current.email && row.email.toLowerCase() === current.email.toLowerCase()));
+      const active = row.id === currentId;
       return `<article class="mufy-account-card ${active ? 'is-current' : ''}"><div><strong>${esc(row.label)}</strong><small>${esc(row.email)}</small>${active ? '<em>当前登录</em>' : ''}</div><span>${active ? '' : `<button data-account-switch="${esc(row.id)}">切换</button>`}<button data-account-edit="${esc(row.id)}">修改</button><button data-account-delete="${esc(row.id)}">删除</button></span></article>`;
     }).join('') || '<div class="mufy-recovery-empty">还没有保存账号。先登录一个 Mufy 账号，再点“保存当前账号”。</div>';
   }
@@ -1711,6 +1736,7 @@
     const row = rows.find(item => item.id === String(accountId || ''));
     if (!row || !pageWindow.confirm(`只删除快速切换列表中的“${row.label}”？\n不会删除 Mufy 账号和其他脚本数据。`)) return;
     saveAccountSwitchProfiles(rows.filter(item => item.id !== row.id));
+    if (currentAccountSwitchId() === row.id) setCurrentAccountSwitchId('');
     state.status = `已从快速切换列表删除“${row.label}”。`;
     renderAccountSection();
     render();
