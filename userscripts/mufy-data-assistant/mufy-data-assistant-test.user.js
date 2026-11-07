@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.67
+// @version      3.0.0-dev.68
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.67';
+  const SCRIPT_VERSION = '3.0.0-dev.68';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -351,6 +351,8 @@
       return;
     }
     let attempts = 0;
+    let sawEmailInput = false;
+    let emailNoticeShown = false;
     const timer = setInterval(() => {
       attempts += 1;
       const officialDialog = document.querySelector('div[role="dialog"][aria-modal="true"][data-state="open"]');
@@ -358,10 +360,23 @@
         || [...document.querySelectorAll('input')].find(input => input.type === 'email'
         || /邮箱|email/i.test(`${input.placeholder || ''} ${input.name || ''} ${input.autocomplete || ''}`));
       if (emailInput) {
+        sawEmailInput = true;
         if (String(emailInput.value || '').trim() !== String(pending.email)) setWebsiteInputValue(emailInput, pending.email);
-        emailInput.focus();
-        clearInterval(timer);
-        showManualAutoChatToast(`已填入“${pending.label || pending.email}”的邮箱；请使用 Edge 保存的密码或手动输入密码登录。`, { tone: 'success', duration: 8000 });
+        const form = emailInput.closest('form') || officialDialog?.querySelector('form');
+        const passwordInput = form?.querySelector('input[type="password"][name="password"],input[type="password"]');
+        const submitButton = form?.querySelector('button[type="submit"],input[type="submit"]');
+        if (passwordInput && String(passwordInput.value || '').length > 0 && submitButton && !submitButton.disabled) {
+          clearInterval(timer);
+          state.status = `Edge 已补全“${pending.label || pending.email}”的密码，正在自动登录…`;
+          showManualAutoChatToast(state.status, { tone: 'success', duration: 6000 });
+          submitButton.click();
+          return;
+        }
+        if (!emailNoticeShown) {
+          emailNoticeShown = true;
+          emailInput.focus();
+          showManualAutoChatToast(`已填入“${pending.label || pending.email}”的邮箱，正在等待 Edge 自动补全密码…`, { tone: 'info', duration: 6000 });
+        }
         return;
       }
       if (attempts >= 2 && attempts % 4 === 2 && !document.querySelector('input[type="password"]')) {
@@ -374,7 +389,9 @@
       }
       if (attempts >= 90) {
         clearInterval(timer);
-        showManualAutoChatToast('仍未找到 Mufy 登录邮箱框，请手动点网站“登录”；目标邮箱仍保留，可刷新后继续自动填入。', { tone: 'warn', duration: 9000 });
+        showManualAutoChatToast(sawEmailInput
+          ? '邮箱已填入，但 Edge 没有在等待时间内补全密码，请手动选择已保存的密码并登录。'
+          : '仍未找到 Mufy 登录邮箱框，请手动点网站“登录”；目标邮箱仍保留，可刷新后继续自动填入。', { tone: 'warn', duration: 9000 });
       }
     }, 500);
   }
