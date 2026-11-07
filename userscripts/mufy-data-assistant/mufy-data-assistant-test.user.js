@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.63
+// @version      3.0.0-dev.64
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.63';
+  const SCRIPT_VERSION = '3.0.0-dev.64';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -313,6 +313,35 @@
     input.dispatchEvent(new pageWindow.Event('change', { bubbles: true }));
   }
 
+  function visibleWebsiteElement(element) {
+    if (!element || element.closest('#mufy-recovery-panel')) return false;
+    const rect = element.getBoundingClientRect();
+    const style = pageWindow.getComputedStyle(element);
+    return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || 1) > 0;
+  }
+
+  function officialLoginControl() {
+    const direct = [...document.querySelectorAll('button,a,[role="button"],[tabindex]')].filter(visibleWebsiteElement);
+    const leaves = [...document.querySelectorAll('body *')].filter(item => item.children.length === 0 && visibleWebsiteElement(item));
+    let best = null;
+    let bestScore = 0;
+    for (const item of [...direct, ...leaves]) {
+      const text = String(item.textContent || '').replace(/\s+/g, ' ').trim();
+      if (!text || text.length > 28 || /退出|注册|忘记密码/i.test(text)) continue;
+      let score = 0;
+      if (/^(登录|登入|login|sign in)$/i.test(text)) score += 8;
+      else if (/登录|登入|\blogin\b|sign in/i.test(text)) score += 4;
+      const hint = `${item.getAttribute('aria-label') || ''} ${item.getAttribute('title') || ''}`;
+      if (/登录|登入|login|sign in/i.test(hint)) score += 4;
+      if (item.matches('button,a,[role="button"]')) score += 2;
+      if (score > bestScore) {
+        best = item.matches('button,a,[role="button"]') ? item : item.closest('button,a,[role="button"],[tabindex]') || item;
+        bestScore = score;
+      }
+    }
+    return bestScore >= 4 ? best : null;
+  }
+
   function installAccountSwitchLoginAssist() {
     const pending = pendingAccountSwitch();
     if (!pending) return;
@@ -332,13 +361,17 @@
         showManualAutoChatToast(`已填入“${pending.label || pending.email}”的邮箱；请使用 Edge 保存的密码或手动输入密码登录。`, { tone: 'success', duration: 8000 });
         return;
       }
-      if (attempts === 2) {
-        const loginButton = [...document.querySelectorAll('button,[role="button"]')].find(item => !item.closest('#mufy-recovery-panel') && /^(登录|登入|login)$/i.test(String(item.textContent || '').trim()));
-        loginButton?.click();
+      if (attempts >= 2 && attempts % 4 === 2 && !document.querySelector('input[type="password"]')) {
+        const loginButton = officialLoginControl();
+        if (loginButton) {
+          loginButton.click();
+          state.status = `已找到 Mufy 登录入口，正在等待邮箱输入框…`;
+          if (panel) render();
+        }
       }
-      if (attempts >= 30) {
+      if (attempts >= 90) {
         clearInterval(timer);
-        showManualAutoChatToast('没有找到 Mufy 登录邮箱框，请手动打开网站登录窗口；账号邮箱仍会在本次页面停留期间等待填入。', { tone: 'warn', duration: 8000 });
+        showManualAutoChatToast('仍未找到 Mufy 登录邮箱框，请手动点网站“登录”；目标邮箱仍保留，可刷新后继续自动填入。', { tone: 'warn', duration: 9000 });
       }
     }, 500);
   }
