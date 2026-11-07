@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.50
+// @version      3.0.0-dev.51
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.50';
+  const SCRIPT_VERSION = '3.0.0-dev.51';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -57,6 +57,8 @@
   const QUOTE_STYLE_KEY = 'mufy-role-links-only-quote-style-v1';
   const REGEX_RULES_KEY = 'mufy-role-links-only-regex-rules-v1';
   const REGEX_RICH_RENDER_LIMIT_KEY = 'mufy-role-links-only-regex-rich-render-limit-v1';
+  const PROMPT_LIBRARY_KEY = 'mufy-role-links-only-prompt-library-v1';
+  const EXTRA_LIBRARY_KEY = 'mufy-role-links-only-extra-library-v1';
   const MODEL_MONITOR_SELECTION_KEY = 'mufy-role-links-only-model-monitor-selection-v1';
   const MODEL_MONITOR_SNAPSHOT_KEY = 'mufy-role-links-only-model-monitor-snapshot-v1';
   const MODEL_MONITOR_NOTIFY_KEY = 'mufy-role-links-only-model-monitor-notify-v1';
@@ -288,6 +290,8 @@
     state.quoteSelectedId = '';
     state.regexRules = loadRegexRules();
     state.regexRichRenderLimit = loadRegexRichRenderLimit();
+    state.promptLibrary = loadMaterialLibrary(PROMPT_LIBRARY_KEY, 'prompt');
+    state.extraLibrary = loadMaterialLibrary(EXTRA_LIBRARY_KEY, 'extra');
     rawDialogRows.clear();
     rawDialogRichCache.clear();
     rawRegexHydratedPages.clear();
@@ -1217,7 +1221,7 @@
       const patternPreview = regexRulePreview(rule.pattern, 120);
       const replacementPreview = regexRulePreview(rule.replacement || '（删除匹配内容）', 180);
       const outputPreview = regexRulePreview(rule.outputRequirement, 180);
-      return `<div class="mufy-regex-rule ${rule.enabled ? 'is-enabled' : ''}" ${rule.enabled && rule.outputRequirement ? `data-regex-card-insert="${esc(rule.id)}" title="点击空白处将输出要求写入聊天输入框"` : ''}><label><input type="checkbox" data-regex-toggle="${esc(rule.id)}" ${rule.enabled ? 'checked' : ''}><span><b>${esc(rule.name)}</b><small>/${esc(patternPreview)}/${esc(rule.flags)} → ${esc(replacementPreview)}</small>${richHtml ? `<em class="mufy-regex-html-status">HTML 交互规则 · 已捕获 ${rawDialogRows.size} 条接口原文 · 匹配后挂回聊天</em>` : ''}${rule.outputRequirement ? `<small class="mufy-regex-output-requirement">输出要求：${esc(outputPreview)}</small>` : ''}${error ? `<em>${esc(error)}</em>` : ''}</span></label><span class="mufy-regex-rule-actions">${rule.enabled && rule.outputRequirement ? `<button data-regex-insert="${esc(rule.id)}">写入要求</button>` : ''}<button data-regex-edit="${esc(rule.id)}">编辑</button><button data-regex-delete="${esc(rule.id)}">删除</button><button data-regex-up="${esc(rule.id)}" ${index === 0 ? 'disabled' : ''}>上移</button></span></div>`;
+      return `<div class="mufy-regex-rule ${rule.enabled ? 'is-enabled' : ''}" ${rule.enabled && rule.outputRequirement ? `data-regex-card-insert="${esc(rule.id)}" title="点击空白处将输出要求写入聊天输入框"` : ''}><label><input type="checkbox" data-regex-toggle="${esc(rule.id)}" ${rule.enabled ? 'checked' : ''}><span><b>${esc(rule.name)}</b><small>/${esc(patternPreview)}/${esc(rule.flags)} → ${esc(replacementPreview)}</small>${richHtml ? `<em class="mufy-regex-html-status">HTML 交互规则 · 已捕获 ${rawDialogRows.size} 条接口原文 · 匹配后挂回聊天</em>` : ''}${rule.outputRequirement ? `<small class="mufy-regex-output-requirement">输出要求：${esc(outputPreview)}</small>` : ''}${error ? `<em>${esc(error)}</em>` : ''}</span></label><span class="mufy-regex-rule-actions">${rule.enabled && rule.outputRequirement ? `<button data-regex-insert="${esc(rule.id)}">写入要求</button>` : ''}<button data-regex-requirement="${esc(rule.id)}">${rule.outputRequirement ? '改要求' : '加要求'}</button><button data-regex-edit="${esc(rule.id)}">编辑</button><button data-regex-delete="${esc(rule.id)}">删除</button><button data-regex-up="${esc(rule.id)}" ${index === 0 ? 'disabled' : ''}>上移</button></span></div>`;
     }).join('') || '<div class="mufy-recovery-empty">还没有正则规则。点击“新增规则”创建第一条。</div>';
     const sample = panel.querySelector('#mufy-recovery-regex-test-input');
     const output = panel.querySelector('#mufy-recovery-regex-test-output');
@@ -1254,7 +1258,10 @@
     if (name == null) return;
     const pattern = pageWindow.prompt('查找表达式（不需要输入两侧的 /）', existing?.pattern || '');
     if (pattern == null) return;
-    const replacement = pageWindow.prompt('替换内容；可以使用 $1、$2 等捕获组。留空表示删除匹配内容。', existing?.replacement || '');
+    const preserveRichReplacement = Boolean(existing && isRichHtmlRegexRule(existing));
+    const replacement = preserveRichReplacement
+      ? existing.replacement
+      : pageWindow.prompt('替换内容；可以使用 $1、$2 等捕获组。留空表示删除匹配内容。', existing?.replacement || '');
     if (replacement == null) return;
     const outputRequirement = pageWindow.prompt('输出要求：点击这条规则时会写入聊天输入框；可以留空。', existing?.outputRequirement || '');
     if (outputRequirement == null) return;
@@ -1270,6 +1277,18 @@
     else state.regexRules.push(next);
     saveRegexRules();
     refreshRegexOnPage();
+  }
+
+  function editRegexOutputRequirement(ruleId) {
+    const rule = state.regexRules.find(row => row.id === String(ruleId || ''));
+    if (!rule) return;
+    const outputRequirement = pageWindow.prompt('输出要求：点击“写入要求”时会填入聊天输入框；留空可清除。', rule.outputRequirement || '');
+    if (outputRequirement == null) return;
+    rule.outputRequirement = String(outputRequirement);
+    if (!saveRegexRules()) return;
+    state.status = rule.outputRequirement ? `已保存“${rule.name}”的输出要求，正则匹配与 HTML 替换内容未修改。` : `已清除“${rule.name}”的输出要求。`;
+    renderRegexSection();
+    render();
   }
 
   function parseImportedRegexRows(value) {
@@ -1337,6 +1356,96 @@
     setManualChatTextareaValue(composer.textarea, rule.outputRequirement);
     composer.textarea.focus();
     state.status = `已将“${rule.name}”的输出要求写入聊天输入框，尚未发送。`;
+    render();
+  }
+
+  function normalizeMaterialItem(row = {}, kind = 'prompt') {
+    return {
+      id: String(row.id || pageWindow.crypto?.randomUUID?.() || `material-${Date.now()}-${Math.random().toString(36).slice(2)}`),
+      title: String(row.title || row.name || (kind === 'extra' ? '未命名番外' : '未命名指令')).trim() || (kind === 'extra' ? '未命名番外' : '未命名指令'),
+      content: String(row.content || row.text || row.prompt || ''),
+      updatedAt: String(row.updatedAt || new Date().toISOString())
+    };
+  }
+
+  function loadMaterialLibrary(key, kind) {
+    try {
+      const rows = JSON.parse(loadAndMigrateScopedValue(key) || '[]');
+      return Array.isArray(rows) ? rows.filter(row => row && typeof row === 'object').map(row => normalizeMaterialItem(row, kind)).filter(row => row.content) : [];
+    } catch (_) { return []; }
+  }
+
+  function saveMaterialLibraries() {
+    try {
+      localStorage.setItem(accountStorageKey(PROMPT_LIBRARY_KEY), JSON.stringify(state.promptLibrary));
+      localStorage.setItem(accountStorageKey(EXTRA_LIBRARY_KEY), JSON.stringify(state.extraLibrary));
+      return true;
+    } catch (error) {
+      state.status = '素材库保存失败，可能是浏览器本地空间不足。';
+      appendRunLog('error', '素材库保存失败', error);
+      return false;
+    }
+  }
+
+  function activeMaterialRows() {
+    return state.materialKind === 'extra' ? state.extraLibrary : state.promptLibrary;
+  }
+
+  function renderMaterialSection() {
+    const list = panel?.querySelector('#mufy-recovery-material-list');
+    if (!list) return;
+    panel.querySelectorAll('[data-material-kind]').forEach(button => button.classList.toggle('active', button.dataset.materialKind === state.materialKind));
+    const rows = activeMaterialRows();
+    const label = state.materialKind === 'extra' ? '番外' : '指令';
+    const add = panel.querySelector('#mufy-recovery-material-add');
+    if (add) add.textContent = `新增${label}`;
+    list.innerHTML = rows.map(row => `<article class="mufy-material-card" data-material-fill="${esc(row.id)}" title="点击填入聊天输入框"><div><strong>${esc(row.title)}</strong><small>${esc(regexRulePreview(row.content, 260))}</small></div><span><button data-material-edit="${esc(row.id)}">编辑</button><button data-material-delete="${esc(row.id)}">删除</button></span></article>`).join('') || `<div class="mufy-recovery-empty">还没有${label}。点击“新增${label}”保存常用内容。</div>`;
+  }
+
+  function openMaterialEditor(itemId = '') {
+    const row = activeMaterialRows().find(item => item.id === String(itemId || ''));
+    state.materialEditingId = row?.id || '';
+    const modal = panel.querySelector('#mufy-recovery-material-editor');
+    panel.querySelector('#mufy-recovery-material-editor-title').textContent = `${row ? '编辑' : '新增'}${state.materialKind === 'extra' ? '番外' : '指令'}`;
+    panel.querySelector('#mufy-recovery-material-title').value = row?.title || '';
+    panel.querySelector('#mufy-recovery-material-content').value = row?.content || '';
+    modal.hidden = false;
+    setTimeout(() => panel.querySelector('#mufy-recovery-material-title')?.focus(), 0);
+  }
+
+  function saveMaterialEditor() {
+    const title = String(panel.querySelector('#mufy-recovery-material-title').value || '').trim();
+    const content = String(panel.querySelector('#mufy-recovery-material-content').value || '').trim();
+    if (!content) {
+      state.status = '内容不能为空。';
+      render();
+      return;
+    }
+    const rows = activeMaterialRows();
+    const existing = rows.find(row => row.id === state.materialEditingId);
+    const next = normalizeMaterialItem({ ...existing, id: existing?.id, title: title || (state.materialKind === 'extra' ? '未命名番外' : '未命名指令'), content, updatedAt: new Date().toISOString() }, state.materialKind);
+    if (existing) rows.splice(rows.indexOf(existing), 1, next);
+    else rows.unshift(next);
+    if (!saveMaterialLibraries()) { render(); return; }
+    panel.querySelector('#mufy-recovery-material-editor').hidden = true;
+    state.materialEditingId = '';
+    state.status = `已保存${state.materialKind === 'extra' ? '番外' : '指令'}“${next.title}”。`;
+    renderMaterialSection();
+    render();
+  }
+
+  function fillMaterialIntoComposer(itemId) {
+    const row = activeMaterialRows().find(item => item.id === String(itemId || ''));
+    if (!row) return;
+    const composer = findManualChatComposer();
+    if (!composer.textarea || composer.textarea.disabled || composer.textarea.readOnly) {
+      state.status = '当前页面没有可用的聊天输入框，请先进入角色聊天页面。';
+      render();
+      return;
+    }
+    setManualChatTextareaValue(composer.textarea, row.content);
+    composer.textarea.focus();
+    state.status = `已将“${row.title}”填入聊天输入框，尚未发送。`;
     render();
   }
 
@@ -1438,6 +1547,10 @@
     quoteSelectedId: '',
     regexRules: loadRegexRules(),
     regexRichRenderLimit: loadRegexRichRenderLimit(),
+    promptLibrary: loadMaterialLibrary(PROMPT_LIBRARY_KEY, 'prompt'),
+    extraLibrary: loadMaterialLibrary(EXTRA_LIBRARY_KEY, 'extra'),
+    materialKind: 'prompt',
+    materialEditingId: '',
     modelMonitorRows: loadModelMonitorSnapshot().rows || [],
     modelMonitorSelectedIds: loadModelMonitorSelection(),
     modelMonitorLoading: false,
@@ -9487,18 +9600,21 @@ roleStateReady = true;
     const chatSection = panel.querySelector('#mufy-recovery-chat-section');
     const beautySection = panel.querySelector('#mufy-recovery-beauty-section');
     const regexSection = panel.querySelector('#mufy-recovery-regex-section');
+    const materialSection = panel.querySelector('#mufy-recovery-material-section');
     const maskSection = panel.querySelector('#mufy-recovery-mask-section');
     const sectionHome = panel.querySelector('#mufy-recovery-section-home');
     const sectionNav = panel.querySelector('#mufy-recovery-section-nav');
     const sectionTitle = panel.querySelector('#mufy-recovery-section-title');
-    const sectionNames = { roles: '角色', favorites: '收藏', chats: '聊天记录', beauty: '美化', regex: '正则', masks: '面具' };
+    const sectionNames = { roles: '角色', favorites: '收藏', chats: '聊天记录', beauty: '美化', regex: '正则', materials: '素材库', masks: '面具' };
     if (sectionHome) sectionHome.hidden = state.section !== 'home';
     if (sectionNav) sectionNav.hidden = state.section === 'home';
-    if (sectionTitle) sectionTitle.textContent = sectionNames[state.section] || '';
+    if (sectionTitle) sectionTitle.textContent = state.section === 'materials'
+      ? (state.materialKind === 'extra' ? '番外库' : '指令库')
+      : (sectionNames[state.section] || '');
     const controls = panel.querySelector('#mufy-recovery-controls');
     if (controls) {
       controls.classList.toggle('is-section-home', state.section === 'home');
-      controls.classList.toggle('is-standalone-section', ['beauty', 'regex'].includes(state.section));
+      controls.classList.toggle('is-standalone-section', ['beauty', 'regex', 'materials'].includes(state.section));
     }
     const statusBox = panel.querySelector('#mufy-recovery-status');
     if (statusBox) statusBox.hidden = state.section === 'home';
@@ -9508,9 +9624,11 @@ roleStateReady = true;
     if (chatSection) chatSection.hidden = state.section !== 'chats';
     if (beautySection) beautySection.hidden = state.section !== 'beauty';
     if (regexSection) regexSection.hidden = state.section !== 'regex';
+    if (materialSection) materialSection.hidden = state.section !== 'materials';
     if (maskSection) maskSection.hidden = state.section !== 'masks';
     const resultList = panel.querySelector('#mufy-recovery-list');
-    if (resultList) resultList.hidden = ['home', 'beauty', 'regex'].includes(state.section);
+    if (resultList) resultList.hidden = ['home', 'beauty', 'regex', 'materials'].includes(state.section);
+    if (state.section === 'materials') renderMaterialSection();
     const roleFilterRow = panel.querySelector('#mufy-recovery-role-filter-row');
     const maskSearch = panel.querySelector('#mufy-recovery-mask-search');
     if (roleFilterRow) roleFilterRow.hidden = state.section !== 'roles';
@@ -9555,9 +9673,10 @@ roleStateReady = true;
       ? '选择功能'
       : state.section === 'beauty' ? '美化设置'
         : state.section === 'regex' ? `${state.regexRules.length} 条规则`
-      : state.active === 'authors' || state.active === 'siteAuthors'
-        ? `${groups.length} 位作者`
-        : `${rows.length}/${statusSource.length}`;
+        : state.section === 'materials' ? `${activeMaterialRows().length} 条${state.materialKind === 'extra' ? '番外' : '指令'}`
+          : state.active === 'authors' || state.active === 'siteAuthors'
+            ? `${groups.length} 位作者`
+            : `${rows.length}/${statusSource.length}`;
     panel.querySelector('#mufy-recovery-history-entry').classList.toggle('active', state.section === 'roles' && state.active === 'roleHistory');
     const chatSearchButton = panel.querySelector('#mufy-recovery-chat-search');
     if (chatSearchButton) {
@@ -9876,7 +9995,10 @@ roleStateReady = true;
       #mufy-recovery-mask-tabs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
       #mufy-recovery-tabs button.active,#mufy-recovery-favorite-tabs button.active,#mufy-recovery-chat-tabs button.active,#mufy-recovery-mask-tabs button.active{background:#786bd4;border-color:#8f84dd;color:#fff}
       #mufy-recovery-tabs .mufy-recovery-tab-action,#mufy-recovery-mask-tabs .mufy-recovery-tab-action{background:#453d69;border-color:#8578c8;color:#f4efff}
-      #mufy-recovery-role-section,#mufy-recovery-favorite-section,#mufy-recovery-chat-section,#mufy-recovery-beauty-section,#mufy-recovery-regex-section,#mufy-recovery-mask-section{display:flex;flex-direction:column;gap:8px}
+      #mufy-recovery-role-section,#mufy-recovery-favorite-section,#mufy-recovery-chat-section,#mufy-recovery-beauty-section,#mufy-recovery-regex-section,#mufy-recovery-material-section,#mufy-recovery-mask-section{display:flex;flex-direction:column;gap:8px}
+      #mufy-recovery-material-tabs{display:grid;grid-template-columns:1fr 1fr;gap:6px}#mufy-recovery-material-tabs button.active{background:#786bd4;border-color:#8f84dd;color:#fff}
+      #mufy-recovery-material-list{display:grid;align-content:start;gap:7px;overflow:auto;padding-bottom:20px}.mufy-material-card{display:flex;align-items:flex-start;justify-content:space-between;gap:9px;padding:10px 11px;border:1px solid #4c485d;border-radius:10px;background:#272630;cursor:pointer}.mufy-material-card:hover{border-color:#8c7bd1;background:#302d40}.mufy-material-card>div{min-width:0;display:grid;gap:4px}.mufy-material-card strong{color:#f0edff}.mufy-material-card small{display:-webkit-box;overflow:hidden;color:#aaa;font-size:10px;line-height:1.5;-webkit-line-clamp:4;-webkit-box-orient:vertical;white-space:pre-wrap;overflow-wrap:anywhere}.mufy-material-card>span{display:flex;flex:none;gap:5px}.mufy-material-card>span button{padding:4px 7px!important;font-size:10px!important}
+      #mufy-recovery-material-editor{position:absolute;inset:48px 10px 10px;z-index:14;display:flex;flex-direction:column;overflow:hidden;border:1px solid #766bb1;border-radius:12px;background:#292930;box-shadow:0 16px 45px #000c}#mufy-recovery-material-editor[hidden]{display:none}#mufy-recovery-material-editor-head{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid #4b4b55;background:#35353e}#mufy-recovery-material-editor-head button{padding:1px 7px!important;font-size:20px!important}#mufy-recovery-material-editor-body{flex:1;min-height:0;display:grid;grid-template-rows:auto 1fr;gap:10px;padding:12px}#mufy-recovery-material-editor-body label{display:grid;min-height:0;gap:5px;color:#bbb;font-size:11px}#mufy-recovery-material-editor-body input,#mufy-recovery-material-editor-body textarea{box-sizing:border-box;width:100%;border:1px solid #555;border-radius:8px;background:#18181c;color:#fff;padding:9px;font:13px/1.55 system-ui;outline:none}#mufy-recovery-material-editor-body textarea{min-height:180px;resize:none}#mufy-recovery-material-editor-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:0 12px 12px}#mufy-recovery-material-editor-save{background:#62539a!important;border-color:#8878c5!important}
       .mufy-recovery-section-note{display:grid;gap:4px;padding:10px 11px;border:1px solid #4d4962;border-radius:8px;background:#292733}.mufy-recovery-section-note span{color:#aaa;font-size:11px;line-height:1.5}
       #mufy-recovery-regex-tools{display:grid;grid-template-columns:1fr 1fr;gap:6px}#mufy-recovery-regex-add{background:#5e4f91!important;border-color:#8373bb!important;font-weight:700}#mufy-recovery-regex-rich-limit-label{grid-column:1/-1;display:flex;align-items:center;gap:7px;padding:3px 2px;color:#aaa;font-size:10px}#mufy-recovery-regex-rich-limit{width:54px!important;padding:5px 6px!important;text-align:center}
       #mufy-recovery-regex-test{display:grid;grid-template-columns:1fr 1fr;gap:7px}#mufy-recovery-regex-test label{display:grid;gap:4px;color:#aaa;font-size:10px}#mufy-recovery-regex-test textarea{box-sizing:border-box;width:100%;min-height:72px;resize:vertical;border:1px solid #555;border-radius:7px;background:#18181c;color:#eee;padding:7px;font:11px/1.45 system-ui}
@@ -9984,11 +10106,11 @@ roleStateReady = true;
       #mufy-recovery-panel{background:linear-gradient(155deg,rgba(31,31,42,.97),rgba(18,18,25,.98) 62%,rgba(24,21,34,.98));border-color:#ffffff24;border-radius:18px;box-shadow:0 24px 70px #000b,inset 0 1px #ffffff14;backdrop-filter:blur(22px) saturate(1.2)}
       #mufy-recovery-head{min-height:38px;padding:10px 13px 8px;background:linear-gradient(90deg,#ffffff0d,#8f7bff12,#ffffff08);border-bottom:1px solid #ffffff12;border-radius:18px 18px 0 0}#mufy-recovery-title>span{font-size:14px;letter-spacing:.01em}.mufy-recovery-version{color:#d9c7ff}
       #mufy-recovery-head #mufy-recovery-log-entry,#mufy-recovery-head #mufy-recovery-history-entry{border-color:#ffffff24!important;border-radius:999px!important;background:#ffffff0a!important;color:#d9d6e7!important;box-shadow:inset 0 1px #ffffff12}
-      #mufy-recovery-update-entry.has-update{border-color:#61c99588!important;background:linear-gradient(145deg,#225a4166,#242c3250)!important;box-shadow:inset 0 1px #baffd022,0 0 22px #42c78322!important}#mufy-recovery-update-entry.has-update strong{color:#bfffd8}#mufy-recovery-update-entry.has-update small{color:#8de8b2}
       #mufy-recovery-controls{gap:10px;padding:12px 13px;background:linear-gradient(180deg,#ffffff03,transparent)}
       #mufy-recovery-panel button{border-color:#ffffff20;border-radius:10px;background:linear-gradient(180deg,#ffffff12,#ffffff07);color:#eeedf6;box-shadow:inset 0 1px #ffffff12,0 3px 10px #0002;transition:transform .16s ease,border-color .16s ease,background .16s ease,box-shadow .16s ease}#mufy-recovery-panel button:hover{border-color:#a995ff77;background:linear-gradient(180deg,#a995ff25,#7c67d918);box-shadow:0 6px 18px #0004,0 0 0 1px #a995ff1f}#mufy-recovery-panel button:active{transform:translateY(1px) scale(.99)}
       #mufy-recovery-section-home{gap:13px;padding:6px 2px 10px}#mufy-recovery-section-home-head{padding:4px 5px 1px}#mufy-recovery-section-home-head strong{font-size:17px;letter-spacing:.02em}#mufy-recovery-section-home-head small{color:#8e8a9e}
       #mufy-recovery-section-cards{gap:10px}.mufy-recovery-section-card{position:relative;min-height:86px!important;overflow:hidden;border-color:#ffffff18!important;border-radius:15px!important;background:linear-gradient(145deg,#ffffff0d,#ffffff05)!important;box-shadow:inset 0 1px #ffffff12,0 10px 24px #0003!important}.mufy-recovery-section-card:before{content:'';position:absolute;inset:0;background:radial-gradient(circle at 12% 0,#a58cff20,transparent 45%);pointer-events:none}.mufy-recovery-section-card:hover{transform:translateY(-2px);border-color:#a995ff66!important}.mufy-recovery-section-card strong{position:relative;font-size:14px}.mufy-recovery-section-card small{position:relative;color:#9d99aa}.mufy-recovery-section-card:first-child{background:linear-gradient(145deg,#5c4b8c66,#2d294250)!important;border-color:#9f8bea55!important}
+      #mufy-recovery-update-entry.has-update{border-color:#61c99588!important;background:linear-gradient(145deg,#225a4166,#242c3250)!important;box-shadow:inset 0 1px #baffd022,0 0 22px #42c78322!important}#mufy-recovery-update-entry.has-update strong{color:#bfffd8}#mufy-recovery-update-entry.has-update small{color:#8de8b2}
       #mufy-recovery-section-nav{padding:1px 0 9px;border-color:#ffffff12}#mufy-recovery-section-back{border-radius:999px!important;background:#ffffff09!important}#mufy-recovery-section-title{font-size:16px;letter-spacing:.04em}
       .mufy-recovery-section-note{padding:12px 13px;border-color:#a995ff2e;border-radius:14px;background:linear-gradient(135deg,#8d73df18,#ffffff06);box-shadow:inset 0 1px #ffffff0d}.mufy-recovery-section-note strong{color:#f1edff;font-size:13px}.mufy-recovery-section-note span{color:#9d98ad}
       #mufy-recovery-panel input:not([type="checkbox"]):not([type="range"]):not([type="color"]),#mufy-recovery-panel select,#mufy-recovery-panel textarea{border-color:#ffffff20!important;border-radius:11px!important;background:#0e0e15b8!important;color:#f4f2fb!important;box-shadow:inset 0 1px 4px #0006!important;outline:none}#mufy-recovery-panel input:focus,#mufy-recovery-panel select:focus,#mufy-recovery-panel textarea:focus{border-color:#9f8bea88!important;box-shadow:0 0 0 3px #8d73df1e,inset 0 1px 4px #0006!important}
@@ -10198,8 +10320,9 @@ roleStateReady = true;
         </div><div id="mufy-recovery-quote-card-actions"><button id="mufy-recovery-quote-source">打开来源</button><button id="mufy-recovery-quote-delete">删除这张</button><button id="mufy-recovery-quote-stage-collapse">收起牌面</button></div></div></div></div>
       </div>
       <div id="mufy-recovery-model-modal" hidden><div id="mufy-recovery-model-head"><span><strong>模型可用性监控</strong><small id="mufy-recovery-model-summary">每 5 分钟检测一次</small></span><button id="mufy-recovery-model-close" title="关闭">×</button></div><div id="mufy-recovery-model-tools"><input id="mufy-recovery-model-search" placeholder="搜索模型名称"><button id="mufy-recovery-model-refresh">立即检测</button><label id="mufy-recovery-model-notify-label"><input id="mufy-recovery-model-notify" type="checkbox"><span id="mufy-recovery-model-notify-text">异常通知（可选）</span><small>仅在已选模型由正常变为拥堵或中断时提醒</small></label></div><div id="mufy-recovery-model-list"><div class="mufy-recovery-empty">正在读取模型状态…</div></div></div>
+      <div id="mufy-recovery-material-editor" hidden><div id="mufy-recovery-material-editor-head"><strong id="mufy-recovery-material-editor-title">新增指令</strong><button id="mufy-recovery-material-editor-close" title="关闭">×</button></div><div id="mufy-recovery-material-editor-body"><label>标题<input id="mufy-recovery-material-title" maxlength="120" placeholder="例如：总结当前剧情"></label><label>内容<textarea id="mufy-recovery-material-content" maxlength="50000" placeholder="输入要填入聊天框的完整内容"></textarea></label></div><div id="mufy-recovery-material-editor-actions"><button id="mufy-recovery-material-editor-cancel">取消</button><button id="mufy-recovery-material-editor-save">保存</button></div></div>
       <div id="mufy-recovery-controls">
-        <div id="mufy-recovery-section-home"><div id="mufy-recovery-section-home-head"><strong>选择功能分区</strong><small>进入后可通过返回按钮切换到其他分区</small></div><div id="mufy-recovery-section-cards"><button class="mufy-recovery-section-card" data-section="roles"><strong>角色</strong><small>找回、状态、收藏未聊、作者与标签</small></button><button class="mufy-recovery-section-card" data-section="favorites"><strong>收藏</strong><small>网页角色、普通待聊、一键扣数与收藏夹</small></button><button class="mufy-recovery-section-card" data-section="chats"><strong>聊天记录</strong><small>内容搜索与完整导出</small></button><button class="mufy-recovery-section-card" data-section="beauty"><strong>美化</strong><small>摘录牌面与后续主题设置</small></button><button class="mufy-recovery-section-card" data-section="masks"><strong>面具</strong><small>面具库、编辑、绑定与导入导出</small></button><button class="mufy-recovery-section-card" data-section="regex"><strong>正则</strong><small>回复替换、规则导入与输出要求</small></button><button id="mufy-recovery-model-entry" class="mufy-recovery-section-card" title="选择并监控模型状态"><strong>模型监控</strong><small>选择模型并查看可用性、响应时间和成功率</small></button><button id="mufy-recovery-update-entry" class="mufy-recovery-section-card" title="检查并安装测试版更新"><strong>检查更新</strong><small id="mufy-recovery-update-text">当前 ${esc(SCRIPT_VERSION)} · 点击检查</small></button></div></div>
+        <div id="mufy-recovery-section-home"><div id="mufy-recovery-section-home-head"><strong>选择功能分区</strong><small>进入后可通过返回按钮切换到其他分区</small></div><div id="mufy-recovery-section-cards"><button class="mufy-recovery-section-card" data-section="roles"><strong>角色</strong><small>找回、状态、收藏未聊、作者与标签</small></button><button class="mufy-recovery-section-card" data-section="favorites"><strong>收藏</strong><small>网页角色、普通待聊、一键扣数与收藏夹</small></button><button class="mufy-recovery-section-card" data-section="chats"><strong>聊天记录</strong><small>内容搜索与完整导出</small></button><button class="mufy-recovery-section-card" data-section="beauty"><strong>美化</strong><small>摘录牌面与后续主题设置</small></button><button class="mufy-recovery-section-card" data-section="masks"><strong>面具</strong><small>面具库、编辑、绑定与导入导出</small></button><button class="mufy-recovery-section-card" data-section="regex"><strong>正则</strong><small>回复替换、规则导入与输出要求</small></button><button class="mufy-recovery-section-card" data-section="materials" data-material-home-kind="prompt"><strong>指令库</strong><small>保存常用指令，点击填入聊天输入框</small></button><button class="mufy-recovery-section-card" data-section="materials" data-material-home-kind="extra"><strong>番外库</strong><small>保存番外模板或内容，点击快速填入</small></button><button id="mufy-recovery-model-entry" class="mufy-recovery-section-card" title="选择并监控模型状态"><strong>模型监控</strong><small>选择模型并查看可用性、响应时间和成功率</small></button><button id="mufy-recovery-update-entry" class="mufy-recovery-section-card" title="检查并安装测试版更新"><strong>检查更新</strong><small id="mufy-recovery-update-text">当前 ${esc(SCRIPT_VERSION)} · 点击检查</small></button></div></div>
         <div id="mufy-recovery-section-nav" hidden><button id="mufy-recovery-section-back">← 返回</button><strong id="mufy-recovery-section-title"></strong></div>
         <div id="mufy-recovery-status"></div>
         <div id="mufy-recovery-favorite-task-controls" hidden><button id="mufy-recovery-favorite-task-main">中断收藏</button><button id="mufy-recovery-favorite-task-cancel">取消任务</button></div>
@@ -10233,6 +10356,7 @@ roleStateReady = true;
           <div id="mufy-recovery-regex-test"><label>测试原文<textarea id="mufy-recovery-regex-test-input" placeholder="输入一段文字，立即查看全部已启用规则的结果"></textarea></label><label>处理结果<textarea id="mufy-recovery-regex-test-output" readonly></textarea></label></div><iframe id="mufy-recovery-regex-html-preview" title="HTML 正则交互预览" sandbox="allow-scripts allow-forms allow-modals allow-popups allow-downloads" referrerpolicy="no-referrer" hidden></iframe>
           <div id="mufy-recovery-regex-list"></div>
         </div>
+        <div id="mufy-recovery-material-section" hidden><div id="mufy-recovery-material-tabs"><button data-material-kind="prompt">指令库</button><button data-material-kind="extra">番外库</button></div><div class="mufy-recovery-section-note"><strong>聊天素材库</strong><span>内容按账号保存在当前浏览器本地；点击卡片会填入聊天输入框，但不会自动发送。</span></div><button id="mufy-recovery-material-add">新增指令</button><div id="mufy-recovery-material-list"></div></div>
         <div id="mufy-recovery-mask-section" hidden>
           <div id="mufy-recovery-mask-tabs"><button data-category="masks">面具 (0)</button><button data-category="library">面具库 (0)</button><button id="mufy-recovery-save-all" class="mufy-recovery-tab-action">全部存入面具库</button></div>
           <input id="mufy-recovery-mask-search" placeholder="搜索面具名或面具 ID" hidden>
@@ -10410,6 +10534,8 @@ roleStateReady = true;
     panel.querySelector('#mufy-recovery-regex-list').onclick = event => {
       const insert = event.target.closest?.('[data-regex-insert]');
       if (insert) { insertRegexOutputRequirement(String(insert.dataset.regexInsert || '')); return; }
+      const requirement = event.target.closest?.('[data-regex-requirement]');
+      if (requirement) { editRegexOutputRequirement(String(requirement.dataset.regexRequirement || '')); return; }
       const edit = event.target.closest?.('[data-regex-edit]');
       if (edit) { editRegexRule(String(edit.dataset.regexEdit || '')); return; }
       const remove = event.target.closest?.('[data-regex-delete]');
@@ -10433,6 +10559,36 @@ roleStateReady = true;
       }
       const card = event.target.closest?.('[data-regex-card-insert]');
       if (card && !event.target.closest?.('button,input,label')) insertRegexOutputRequirement(String(card.dataset.regexCardInsert || ''));
+    };
+    panel.querySelectorAll('[data-material-kind]').forEach(button => {
+      button.onclick = () => {
+        state.materialKind = button.dataset.materialKind === 'extra' ? 'extra' : 'prompt';
+        state.materialEditingId = '';
+        renderMaterialSection();
+      };
+    });
+    panel.querySelector('#mufy-recovery-material-add').onclick = () => openMaterialEditor();
+    const materialEditor = panel.querySelector('#mufy-recovery-material-editor');
+    const closeMaterialEditor = () => { materialEditor.hidden = true; state.materialEditingId = ''; };
+    panel.querySelector('#mufy-recovery-material-editor-close').onclick = closeMaterialEditor;
+    panel.querySelector('#mufy-recovery-material-editor-cancel').onclick = closeMaterialEditor;
+    panel.querySelector('#mufy-recovery-material-editor-save').onclick = saveMaterialEditor;
+    panel.querySelector('#mufy-recovery-material-list').onclick = event => {
+      const edit = event.target.closest?.('[data-material-edit]');
+      if (edit) { openMaterialEditor(String(edit.dataset.materialEdit || '')); return; }
+      const remove = event.target.closest?.('[data-material-delete]');
+      if (remove) {
+        const id = String(remove.dataset.materialDelete || '');
+        const rows = activeMaterialRows();
+        const row = rows.find(item => item.id === id);
+        if (!row || !pageWindow.confirm(`确定删除“${row.title}”吗？`)) return;
+        rows.splice(rows.indexOf(row), 1);
+        saveMaterialLibraries();
+        renderMaterialSection();
+        return;
+      }
+      const card = event.target.closest?.('[data-material-fill]');
+      if (card) fillMaterialIntoComposer(String(card.dataset.materialFill || ''));
     };
     const modelModal = panel.querySelector('#mufy-recovery-model-modal');
     const openModelMonitor = () => {
@@ -10635,12 +10791,16 @@ roleStateReady = true;
     panel.querySelectorAll('[data-section]').forEach(button => {
       button.onclick = () => {
         const nextSection = button.dataset.section;
-        state.section = ['roles', 'favorites', 'chats', 'beauty', 'regex', 'masks'].includes(nextSection) ? nextSection : 'roles';
+        state.section = ['roles', 'favorites', 'chats', 'beauty', 'regex', 'materials', 'masks'].includes(nextSection) ? nextSection : 'roles';
         if (state.section === 'roles' && !['allRoles', 'chatted', 'chattedNotFavorite', 'favoriteOnly', 'roleHistory', 'authors'].includes(state.active)) state.active = 'allRoles';
         if (state.section === 'favorites' && !['manualFavoriteChats', 'siteSearch', 'siteAuthors'].includes(state.active)) state.active = 'manualFavoriteChats';
         if (state.section === 'chats' && state.active !== 'chatMatches') state.active = 'chatMatches';
         if (state.section === 'beauty') state.active = 'beauty';
         if (state.section === 'regex') state.active = 'regex';
+        if (state.section === 'materials') {
+          state.active = 'materials';
+          state.materialKind = button.dataset.materialHomeKind === 'extra' ? 'extra' : 'prompt';
+        }
         if (state.section === 'masks' && state.active !== 'masks' && state.active !== 'library') state.active = 'masks';
         render();
         if (state.section === 'masks' && state.active === 'masks') loadCurrentSiteMasks();
@@ -10946,4 +11106,3 @@ roleStateReady = true;
     mountGuard.observe(document.documentElement, { childList: true, subtree: true });
   } catch (_) {}
 })();
-
