@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.41
+// @version      3.0.0-dev.42
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.41';
+  const SCRIPT_VERSION = '3.0.0-dev.42';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const MASK_LIBRARY_KEY = 'mufy-recovery-mask-library-v1';
   const MASK_LIBRARY_BACKUP_KEY = 'mufy-recovery-mask-library-backup-v1';
@@ -707,22 +707,28 @@
     return output;
   }
 
-  function richRegexHtmlForElement(element, rule) {
-    if (!element || !rule?.pattern || !rule?.replacement) return '';
+  function richRegexHtmlForSource(source, rule) {
+    if (!source || !rule?.pattern || !rule?.replacement) return '';
     let regex;
     try { regex = new RegExp(rule.pattern, String(rule.flags || '').replace(/[gy]/g, '')); }
     catch (_) { return ''; }
-    const sources = [String(element.textContent || ''), String(element.innerHTML || '')];
-    for (const source of sources) {
-      regex.lastIndex = 0;
-      const match = regex.exec(source);
-      if (!match) continue;
-      let rendered = match[0].replace(regex, rule.replacement);
-      rendered = rendered.replace(/^\s*```html\s*/i, '').replace(/\s*```\s*$/i, '').trim();
-      const documentStart = rendered.search(/<!doctype\s+html|<html\b/i);
-      const documentEnd = rendered.toLowerCase().lastIndexOf('</html>');
-      if (documentStart >= 0 && documentEnd >= documentStart) rendered = rendered.slice(documentStart, documentEnd + 7);
-      if (/<html\b|<!doctype\s+html/i.test(rendered)) return rendered;
+    regex.lastIndex = 0;
+    const match = regex.exec(String(source));
+    if (!match) return '';
+    let rendered = match[0].replace(regex, rule.replacement);
+    rendered = rendered.replace(/^\s*```html\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+    const documentStart = rendered.search(/<!doctype\s+html|<html\b/i);
+    const documentEnd = rendered.toLowerCase().lastIndexOf('</html>');
+    if (documentStart >= 0 && documentEnd >= documentStart) rendered = rendered.slice(documentStart, documentEnd + 7);
+    if (/<html\b|<!doctype\s+html/i.test(rendered)) return rendered;
+    return '';
+  }
+
+  function richRegexHtmlForElement(element, rule) {
+    if (!element) return '';
+    for (const source of [String(element.textContent || ''), String(element.innerHTML || '')]) {
+      const html = richRegexHtmlForSource(source, rule);
+      if (html) return html;
     }
     return '';
   }
@@ -840,7 +846,29 @@
     }).join('') || '<div class="mufy-recovery-empty">还没有正则规则。点击“新增规则”创建第一条。</div>';
     const sample = panel.querySelector('#mufy-recovery-regex-test-input');
     const output = panel.querySelector('#mufy-recovery-regex-test-output');
-    if (sample && output) output.value = applyRegexRulesToText(sample.value);
+    const preview = panel.querySelector('#mufy-recovery-regex-html-preview');
+    if (sample && output && preview) {
+      let richPreview = null;
+      for (const rule of state.regexRules) {
+        if (!rule.enabled || !isRichHtmlRegexRule(rule)) continue;
+        const html = richRegexHtmlForSource(sample.value, rule);
+        if (html) { richPreview = { rule, html }; break; }
+      }
+      if (richPreview) {
+        output.value = `已匹配 HTML 交互规则“${richPreview.rule.name}”，请在下方预览操作。`;
+        const signature = `${richPreview.rule.id}:${sample.value.length}:${sample.value.slice(0, 80)}:${sample.value.slice(-80)}`;
+        if (preview.dataset.signature !== signature) {
+          preview.srcdoc = sandboxRichRegexHtml(richPreview.html);
+          preview.dataset.signature = signature;
+        }
+        preview.hidden = false;
+      } else {
+        output.value = applyRegexRulesToText(sample.value);
+        preview.hidden = true;
+        preview.removeAttribute('srcdoc');
+        delete preview.dataset.signature;
+      }
+    }
   }
 
   function editRegexRule(existingId = '') {
@@ -9359,6 +9387,7 @@ roleStateReady = true;
       .mufy-recovery-section-note{display:grid;gap:4px;padding:10px 11px;border:1px solid #4d4962;border-radius:8px;background:#292733}.mufy-recovery-section-note span{color:#aaa;font-size:11px;line-height:1.5}
       #mufy-recovery-regex-tools{display:grid;grid-template-columns:1fr 1fr;gap:6px}#mufy-recovery-regex-add{background:#5e4f91!important;border-color:#8373bb!important;font-weight:700}
       #mufy-recovery-regex-test{display:grid;grid-template-columns:1fr 1fr;gap:7px}#mufy-recovery-regex-test label{display:grid;gap:4px;color:#aaa;font-size:10px}#mufy-recovery-regex-test textarea{box-sizing:border-box;width:100%;min-height:72px;resize:vertical;border:1px solid #555;border-radius:7px;background:#18181c;color:#eee;padding:7px;font:11px/1.45 system-ui}
+      #mufy-recovery-regex-html-preview{box-sizing:border-box;width:100%;height:clamp(520px,70vh,760px);border:1px solid #766bb1;border-radius:16px;background:#fff;box-shadow:0 16px 40px #0008}#mufy-recovery-regex-html-preview[hidden]{display:none}
       #mufy-recovery-regex-list{display:grid;gap:6px}.mufy-regex-rule{display:flex;align-items:flex-start;justify-content:space-between;gap:7px;padding:8px;border:1px solid #444;border-radius:7px;background:#27272e}.mufy-regex-rule.is-enabled{border-color:#665b91}.mufy-regex-rule>label{display:flex;align-items:flex-start;gap:7px;min-width:0}.mufy-regex-rule>label input{margin-top:3px;accent-color:#8272cc}.mufy-regex-rule>label span{display:grid;gap:2px;min-width:0}.mufy-regex-rule small{color:#aaa;word-break:break-all}.mufy-regex-output-requirement{color:#d6c9ff!important;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}.mufy-regex-rule em{color:#ff9b9b;font-size:10px}.mufy-regex-rule .mufy-regex-html-status{color:#9fd8b1}.mufy-regex-rule-actions{display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end}.mufy-regex-rule-actions button{padding:3px 6px!important;font-size:10px}
       .mufy-rich-regex-frame-wrap{box-sizing:border-box;width:100%;height:clamp(520px,76vh,760px);margin:10px 0;overflow:hidden;border:1px solid #766bb1;border-radius:12px;background:#17171c;box-shadow:0 9px 28px #0007}.mufy-rich-regex-frame{display:block;width:100%;height:100%;border:0;background:#fff}
       #mufy-recovery-list{flex:1 1 auto;min-height:0;overflow:auto;border-top:1px solid #444;padding:0 10px 16px}
@@ -9458,6 +9487,21 @@ roleStateReady = true;
       #mufy-recovery-quote-inline-editor{position:relative;z-index:2;box-sizing:border-box;flex:1;min-height:0;width:100%;resize:none;overflow-y:auto;border:1px dashed var(--quote-accent);border-radius:8px;background:#0000001f;color:var(--quote-color);padding:7px;font:inherit;line-height:inherit;text-align:inherit;outline:none}#mufy-recovery-quote-inline-editor:focus{box-shadow:0 0 0 2px color-mix(in srgb,var(--quote-accent) 35%,transparent)}
       #mufy-recovery-quote-stage-edit-actions{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin:8px 0}#mufy-recovery-quote-update{background:#62539a!important;border-color:#8878c5!important}
       #mufy-recovery-quote-stage .mufy-quote-style-field,#mufy-recovery-quote-stage .mufy-quote-style-check{margin-top:6px}#mufy-recovery-quote-card-actions{grid-template-columns:repeat(3,1fr);margin-top:8px}
+      /* 3.0 premium visual layer */
+      #mufy-recovery-panel{background:linear-gradient(155deg,rgba(31,31,42,.97),rgba(18,18,25,.98) 62%,rgba(24,21,34,.98));border-color:#ffffff24;border-radius:18px;box-shadow:0 24px 70px #000b,inset 0 1px #ffffff14;backdrop-filter:blur(22px) saturate(1.2)}
+      #mufy-recovery-head{min-height:38px;padding:10px 13px 8px;background:linear-gradient(90deg,#ffffff0d,#8f7bff12,#ffffff08);border-bottom:1px solid #ffffff12;border-radius:18px 18px 0 0}#mufy-recovery-title>span{font-size:14px;letter-spacing:.01em}.mufy-recovery-version{color:#d9c7ff}
+      #mufy-recovery-head #mufy-recovery-log-entry,#mufy-recovery-head #mufy-recovery-history-entry{border-color:#ffffff24!important;border-radius:999px!important;background:#ffffff0a!important;color:#d9d6e7!important;box-shadow:inset 0 1px #ffffff12}
+      #mufy-recovery-controls{gap:10px;padding:12px 13px;background:linear-gradient(180deg,#ffffff03,transparent)}
+      #mufy-recovery-panel button{border-color:#ffffff20;border-radius:10px;background:linear-gradient(180deg,#ffffff12,#ffffff07);color:#eeedf6;box-shadow:inset 0 1px #ffffff12,0 3px 10px #0002;transition:transform .16s ease,border-color .16s ease,background .16s ease,box-shadow .16s ease}#mufy-recovery-panel button:hover{border-color:#a995ff77;background:linear-gradient(180deg,#a995ff25,#7c67d918);box-shadow:0 6px 18px #0004,0 0 0 1px #a995ff1f}#mufy-recovery-panel button:active{transform:translateY(1px) scale(.99)}
+      #mufy-recovery-section-home{gap:13px;padding:6px 2px 10px}#mufy-recovery-section-home-head{padding:4px 5px 1px}#mufy-recovery-section-home-head strong{font-size:17px;letter-spacing:.02em}#mufy-recovery-section-home-head small{color:#8e8a9e}
+      #mufy-recovery-section-cards{gap:10px}.mufy-recovery-section-card{position:relative;min-height:86px!important;overflow:hidden;border-color:#ffffff18!important;border-radius:15px!important;background:linear-gradient(145deg,#ffffff0d,#ffffff05)!important;box-shadow:inset 0 1px #ffffff12,0 10px 24px #0003!important}.mufy-recovery-section-card:before{content:'';position:absolute;inset:0;background:radial-gradient(circle at 12% 0,#a58cff20,transparent 45%);pointer-events:none}.mufy-recovery-section-card:hover{transform:translateY(-2px);border-color:#a995ff66!important}.mufy-recovery-section-card strong{position:relative;font-size:14px}.mufy-recovery-section-card small{position:relative;color:#9d99aa}.mufy-recovery-section-card:first-child{background:linear-gradient(145deg,#5c4b8c66,#2d294250)!important;border-color:#9f8bea55!important}.mufy-recovery-section-card:last-child{background:linear-gradient(145deg,#273b4566,#252b3850)!important}
+      #mufy-recovery-section-nav{padding:1px 0 9px;border-color:#ffffff12}#mufy-recovery-section-back{border-radius:999px!important;background:#ffffff09!important}#mufy-recovery-section-title{font-size:16px;letter-spacing:.04em}
+      .mufy-recovery-section-note{padding:12px 13px;border-color:#a995ff2e;border-radius:14px;background:linear-gradient(135deg,#8d73df18,#ffffff06);box-shadow:inset 0 1px #ffffff0d}.mufy-recovery-section-note strong{color:#f1edff;font-size:13px}.mufy-recovery-section-note span{color:#9d98ad}
+      #mufy-recovery-panel input:not([type="checkbox"]):not([type="range"]):not([type="color"]),#mufy-recovery-panel select,#mufy-recovery-panel textarea{border-color:#ffffff20!important;border-radius:11px!important;background:#0e0e15b8!important;color:#f4f2fb!important;box-shadow:inset 0 1px 4px #0006!important;outline:none}#mufy-recovery-panel input:focus,#mufy-recovery-panel select:focus,#mufy-recovery-panel textarea:focus{border-color:#9f8bea88!important;box-shadow:0 0 0 3px #8d73df1e,inset 0 1px 4px #0006!important}
+      #mufy-recovery-status{border-radius:11px;color:#c6bfdc}#mufy-recovery-list{border-color:#ffffff12}.mufy-recovery-row{margin:5px 0;padding:10px 9px;border:1px solid #ffffff0d;border-radius:13px;background:#ffffff05}.mufy-recovery-row:hover{border-color:#a995ff28;background:#ffffff08}.mufy-recovery-row img{border-radius:12px;box-shadow:0 5px 13px #0007}
+      .mufy-regex-rule{padding:11px;border-color:#ffffff17;border-radius:13px;background:linear-gradient(145deg,#ffffff09,#ffffff04)}.mufy-regex-rule.is-enabled{border-color:#9f8bea55;box-shadow:inset 3px 0 #9079db}.mufy-regex-rule .mufy-regex-html-status{color:#84d6a5}
+      #mufy-recovery-model-modal,#mufy-recovery-log-modal,#mufy-recovery-export-modal,#mufy-recovery-chat-search-modal{border-color:#ffffff24;border-radius:16px;background:linear-gradient(155deg,#292936f5,#17171ff8);box-shadow:0 22px 60px #000c}.mufy-model-monitor-row{border-color:#ffffff14;border-radius:12px;background:#ffffff07}.mufy-model-monitor-row:has(input:checked){border-color:#9f8bea55;background:#8d73df18}
+      #mufy-recovery-panel ::-webkit-scrollbar{width:7px;height:7px}#mufy-recovery-panel ::-webkit-scrollbar-track{background:transparent}#mufy-recovery-panel ::-webkit-scrollbar-thumb{border:2px solid transparent;border-radius:999px;background:#82769c;background-clip:padding-box}#mufy-recovery-panel ::-webkit-scrollbar-thumb:hover{background:#a594cb;background-clip:padding-box}
       @media (max-width:520px){
         #mufy-recovery-panel{right:8px;bottom:58px;width:calc(100vw - 16px);max-width:calc(100vw - 16px)}
         #mufy-recovery-role-actions button,#mufy-recovery-mask-actions button{font-size:11px;padding:6px 5px}
@@ -9686,7 +9730,7 @@ roleStateReady = true;
         <div id="mufy-recovery-regex-section" hidden>
           <div class="mufy-recovery-section-note"><strong>聊天显示正则</strong><span>只改变网页当前显示的聊天正文，不修改服务器原文。按列表顺序依次执行。</span></div>
           <div id="mufy-recovery-regex-tools"><button id="mufy-recovery-regex-add">新增规则</button><button id="mufy-recovery-regex-import">导入 JSON</button><button id="mufy-recovery-regex-export">导出 JSON</button><button id="mufy-recovery-regex-refresh">重新应用</button><input id="mufy-recovery-regex-file" type="file" accept=".json,application/json" hidden></div>
-          <div id="mufy-recovery-regex-test"><label>测试原文<textarea id="mufy-recovery-regex-test-input" placeholder="输入一段文字，立即查看全部已启用规则的结果"></textarea></label><label>处理结果<textarea id="mufy-recovery-regex-test-output" readonly></textarea></label></div>
+          <div id="mufy-recovery-regex-test"><label>测试原文<textarea id="mufy-recovery-regex-test-input" placeholder="输入一段文字，立即查看全部已启用规则的结果"></textarea></label><label>处理结果<textarea id="mufy-recovery-regex-test-output" readonly></textarea></label></div><iframe id="mufy-recovery-regex-html-preview" title="HTML 正则交互预览" sandbox="allow-scripts allow-forms allow-modals allow-popups allow-downloads" referrerpolicy="no-referrer" hidden></iframe>
           <div id="mufy-recovery-regex-list"></div>
         </div>
         <div id="mufy-recovery-web-section" hidden>
