@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.44
+// @version      3.0.0-dev.45
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.44';
+  const SCRIPT_VERSION = '3.0.0-dev.45';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const MASK_LIBRARY_KEY = 'mufy-recovery-mask-library-v1';
   const MASK_LIBRARY_BACKUP_KEY = 'mufy-recovery-mask-library-backup-v1';
@@ -779,21 +779,30 @@
     return output;
   }
 
+  function richRegexHtmlListForSource(source, rule) {
+    if (!source || !rule?.pattern || !rule?.replacement) return [];
+    let matcher;
+    let single;
+    try {
+      const baseFlags = String(rule.flags || '').replace(/y/g, '');
+      matcher = new RegExp(rule.pattern, baseFlags.includes('g') ? baseFlags : `${baseFlags}g`);
+      single = new RegExp(rule.pattern, baseFlags.replace(/g/g, ''));
+    } catch (_) { return []; }
+    const htmls = [];
+    for (const match of String(source).matchAll(matcher)) {
+      let rendered = match[0].replace(single, rule.replacement);
+      rendered = rendered.replace(/^\s*```html\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+      const documentStart = rendered.search(/<!doctype\s+html|<html\b/i);
+      const documentEnd = rendered.toLowerCase().lastIndexOf('</html>');
+      if (documentStart >= 0 && documentEnd >= documentStart) rendered = rendered.slice(documentStart, documentEnd + 7);
+      if (/<html\b|<!doctype\s+html/i.test(rendered)) htmls.push(rendered);
+      if (htmls.length >= 10) break;
+    }
+    return htmls;
+  }
+
   function richRegexHtmlForSource(source, rule) {
-    if (!source || !rule?.pattern || !rule?.replacement) return '';
-    let regex;
-    try { regex = new RegExp(rule.pattern, String(rule.flags || '').replace(/[gy]/g, '')); }
-    catch (_) { return ''; }
-    regex.lastIndex = 0;
-    const match = regex.exec(String(source));
-    if (!match) return '';
-    let rendered = match[0].replace(regex, rule.replacement);
-    rendered = rendered.replace(/^\s*```html\s*/i, '').replace(/\s*```\s*$/i, '').trim();
-    const documentStart = rendered.search(/<!doctype\s+html|<html\b/i);
-    const documentEnd = rendered.toLowerCase().lastIndexOf('</html>');
-    if (documentStart >= 0 && documentEnd >= documentStart) rendered = rendered.slice(documentStart, documentEnd + 7);
-    if (/<html\b|<!doctype\s+html/i.test(rendered)) return rendered;
-    return '';
+    return richRegexHtmlListForSource(source, rule)[0] || '';
   }
 
   function richRegexHtmlForElement(element, rule) {
@@ -803,6 +812,15 @@
       if (html) return html;
     }
     return '';
+  }
+
+  function richRegexHtmlListForElement(element, rule) {
+    if (!element) return [];
+    for (const source of [String(element.textContent || ''), String(element.innerHTML || '')]) {
+      const htmls = richRegexHtmlListForSource(source, rule);
+      if (htmls.length) return htmls;
+    }
+    return [];
   }
 
   function sandboxRichRegexHtml(html) {
@@ -825,24 +843,29 @@
   }
 
   function mountRichRegexElement(element, selected, source = 'dom', sourceKey = '') {
+    const htmls = Array.isArray(selected.htmls) && selected.htmls.length ? selected.htmls : [selected.html].filter(Boolean);
+    if (!htmls.length) return;
+    const htmlSignature = htmls.map(html => `${html.length}:${html.slice(0, 60)}:${html.slice(-60)}`).join('|');
     const previous = richRegexState.get(element);
-    if (previous?.ruleId === selected.rule.id && previous.html === selected.html && previous.source === source && previous.sourceKey === sourceKey && previous.wrapper?.isConnected) return;
+    if (previous?.ruleId === selected.rule.id && previous.htmlSignature === htmlSignature && previous.source === source && previous.sourceKey === sourceKey && previous.wrapper?.isConnected) return;
     if (previous) restoreRichRegexElement(element);
     const wrapper = document.createElement('div');
     wrapper.className = 'mufy-rich-regex-frame-wrap';
     wrapper.dataset.mufyRichRegex = selected.rule.id;
     if (sourceKey) wrapper.dataset.mufyDialogId = sourceKey;
-    const iframe = document.createElement('iframe');
-    iframe.className = 'mufy-rich-regex-frame';
-    iframe.title = `${selected.rule.name || 'HTML 正则'}渲染结果`;
-    iframe.setAttribute('sandbox', 'allow-scripts allow-forms allow-modals allow-popups allow-downloads');
-    iframe.setAttribute('referrerpolicy', 'no-referrer');
-    iframe.srcdoc = sandboxRichRegexHtml(selected.html);
-    wrapper.appendChild(iframe);
+    htmls.forEach((html, index) => {
+      const iframe = document.createElement('iframe');
+      iframe.className = 'mufy-rich-regex-frame';
+      iframe.title = `${selected.rule.name || 'HTML 正则'}渲染结果${htmls.length > 1 ? ` ${index + 1}` : ''}`;
+      iframe.setAttribute('sandbox', 'allow-scripts allow-forms allow-modals allow-popups allow-downloads');
+      iframe.setAttribute('referrerpolicy', 'no-referrer');
+      iframe.srcdoc = sandboxRichRegexHtml(html);
+      wrapper.appendChild(iframe);
+    });
     const display = element.style.display;
     element.after(wrapper);
     if (source === 'dom') element.style.display = 'none';
-    richRegexState.set(element, { ruleId: selected.rule.id, html: selected.html, wrapper, display, source, sourceKey });
+    richRegexState.set(element, { ruleId: selected.rule.id, htmlSignature, wrapper, display, source, sourceKey });
   }
 
   function applyRichRegexToElement(element) {
@@ -850,8 +873,8 @@
     let selected = null;
     for (const rule of state.regexRules) {
       if (!rule.enabled || !isRichHtmlRegexRule(rule)) continue;
-      const html = richRegexHtmlForElement(element, rule);
-      if (html) { selected = { rule, html }; break; }
+      const htmls = richRegexHtmlListForElement(element, rule);
+      if (htmls.length) { selected = { rule, htmls }; break; }
     }
     const previous = richRegexState.get(element);
     if (!selected) {
@@ -898,15 +921,15 @@
     }
     for (const rule of state.regexRules) {
       if (!rule.enabled || !isRichHtmlRegexRule(rule)) continue;
-      const html = richRegexHtmlForSource(source, rule);
-      if (!html) continue;
+      const htmls = richRegexHtmlListForSource(source, rule);
+      if (!htmls.length) continue;
       let visibleSource = source;
       try { visibleSource = source.replace(new RegExp(rule.pattern, rule.flags), ' '); } catch (_) {}
       const holder = document.createElement('div');
       holder.innerHTML = visibleSource.replace(/<br\s*\/?>/gi, '\n');
       holder.querySelectorAll('script,style').forEach(node => node.remove());
       const visibleText = String(holder.textContent || '').replace(/\s+/g, '');
-      const result = { rule, html, visibleText };
+      const result = { rule, htmls, visibleText };
       if (rowId) rawDialogRichCache.set(rowId, { signature, match: result });
       return result;
     }
@@ -9583,7 +9606,6 @@ roleStateReady = true;
       .mufy-recovery-section-card{min-height:74px!important;display:grid!important;align-content:center;justify-items:start;gap:5px;padding:11px 12px!important;text-align:left;background:#292934!important;border-color:#555566!important}
       .mufy-recovery-section-card strong{font-size:14px;color:#f4f1ff}.mufy-recovery-section-card small{font-size:10px;line-height:1.35;color:#aaa;font-weight:400}
       .mufy-recovery-section-card:first-child{border-color:#8275ca!important;background:#38324f!important}
-      .mufy-recovery-section-card:last-child{grid-column:1/-1}
       #mufy-recovery-section-nav{display:flex;align-items:center;gap:9px;padding-bottom:2px;border-bottom:1px solid #414149}
       #mufy-recovery-section-back{flex:none;background:#292934!important;border-color:#625b7e!important;color:#dcd6ff!important}
       #mufy-recovery-section-title{font-size:14px;color:#f1efff}
@@ -9598,7 +9620,7 @@ roleStateReady = true;
       #mufy-recovery-regex-test{display:grid;grid-template-columns:1fr 1fr;gap:7px}#mufy-recovery-regex-test label{display:grid;gap:4px;color:#aaa;font-size:10px}#mufy-recovery-regex-test textarea{box-sizing:border-box;width:100%;min-height:72px;resize:vertical;border:1px solid #555;border-radius:7px;background:#18181c;color:#eee;padding:7px;font:11px/1.45 system-ui}
       #mufy-recovery-regex-html-preview{box-sizing:border-box;width:100%;height:clamp(520px,70vh,760px);border:1px solid #766bb1;border-radius:16px;background:transparent;box-shadow:0 16px 40px #0008}#mufy-recovery-regex-html-preview[hidden]{display:none}
       #mufy-recovery-regex-list{display:grid;gap:6px}.mufy-regex-rule{display:flex;align-items:flex-start;justify-content:space-between;gap:7px;padding:8px;border:1px solid #444;border-radius:7px;background:#27272e}.mufy-regex-rule.is-enabled{border-color:#665b91}.mufy-regex-rule>label{display:flex;align-items:flex-start;gap:7px;min-width:0}.mufy-regex-rule>label input{margin-top:3px;accent-color:#8272cc}.mufy-regex-rule>label span{display:grid;gap:2px;min-width:0}.mufy-regex-rule small{color:#aaa;word-break:break-all}.mufy-regex-output-requirement{color:#d6c9ff!important;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}.mufy-regex-rule em{color:#ff9b9b;font-size:10px}.mufy-regex-rule .mufy-regex-html-status{color:#9fd8b1}.mufy-regex-rule-actions{display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end}.mufy-regex-rule-actions button{padding:3px 6px!important;font-size:10px}
-      .mufy-rich-regex-frame-wrap{box-sizing:border-box;width:100%;height:clamp(520px,76vh,760px);margin:10px 0;overflow:hidden;border:0;background:transparent}.mufy-rich-regex-frame{display:block;width:100%;height:100%;border:0;background:transparent}
+      .mufy-rich-regex-frame-wrap{box-sizing:border-box;width:100%;height:auto;margin:10px 0;display:grid;gap:12px;overflow:visible;border:0;background:transparent}.mufy-rich-regex-frame{display:block;width:100%;height:clamp(520px,76vh,760px);border:0;background:transparent}
       #mufy-recovery-list{flex:1 1 auto;min-height:0;overflow:auto;border-top:1px solid #444;padding:0 10px 16px}
       .mufy-recovery-row{display:flex;gap:8px;padding:7px 2px;border-bottom:1px solid #3e3e45}
       .mufy-recovery-row img{width:40px;height:40px;flex:none;border-radius:10px;object-fit:cover}
@@ -9703,7 +9725,7 @@ roleStateReady = true;
       #mufy-recovery-controls{gap:10px;padding:12px 13px;background:linear-gradient(180deg,#ffffff03,transparent)}
       #mufy-recovery-panel button{border-color:#ffffff20;border-radius:10px;background:linear-gradient(180deg,#ffffff12,#ffffff07);color:#eeedf6;box-shadow:inset 0 1px #ffffff12,0 3px 10px #0002;transition:transform .16s ease,border-color .16s ease,background .16s ease,box-shadow .16s ease}#mufy-recovery-panel button:hover{border-color:#a995ff77;background:linear-gradient(180deg,#a995ff25,#7c67d918);box-shadow:0 6px 18px #0004,0 0 0 1px #a995ff1f}#mufy-recovery-panel button:active{transform:translateY(1px) scale(.99)}
       #mufy-recovery-section-home{gap:13px;padding:6px 2px 10px}#mufy-recovery-section-home-head{padding:4px 5px 1px}#mufy-recovery-section-home-head strong{font-size:17px;letter-spacing:.02em}#mufy-recovery-section-home-head small{color:#8e8a9e}
-      #mufy-recovery-section-cards{gap:10px}.mufy-recovery-section-card{position:relative;min-height:86px!important;overflow:hidden;border-color:#ffffff18!important;border-radius:15px!important;background:linear-gradient(145deg,#ffffff0d,#ffffff05)!important;box-shadow:inset 0 1px #ffffff12,0 10px 24px #0003!important}.mufy-recovery-section-card:before{content:'';position:absolute;inset:0;background:radial-gradient(circle at 12% 0,#a58cff20,transparent 45%);pointer-events:none}.mufy-recovery-section-card:hover{transform:translateY(-2px);border-color:#a995ff66!important}.mufy-recovery-section-card strong{position:relative;font-size:14px}.mufy-recovery-section-card small{position:relative;color:#9d99aa}.mufy-recovery-section-card:first-child{background:linear-gradient(145deg,#5c4b8c66,#2d294250)!important;border-color:#9f8bea55!important}.mufy-recovery-section-card:last-child{background:linear-gradient(145deg,#273b4566,#252b3850)!important}
+      #mufy-recovery-section-cards{gap:10px}.mufy-recovery-section-card{position:relative;min-height:86px!important;overflow:hidden;border-color:#ffffff18!important;border-radius:15px!important;background:linear-gradient(145deg,#ffffff0d,#ffffff05)!important;box-shadow:inset 0 1px #ffffff12,0 10px 24px #0003!important}.mufy-recovery-section-card:before{content:'';position:absolute;inset:0;background:radial-gradient(circle at 12% 0,#a58cff20,transparent 45%);pointer-events:none}.mufy-recovery-section-card:hover{transform:translateY(-2px);border-color:#a995ff66!important}.mufy-recovery-section-card strong{position:relative;font-size:14px}.mufy-recovery-section-card small{position:relative;color:#9d99aa}.mufy-recovery-section-card:first-child{background:linear-gradient(145deg,#5c4b8c66,#2d294250)!important;border-color:#9f8bea55!important}
       #mufy-recovery-section-nav{padding:1px 0 9px;border-color:#ffffff12}#mufy-recovery-section-back{border-radius:999px!important;background:#ffffff09!important}#mufy-recovery-section-title{font-size:16px;letter-spacing:.04em}
       .mufy-recovery-section-note{padding:12px 13px;border-color:#a995ff2e;border-radius:14px;background:linear-gradient(135deg,#8d73df18,#ffffff06);box-shadow:inset 0 1px #ffffff0d}.mufy-recovery-section-note strong{color:#f1edff;font-size:13px}.mufy-recovery-section-note span{color:#9d98ad}
       #mufy-recovery-panel input:not([type="checkbox"]):not([type="range"]):not([type="color"]),#mufy-recovery-panel select,#mufy-recovery-panel textarea{border-color:#ffffff20!important;border-radius:11px!important;background:#0e0e15b8!important;color:#f4f2fb!important;box-shadow:inset 0 1px 4px #0006!important;outline:none}#mufy-recovery-panel input:focus,#mufy-recovery-panel select:focus,#mufy-recovery-panel textarea:focus{border-color:#9f8bea88!important;box-shadow:0 0 0 3px #8d73df1e,inset 0 1px 4px #0006!important}
@@ -9910,7 +9932,7 @@ roleStateReady = true;
       </div>
       <div id="mufy-recovery-model-modal" hidden><div id="mufy-recovery-model-head"><span><strong>模型可用性监控</strong><small id="mufy-recovery-model-summary">每 5 分钟检测一次</small></span><button id="mufy-recovery-model-close" title="关闭">×</button></div><div id="mufy-recovery-model-tools"><input id="mufy-recovery-model-search" placeholder="搜索模型名称"><button id="mufy-recovery-model-refresh">立即检测</button><label id="mufy-recovery-model-notify-label"><input id="mufy-recovery-model-notify" type="checkbox"><span id="mufy-recovery-model-notify-text">异常通知（可选）</span><small>仅在已选模型由正常变为拥堵或中断时提醒</small></label></div><div id="mufy-recovery-model-list"><div class="mufy-recovery-empty">正在读取模型状态…</div></div></div>
       <div id="mufy-recovery-controls">
-        <div id="mufy-recovery-section-home"><div id="mufy-recovery-section-home-head"><strong>选择功能分区</strong><small>进入后可通过返回按钮切换到其他分区</small></div><div id="mufy-recovery-section-cards"><button class="mufy-recovery-section-card" data-section="roles"><strong>角色</strong><small>找回、状态、收藏未聊、作者与标签</small></button><button class="mufy-recovery-section-card" data-section="favorites"><strong>收藏</strong><small>普通待聊、一键扣数与收藏夹</small></button><button class="mufy-recovery-section-card" data-section="chats"><strong>聊天记录</strong><small>内容搜索与完整导出</small></button><button class="mufy-recovery-section-card" data-section="beauty"><strong>美化</strong><small>摘录牌面与后续主题设置</small></button><button class="mufy-recovery-section-card" data-section="regex"><strong>正则</strong><small>回复替换、规则导入与输出要求</small></button><button class="mufy-recovery-section-card" data-section="masks"><strong>面具</strong><small>面具库、编辑、绑定与导入导出</small></button><button class="mufy-recovery-section-card" data-section="web"><strong>网页</strong><small>捕获当前网页角色并批量收藏</small></button><button id="mufy-recovery-model-entry" class="mufy-recovery-section-card" title="选择并监控模型状态"><strong>模型监控</strong><small>选择模型并查看可用性、响应时间和成功率</small></button></div></div>
+        <div id="mufy-recovery-section-home"><div id="mufy-recovery-section-home-head"><strong>选择功能分区</strong><small>进入后可通过返回按钮切换到其他分区</small></div><div id="mufy-recovery-section-cards"><button class="mufy-recovery-section-card" data-section="roles"><strong>角色</strong><small>找回、状态、收藏未聊、作者与标签</small></button><button class="mufy-recovery-section-card" data-section="favorites"><strong>收藏</strong><small>普通待聊、一键扣数与收藏夹</small></button><button class="mufy-recovery-section-card" data-section="chats"><strong>聊天记录</strong><small>内容搜索与完整导出</small></button><button class="mufy-recovery-section-card" data-section="beauty"><strong>美化</strong><small>摘录牌面与后续主题设置</small></button><button class="mufy-recovery-section-card" data-section="web"><strong>网页</strong><small>捕获当前网页角色并批量收藏</small></button><button class="mufy-recovery-section-card" data-section="masks"><strong>面具</strong><small>面具库、编辑、绑定与导入导出</small></button><button class="mufy-recovery-section-card" data-section="regex"><strong>正则</strong><small>回复替换、规则导入与输出要求</small></button><button id="mufy-recovery-model-entry" class="mufy-recovery-section-card" title="选择并监控模型状态"><strong>模型监控</strong><small>选择模型并查看可用性、响应时间和成功率</small></button></div></div>
         <div id="mufy-recovery-section-nav" hidden><button id="mufy-recovery-section-back">← 返回</button><strong id="mufy-recovery-section-title"></strong></div>
         <div id="mufy-recovery-status"></div>
         <div id="mufy-recovery-favorite-task-controls" hidden><button id="mufy-recovery-favorite-task-main">中断收藏</button><button id="mufy-recovery-favorite-task-cancel">取消任务</button></div>
