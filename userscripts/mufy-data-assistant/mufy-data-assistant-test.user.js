@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.51
+// @version      3.0.0-dev.52
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.51';
+  const SCRIPT_VERSION = '3.0.0-dev.52';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -56,6 +56,7 @@
   const QUOTE_CARD_KEY = 'mufy-role-links-only-quote-cards-v1';
   const QUOTE_STYLE_KEY = 'mufy-role-links-only-quote-style-v1';
   const REGEX_RULES_KEY = 'mufy-role-links-only-regex-rules-v1';
+  const REGEX_OUTPUT_REQUIREMENTS_KEY = 'mufy-role-links-only-regex-output-requirements-v1';
   const REGEX_RICH_RENDER_LIMIT_KEY = 'mufy-role-links-only-regex-rich-render-limit-v1';
   const PROMPT_LIBRARY_KEY = 'mufy-role-links-only-prompt-library-v1';
   const EXTRA_LIBRARY_KEY = 'mufy-role-links-only-extra-library-v1';
@@ -289,6 +290,7 @@
     state.quoteStyle = loadQuoteStyle();
     state.quoteSelectedId = '';
     state.regexRules = loadRegexRules();
+    state.regexOutputRequirements = loadRegexOutputRequirements();
     state.regexRichRenderLimit = loadRegexRichRenderLimit();
     state.promptLibrary = loadMaterialLibrary(PROMPT_LIBRARY_KEY, 'prompt');
     state.extraLibrary = loadMaterialLibrary(EXTRA_LIBRARY_KEY, 'extra');
@@ -795,7 +797,6 @@
       name: String(row.name || '未命名规则').trim() || '未命名规则',
       pattern: String(row.pattern || ''),
       replacement: String(row.replacement || ''),
-      outputRequirement: String(row.outputRequirement || row.outputRequirements || row.outputRequest || row.output_requirement || row.prompt || row.instruction || ''),
       flags: String(row.flags || 'g').replace(/[^dgimsuvy]/g, ''),
       enabled: row.enabled !== false,
       targetSymbol: String(row.targetSymbol || ''),
@@ -810,6 +811,39 @@
       const rows = JSON.parse(loadAndMigrateScopedValue(REGEX_RULES_KEY) || '[]');
       return Array.isArray(rows) ? rows.filter(row => row && typeof row === 'object').map(normalizeRegexRule) : [];
     } catch (_) { return []; }
+  }
+
+  function loadRegexOutputRequirements() {
+    const requirements = {};
+    try {
+      const saved = JSON.parse(loadAndMigrateScopedValue(REGEX_OUTPUT_REQUIREMENTS_KEY) || '{}');
+      if (saved && typeof saved === 'object' && !Array.isArray(saved)) {
+        Object.entries(saved).forEach(([id, value]) => { if (String(value || '')) requirements[String(id)] = String(value); });
+      }
+      const legacyRows = JSON.parse(loadAndMigrateScopedValue(REGEX_RULES_KEY) || '[]');
+      if (Array.isArray(legacyRows)) legacyRows.forEach(row => {
+        const id = String(row?.id || '');
+        const value = String(row?.outputRequirement || row?.outputRequirements || row?.outputRequest || row?.output_requirement || row?.prompt || row?.instruction || '');
+        if (id && value && !requirements[id]) requirements[id] = value;
+      });
+    } catch (_) {}
+    return requirements;
+  }
+
+  function regexOutputRequirement(ruleOrId) {
+    const id = typeof ruleOrId === 'object' ? ruleOrId?.id : ruleOrId;
+    return String(state.regexOutputRequirements?.[String(id || '')] || '');
+  }
+
+  function saveRegexOutputRequirements() {
+    try {
+      localStorage.setItem(accountStorageKey(REGEX_OUTPUT_REQUIREMENTS_KEY), JSON.stringify(state.regexOutputRequirements || {}));
+      return true;
+    } catch (error) {
+      appendRunLog('error', '正则输出要求保存失败', error);
+      state.status = '输出要求未能保存，可能是浏览器本地空间不足。';
+      return false;
+    }
   }
 
   function loadRegexRichRenderLimit() {
@@ -827,6 +861,7 @@
   function saveRegexRules() {
     try {
       localStorage.setItem(accountStorageKey(REGEX_RULES_KEY), JSON.stringify(state.regexRules));
+      saveRegexOutputRequirements();
       return true;
     } catch (error) {
       appendRunLog('error', '正则规则保存失败', error);
@@ -1220,8 +1255,9 @@
       const richHtml = isRichHtmlRegexRule(rule);
       const patternPreview = regexRulePreview(rule.pattern, 120);
       const replacementPreview = regexRulePreview(rule.replacement || '（删除匹配内容）', 180);
-      const outputPreview = regexRulePreview(rule.outputRequirement, 180);
-      return `<div class="mufy-regex-rule ${rule.enabled ? 'is-enabled' : ''}" ${rule.enabled && rule.outputRequirement ? `data-regex-card-insert="${esc(rule.id)}" title="点击空白处将输出要求写入聊天输入框"` : ''}><label><input type="checkbox" data-regex-toggle="${esc(rule.id)}" ${rule.enabled ? 'checked' : ''}><span><b>${esc(rule.name)}</b><small>/${esc(patternPreview)}/${esc(rule.flags)} → ${esc(replacementPreview)}</small>${richHtml ? `<em class="mufy-regex-html-status">HTML 交互规则 · 已捕获 ${rawDialogRows.size} 条接口原文 · 匹配后挂回聊天</em>` : ''}${rule.outputRequirement ? `<small class="mufy-regex-output-requirement">输出要求：${esc(outputPreview)}</small>` : ''}${error ? `<em>${esc(error)}</em>` : ''}</span></label><span class="mufy-regex-rule-actions">${rule.enabled && rule.outputRequirement ? `<button data-regex-insert="${esc(rule.id)}">写入要求</button>` : ''}<button data-regex-requirement="${esc(rule.id)}">${rule.outputRequirement ? '改要求' : '加要求'}</button><button data-regex-edit="${esc(rule.id)}">编辑</button><button data-regex-delete="${esc(rule.id)}">删除</button><button data-regex-up="${esc(rule.id)}" ${index === 0 ? 'disabled' : ''}>上移</button></span></div>`;
+      const outputRequirement = regexOutputRequirement(rule);
+      const outputPreview = regexRulePreview(outputRequirement, 180);
+      return `<div class="mufy-regex-rule ${rule.enabled ? 'is-enabled' : ''}" ${rule.enabled && outputRequirement ? `data-regex-card-insert="${esc(rule.id)}" title="点击空白处将输出要求写入聊天输入框"` : ''}><label><input type="checkbox" data-regex-toggle="${esc(rule.id)}" ${rule.enabled ? 'checked' : ''}><span><b>${esc(rule.name)}</b><small>/${esc(patternPreview)}/${esc(rule.flags)} → ${esc(replacementPreview)}</small>${richHtml ? `<em class="mufy-regex-html-status">HTML 交互规则 · 已捕获 ${rawDialogRows.size} 条接口原文 · 匹配后挂回聊天</em>` : ''}${outputRequirement ? `<small class="mufy-regex-output-requirement">输出要求：${esc(outputPreview)}</small>` : ''}${error ? `<em>${esc(error)}</em>` : ''}</span></label><span class="mufy-regex-rule-actions">${rule.enabled && outputRequirement ? `<button data-regex-insert="${esc(rule.id)}">写入要求</button>` : ''}<button data-regex-requirement="${esc(rule.id)}">${outputRequirement ? '改要求' : '加要求'}</button><button data-regex-edit="${esc(rule.id)}">编辑</button><button data-regex-delete="${esc(rule.id)}">删除</button><button data-regex-up="${esc(rule.id)}" ${index === 0 ? 'disabled' : ''}>上移</button></span></div>`;
     }).join('') || '<div class="mufy-recovery-empty">还没有正则规则。点击“新增规则”创建第一条。</div>';
     const sample = panel.querySelector('#mufy-recovery-regex-test-input');
     const output = panel.querySelector('#mufy-recovery-regex-test-output');
@@ -1263,11 +1299,9 @@
       ? existing.replacement
       : pageWindow.prompt('替换内容；可以使用 $1、$2 等捕获组。留空表示删除匹配内容。', existing?.replacement || '');
     if (replacement == null) return;
-    const outputRequirement = pageWindow.prompt('输出要求：点击这条规则时会写入聊天输入框；可以留空。', existing?.outputRequirement || '');
-    if (outputRequirement == null) return;
     const flags = pageWindow.prompt('flags，例如 g、gi、gim', existing?.flags || 'g');
     if (flags == null) return;
-    const next = normalizeRegexRule({ ...existing, id: existing?.id, name, pattern, replacement, outputRequirement, flags, enabled: existing?.enabled !== false });
+    const next = normalizeRegexRule({ ...existing, id: existing?.id, name, pattern, replacement, flags, enabled: existing?.enabled !== false });
     const error = compiledRegexRule(next).error;
     if (error) {
       pageWindow.alert(`正则表达式无效：${error}`);
@@ -1282,11 +1316,12 @@
   function editRegexOutputRequirement(ruleId) {
     const rule = state.regexRules.find(row => row.id === String(ruleId || ''));
     if (!rule) return;
-    const outputRequirement = pageWindow.prompt('输出要求：点击“写入要求”时会填入聊天输入框；留空可清除。', rule.outputRequirement || '');
+    const outputRequirement = pageWindow.prompt('输出要求：点击“写入要求”时会填入聊天输入框；留空可清除。', regexOutputRequirement(rule));
     if (outputRequirement == null) return;
-    rule.outputRequirement = String(outputRequirement);
-    if (!saveRegexRules()) return;
-    state.status = rule.outputRequirement ? `已保存“${rule.name}”的输出要求，正则匹配与 HTML 替换内容未修改。` : `已清除“${rule.name}”的输出要求。`;
+    if (String(outputRequirement)) state.regexOutputRequirements[rule.id] = String(outputRequirement);
+    else delete state.regexOutputRequirements[rule.id];
+    if (!saveRegexOutputRequirements()) return;
+    state.status = String(outputRequirement) ? `已保存“${rule.name}”的输出要求，正则匹配与 HTML 替换内容完全独立。` : `已清除“${rule.name}”的输出要求。`;
     renderRegexSection();
     render();
   }
@@ -1304,19 +1339,20 @@
       let flags = String(source.flags ?? source.regexFlags ?? 'g');
       const slashMatch = pattern.match(/^\/(.*)\/([dgimsuvy]*)$/s);
       if (slashMatch) { pattern = slashMatch[1]; flags = slashMatch[2] || flags; }
-      return normalizeRegexRule({
+      const rule = normalizeRegexRule({
         id: source.id,
         name: source.name ?? source.ruleName ?? source.scriptName ?? source.title ?? '导入规则',
         pattern,
         flags,
         replacement: source.replacement ?? source.replaceString ?? source.replace ?? '',
-        outputRequirement: source.outputRequirement ?? source.outputRequirements ?? source.outputRequest ?? source.output_requirement ?? source.prompt ?? source.instruction ?? source.output ?? '',
         enabled: source.enabled !== false && source.disabled !== true,
         targetSymbol: source.targetSymbol ?? '',
         mode: source.mode ?? 0,
         visibility: source.visibility !== false,
         sourceFormat: source.regexPattern != null || source.ruleName != null ? 'mufy-website' : source.sourceFormat
       });
+      rule.importedOutputRequirement = String(source.outputRequirement ?? source.outputRequirements ?? source.outputRequest ?? source.output_requirement ?? source.prompt ?? source.instruction ?? source.output ?? '');
+      return rule;
     }).filter(rule => rule.pattern && !compiledRegexRule(rule).error);
   }
 
@@ -1327,6 +1363,11 @@
       const imported = parseImportedRegexRows(parsed);
       if (!imported.length) throw new Error('文件中没有找到可识别的正则规则');
       const replace = pageWindow.confirm(`读取到 ${imported.length} 条规则。\n\n确定：替换当前规则\n取消：与当前规则合并`);
+      if (replace) state.regexOutputRequirements = {};
+      imported.forEach(rule => {
+        if (rule.importedOutputRequirement) state.regexOutputRequirements[rule.id] = rule.importedOutputRequirement;
+        delete rule.importedOutputRequirement;
+      });
       state.regexRules = replace ? imported : [...state.regexRules, ...imported];
       saveRegexRules();
       refreshRegexOnPage();
@@ -1341,19 +1382,21 @@
   }
 
   function exportRegexRules() {
-    download(`mufy-regex-rules-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify({ version: 1, rules: state.regexRules }, null, 2), 'application/json;charset=utf-8');
+    const rules = state.regexRules.map(rule => ({ ...rule, outputRequirement: regexOutputRequirement(rule) }));
+    download(`mufy-regex-rules-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify({ version: 1, rules }, null, 2), 'application/json;charset=utf-8');
   }
 
   function insertRegexOutputRequirement(ruleId) {
     const rule = state.regexRules.find(row => row.id === String(ruleId || ''));
-    if (!rule?.enabled || !rule.outputRequirement) return;
+    const outputRequirement = regexOutputRequirement(rule);
+    if (!rule?.enabled || !outputRequirement) return;
     const composer = findManualChatComposer();
     if (!composer.textarea || composer.textarea.disabled || composer.textarea.readOnly) {
       state.status = '当前页面没有可用的聊天输入框，请先进入角色聊天页面。';
       render();
       return;
     }
-    setManualChatTextareaValue(composer.textarea, rule.outputRequirement);
+    setManualChatTextareaValue(composer.textarea, outputRequirement);
     composer.textarea.focus();
     state.status = `已将“${rule.name}”的输出要求写入聊天输入框，尚未发送。`;
     render();
@@ -1546,6 +1589,7 @@
     quoteStyle: loadQuoteStyle(),
     quoteSelectedId: '',
     regexRules: loadRegexRules(),
+    regexOutputRequirements: loadRegexOutputRequirements(),
     regexRichRenderLimit: loadRegexRichRenderLimit(),
     promptLibrary: loadMaterialLibrary(PROMPT_LIBRARY_KEY, 'prompt'),
     extraLibrary: loadMaterialLibrary(EXTRA_LIBRARY_KEY, 'extra'),
@@ -10544,6 +10588,7 @@ roleStateReady = true;
         const rule = state.regexRules.find(row => row.id === id);
         if (!rule || !pageWindow.confirm(`确定删除正则规则“${rule.name}”吗？`)) return;
         state.regexRules = state.regexRules.filter(row => row.id !== id);
+        delete state.regexOutputRequirements[id];
         saveRegexRules();
         refreshRegexOnPage();
         return;
