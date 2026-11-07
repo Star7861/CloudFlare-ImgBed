@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.40
+// @version      3.0.0-dev.41
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.40';
+  const SCRIPT_VERSION = '3.0.0-dev.41';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const MASK_LIBRARY_KEY = 'mufy-recovery-mask-library-v1';
   const MASK_LIBRARY_BACKUP_KEY = 'mufy-recovery-mask-library-backup-v1';
@@ -54,6 +54,7 @@
   const REGEX_RULES_KEY = 'mufy-role-links-only-regex-rules-v1';
   const MODEL_MONITOR_SELECTION_KEY = 'mufy-role-links-only-model-monitor-selection-v1';
   const MODEL_MONITOR_SNAPSHOT_KEY = 'mufy-role-links-only-model-monitor-snapshot-v1';
+  const MODEL_MONITOR_NOTIFY_KEY = 'mufy-role-links-only-model-monitor-notify-v1';
   const MODEL_MONITOR_INTERVAL_MS = 5 * 60 * 1000;
   const SESSIONLESS_ROLE_IDS_KEY = 'mufy-role-links-only-sessionless-role-ids-v1';
   const ROLE_FALLBACK_PENDING_KEY = 'mufy-role-links-only-role-fallback-pending-v1';
@@ -216,6 +217,7 @@
     state.modelMonitorSelectedIds = loadModelMonitorSelection();
     state.modelMonitorRows = [];
     state.modelMonitorLastChecked = '';
+    state.modelMonitorNotify = loadModelMonitorNotify();
     state.sessionlessRoleIds = loadSessionlessRoleIds();
     reloadMaskAccountPartition(previousScope, nextScope);
   }
@@ -944,6 +946,15 @@
     try { localStorage.setItem(accountStorageKey(MODEL_MONITOR_SELECTION_KEY), JSON.stringify([...state.modelMonitorSelectedIds])); } catch (_) {}
   }
 
+  function loadModelMonitorNotify() {
+    try { return loadAndMigrateScopedValue(MODEL_MONITOR_NOTIFY_KEY) === '1'; }
+    catch (_) { return false; }
+  }
+
+  function saveModelMonitorNotify(enabled) {
+    try { localStorage.setItem(accountStorageKey(MODEL_MONITOR_NOTIFY_KEY), enabled ? '1' : '0'); } catch (_) {}
+  }
+
   function loadModelMonitorSnapshot() {
     try {
       const value = JSON.parse(loadAndMigrateScopedValue(MODEL_MONITOR_SNAPSHOT_KEY) || 'null');
@@ -1026,6 +1037,7 @@
     modelMonitorLoading: false,
     modelMonitorLastChecked: loadModelMonitorSnapshot().checkedAt || '',
     modelMonitorError: '',
+    modelMonitorNotify: loadModelMonitorNotify(),
     sessionlessRoleIds: loadSessionlessRoleIds(),
     archived: cachedRoles?.archived || [],
     roleHistory: [],
@@ -8651,6 +8663,58 @@ roleStateReady = true;
     return 'gray';
   }
 
+  function modelMonitorSeverity(status) {
+    const statusClass = modelMonitorStatusClass(status);
+    return statusClass === 'red' ? 2 : statusClass === 'yellow' ? 1 : 0;
+  }
+
+  function notifyModelMonitorChanges(previousRows, nextRows) {
+    if (!state.modelMonitorNotify || pageWindow.Notification?.permission !== 'granted') return;
+    const previous = new Map((previousRows || []).map(row => [String(row.id), row]));
+    const changed = (nextRows || []).filter(row => {
+      if (!state.modelMonitorSelectedIds.has(String(row.id))) return false;
+      const before = previous.get(String(row.id));
+      return before && modelMonitorSeverity(row.status) > modelMonitorSeverity(before.status);
+    });
+    if (!changed.length) return;
+    const body = changed.slice(0, 4).map(row => `${row.name}：${row.status}`).join('\n')
+      + (changed.length > 4 ? `\n另有 ${changed.length - 4} 个模型状态变差` : '');
+    try {
+      const notification = new pageWindow.Notification('Mufy 模型状态提醒', { body, tag: 'mufy-model-monitor-alert' });
+      notification.onclick = () => { try { pageWindow.focus(); } catch (_) {} };
+    } catch (error) {
+      appendRunLog('warn', '模型状态通知发送失败', error);
+    }
+  }
+
+  async function setModelMonitorNotify(enabled) {
+    if (!enabled) {
+      state.modelMonitorNotify = false;
+      saveModelMonitorNotify(false);
+      renderModelMonitorModal();
+      return;
+    }
+    if (!pageWindow.Notification) {
+      state.status = '当前浏览器不支持系统通知，模型监控仍会继续显示颜色状态。';
+      state.modelMonitorNotify = false;
+      saveModelMonitorNotify(false);
+      render();
+      return;
+    }
+    let permission = pageWindow.Notification.permission;
+    if (permission === 'default') {
+      try { permission = await pageWindow.Notification.requestPermission(); }
+      catch (_) { permission = 'denied'; }
+    }
+    state.modelMonitorNotify = permission === 'granted';
+    saveModelMonitorNotify(state.modelMonitorNotify);
+    state.status = state.modelMonitorNotify
+      ? '模型异常通知已开启；只在已选模型状态变差时提醒，不会每 5 分钟重复弹出。'
+      : '浏览器没有授予通知权限；模型监控仍会继续显示颜色状态。';
+    render();
+    renderModelMonitorModal();
+  }
+
   function flattenModelMonitorRows(tree) {
     const rows = [];
     (Array.isArray(tree) ? tree : []).forEach(model => {
@@ -8705,6 +8769,10 @@ roleStateReady = true;
     const refresh = modal.querySelector('#mufy-recovery-model-refresh');
     refresh.disabled = state.modelMonitorLoading;
     refresh.textContent = state.modelMonitorLoading ? '检测中…' : '立即检测';
+    const notify = modal.querySelector('#mufy-recovery-model-notify');
+    if (notify) notify.checked = state.modelMonitorNotify;
+    const notifyText = modal.querySelector('#mufy-recovery-model-notify-text');
+    if (notifyText) notifyText.textContent = state.modelMonitorNotify ? '异常通知已开启' : '异常通知（可选）';
     updateModelMonitorDots();
   }
 
@@ -8722,9 +8790,11 @@ roleStateReady = true;
       if (!response.ok) throw new Error(`读取模型状态失败（HTTP ${response.status}）`);
       const body = await response.json();
       if (body?.code !== 200 || !Array.isArray(body?.data)) throw new Error(body?.reason || body?.message || '模型接口返回异常');
+      const previousRows = state.modelMonitorRows;
       state.modelMonitorRows = flattenModelMonitorRows(body.data);
       state.modelMonitorLastChecked = new Date().toISOString();
       saveModelMonitorSnapshot(state.modelMonitorRows, state.modelMonitorLastChecked);
+      notifyModelMonitorChanges(previousRows, state.modelMonitorRows);
     } catch (error) {
       state.modelMonitorError = explainFailure(error);
       appendRunLog('warn', '模型可用性检测失败', error);
@@ -9346,7 +9416,7 @@ roleStateReady = true;
       #mufy-recovery-model-dots{position:absolute;left:50%;bottom:52px;box-sizing:border-box;min-width:34px;max-width:96px;min-height:28px;display:flex;align-items:center;justify-content:center;gap:5px;flex-wrap:wrap;padding:6px 8px;border:1px solid #ffffff48;border-radius:14px;background:#17171df2;box-shadow:0 4px 14px #0009;transform:translateX(-50%);pointer-events:auto;cursor:pointer}#mufy-recovery-model-dots[hidden]{display:none}#mufy-recovery-toggle.mufy-docked-right #mufy-recovery-model-dots{left:auto;right:22px;transform:none}#mufy-recovery-toggle.mufy-docked-left #mufy-recovery-model-dots{left:22px;right:auto;transform:none}#mufy-recovery-model-dots i,.mufy-model-monitor-dot{display:block;flex:none;width:10px;height:10px;border-radius:50%;box-shadow:0 0 0 1px #0008,0 0 6px currentColor}.is-green{background:#24ba7a!important;color:#62dca8!important}.is-yellow{background:#e7cf58!important;color:#f1df82!important}.is-red{background:#e94f46!important;color:#ff8c85!important}.is-gray{background:#7b7b85!important;color:#aaa!important}#mufy-recovery-model-dots b{color:#ddd;font-size:9px}
       #mufy-recovery-model-modal{position:absolute;inset:48px 10px 10px;z-index:11;display:flex;flex-direction:column;overflow:hidden;background:#292930;border:1px solid #666;border-radius:9px;box-shadow:0 12px 32px #000b}#mufy-recovery-model-modal[hidden]{display:none}
       #mufy-recovery-model-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 11px;background:#35353e;border-bottom:1px solid #4b4b55}#mufy-recovery-model-head>span{display:grid;gap:2px}#mufy-recovery-model-summary{color:#aaa;font-size:10px;font-weight:400}#mufy-recovery-model-head button{padding:1px 7px!important;font-size:20px!important}
-      #mufy-recovery-model-tools{display:grid;grid-template-columns:1fr auto;gap:7px;padding:9px 10px;border-bottom:1px solid #414149}#mufy-recovery-model-search{box-sizing:border-box;min-width:0;width:100%;border:1px solid #555;border-radius:6px;background:#18181c;color:#fff;padding:7px 9px;font:inherit}#mufy-recovery-model-refresh{background:#51477b!important;border-color:#7e70b5!important}
+      #mufy-recovery-model-tools{display:grid;grid-template-columns:1fr auto;gap:7px;padding:9px 10px;border-bottom:1px solid #414149}#mufy-recovery-model-search{box-sizing:border-box;min-width:0;width:100%;border:1px solid #555;border-radius:6px;background:#18181c;color:#fff;padding:7px 9px;font:inherit}#mufy-recovery-model-refresh{background:#51477b!important;border-color:#7e70b5!important}#mufy-recovery-model-notify-label{grid-column:1/-1;display:flex;align-items:center;gap:7px;color:#cfcfd7;font-size:11px;cursor:pointer}#mufy-recovery-model-notify{accent-color:#786bd4}
       #mufy-recovery-model-list{flex:1;min-height:0;overflow:auto;padding:8px;display:grid;align-content:start;gap:6px;background:#1c1c21}.mufy-model-monitor-row{display:flex;align-items:center;gap:8px;padding:9px;border:1px solid #454550;border-radius:8px;background:#28282f;cursor:pointer}.mufy-model-monitor-row:has(input:checked){border-color:#796bb1;background:#332e46}.mufy-model-monitor-row input{flex:none;accent-color:#786bd4}.mufy-model-monitor-info{min-width:0;display:grid;gap:3px;flex:1}.mufy-model-monitor-info b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}.mufy-model-monitor-info small{color:#999;font-size:9px;line-height:1.4}.mufy-model-monitor-row em{flex:none;padding:2px 6px;border-radius:9px;background:#444;font-size:9px;font-style:normal;color:#ddd}
       #mufy-recovery-quote-editor-modal,#mufy-recovery-quote-library-modal{position:absolute;inset:8px;z-index:12;display:flex;flex-direction:column;overflow:hidden;border:1px solid #766bb1;border-radius:10px;background:#25252c;box-shadow:0 14px 42px #000c}
       #mufy-recovery-quote-editor-modal[hidden],#mufy-recovery-quote-library-modal[hidden]{display:none}
@@ -9585,7 +9655,7 @@ roleStateReady = true;
           <label class="mufy-quote-style-field">对齐<select data-quote-style="align"><option value="left">左对齐</option><option value="center">居中</option><option value="right">右对齐</option></select></label><label class="mufy-quote-style-check"><input data-quote-style="showRole" type="checkbox">显示角色名称</label>
         </div><div id="mufy-recovery-quote-card-actions"><button id="mufy-recovery-quote-source">打开来源</button><button id="mufy-recovery-quote-delete">删除这张</button><button id="mufy-recovery-quote-stage-collapse">收起牌面</button></div></div></div></div>
       </div>
-      <div id="mufy-recovery-model-modal" hidden><div id="mufy-recovery-model-head"><span><strong>模型可用性监控</strong><small id="mufy-recovery-model-summary">每 5 分钟检测一次</small></span><button id="mufy-recovery-model-close" title="关闭">×</button></div><div id="mufy-recovery-model-tools"><input id="mufy-recovery-model-search" placeholder="搜索模型名称"><button id="mufy-recovery-model-refresh">立即检测</button></div><div id="mufy-recovery-model-list"><div class="mufy-recovery-empty">正在读取模型状态…</div></div></div>
+      <div id="mufy-recovery-model-modal" hidden><div id="mufy-recovery-model-head"><span><strong>模型可用性监控</strong><small id="mufy-recovery-model-summary">每 5 分钟检测一次</small></span><button id="mufy-recovery-model-close" title="关闭">×</button></div><div id="mufy-recovery-model-tools"><input id="mufy-recovery-model-search" placeholder="搜索模型名称"><button id="mufy-recovery-model-refresh">立即检测</button><label id="mufy-recovery-model-notify-label"><input id="mufy-recovery-model-notify" type="checkbox"><span id="mufy-recovery-model-notify-text">异常通知（可选）</span><small>仅在已选模型由正常变为拥堵或中断时提醒</small></label></div><div id="mufy-recovery-model-list"><div class="mufy-recovery-empty">正在读取模型状态…</div></div></div>
       <div id="mufy-recovery-controls">
         <div id="mufy-recovery-section-home"><div id="mufy-recovery-section-home-head"><strong>选择功能分区</strong><small>进入后可通过返回按钮切换到其他分区</small></div><div id="mufy-recovery-section-cards"><button class="mufy-recovery-section-card" data-section="roles"><strong>角色</strong><small>找回、状态、收藏未聊、作者与标签</small></button><button class="mufy-recovery-section-card" data-section="favorites"><strong>收藏</strong><small>普通待聊、一键扣数与收藏夹</small></button><button class="mufy-recovery-section-card" data-section="chats"><strong>聊天记录</strong><small>内容搜索与完整导出</small></button><button class="mufy-recovery-section-card" data-section="beauty"><strong>美化</strong><small>摘录牌面与后续主题设置</small></button><button class="mufy-recovery-section-card" data-section="regex"><strong>正则</strong><small>回复替换、规则导入与输出要求</small></button><button class="mufy-recovery-section-card" data-section="masks"><strong>面具</strong><small>面具库、编辑、绑定与导入导出</small></button><button class="mufy-recovery-section-card" data-section="web"><strong>网页</strong><small>捕获当前网页角色并批量收藏</small></button><button id="mufy-recovery-model-entry" class="mufy-recovery-section-card" title="选择并监控模型状态"><strong>模型监控</strong><small>选择模型并查看可用性、响应时间和成功率</small></button></div></div>
         <div id="mufy-recovery-section-nav" hidden><button id="mufy-recovery-section-back">← 返回</button><strong id="mufy-recovery-section-title"></strong></div>
@@ -9830,6 +9900,7 @@ roleStateReady = true;
     panel.querySelector('#mufy-recovery-model-entry').onclick = openModelMonitor;
     panel.querySelector('#mufy-recovery-model-close').onclick = () => { modelModal.hidden = true; };
     panel.querySelector('#mufy-recovery-model-refresh').onclick = () => checkModelMonitor(true);
+    panel.querySelector('#mufy-recovery-model-notify').onchange = event => setModelMonitorNotify(event.target.checked);
     panel.querySelector('#mufy-recovery-model-search').oninput = renderModelMonitorModal;
     panel.querySelector('#mufy-recovery-model-list').onchange = event => {
       const checkbox = event.target.closest?.('[data-model-monitor-id]');
