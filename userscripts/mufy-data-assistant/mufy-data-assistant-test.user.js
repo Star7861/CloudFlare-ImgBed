@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.54
+// @version      3.0.0-dev.55
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.54';
+  const SCRIPT_VERSION = '3.0.0-dev.55';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -1330,6 +1330,7 @@
     else delete state.regexOutputRequirements[rule.id];
     if (!saveRegexOutputRequirements()) return;
     state.status = String(outputRequirement) ? `已保存“${rule.name}”的输出要求，正则匹配与 HTML 替换内容完全独立。` : `已清除“${rule.name}”的输出要求。`;
+    showRecoveryNotice(state.status);
     renderRegexSection();
     render();
   }
@@ -1381,9 +1382,11 @@
       refreshRegexOnPage();
       const richCount = imported.filter(isRichHtmlRegexRule).length;
       state.status = `已导入 ${imported.length} 条正则规则。${richCount ? `其中 ${richCount} 条为 HTML 交互规则，将在匹配的聊天消息中隔离渲染。` : ''}`;
+      showRecoveryNotice(`正则导入完成：${imported.length} 条${richCount ? `，其中 HTML 规则 ${richCount} 条` : ''}。`);
       render();
     } catch (error) {
       state.status = `正则导入失败：${explainFailure(error)}`;
+      showRecoveryNotice(state.status, 'error', 7000);
       appendRunLog('error', '正则导入失败', error);
       render();
     }
@@ -1401,12 +1404,14 @@
     const composer = findManualChatComposer();
     if (!composer.textarea || composer.textarea.disabled || composer.textarea.readOnly) {
       state.status = '当前页面没有可用的聊天输入框，请先进入角色聊天页面。';
+      showRecoveryNotice(state.status, 'error', 6000);
       render();
       return;
     }
     setManualChatTextareaValue(composer.textarea, outputRequirement);
     composer.textarea.focus();
     state.status = `已将“${rule.name}”的输出要求写入聊天输入框，尚未发送。`;
+    showRecoveryNotice(state.status);
     render();
   }
 
@@ -1470,6 +1475,7 @@
     const content = String(panel.querySelector('#mufy-recovery-material-content').value || '').trim();
     if (!content) {
       state.status = '内容不能为空。';
+      showRecoveryNotice(state.status, 'error');
       render();
       return;
     }
@@ -1482,6 +1488,7 @@
     panel.querySelector('#mufy-recovery-material-editor').hidden = true;
     state.materialEditingId = '';
     state.status = `已保存${state.materialKind === 'extra' ? '番外' : '指令'}“${next.title}”。`;
+    showRecoveryNotice(state.status);
     renderMaterialSection();
     render();
   }
@@ -1492,12 +1499,14 @@
     const composer = findManualChatComposer();
     if (!composer.textarea || composer.textarea.disabled || composer.textarea.readOnly) {
       state.status = '当前页面没有可用的聊天输入框，请先进入角色聊天页面。';
+      showRecoveryNotice(state.status, 'error', 6000);
       render();
       return;
     }
     setManualChatTextareaValue(composer.textarea, row.content);
     composer.textarea.focus();
     state.status = `已将“${row.title}”填入聊天输入框，尚未发送。`;
+    showRecoveryNotice(state.status);
     render();
   }
 
@@ -1507,6 +1516,7 @@
     const items = activeMaterialRows();
     download(`mufy-${kind}-library-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify({ version: 1, kind, label, items }, null, 2), 'application/json;charset=utf-8');
     state.status = `已导出${label}（${items.length} 条）。`;
+    showRecoveryNotice(state.status);
     render();
   }
 
@@ -1526,10 +1536,12 @@
       state[target] = replace ? imported : [...state[target], ...imported];
       if (!saveMaterialLibraries()) return;
       state.status = `已导入 ${imported.length} 条${label}内容。`;
+      showRecoveryNotice(state.status);
       renderMaterialSection();
       render();
     } catch (error) {
       state.status = `${label}导入失败：${explainFailure(error)}`;
+      showRecoveryNotice(state.status, 'error', 7000);
       appendRunLog('error', `${label}导入失败`, error);
       render();
     }
@@ -1865,6 +1877,10 @@ roleStateReady = true;
         manualAutoChatToastTimer = null;
       }, duration);
     }
+  }
+
+  function showRecoveryNotice(message, tone = 'success', duration = 4200) {
+    showManualAutoChatToast(message, { tone, duration });
   }
 
   async function waitForManualChatComposer(timeoutMs = 60000) {
@@ -10739,6 +10755,8 @@ roleStateReady = true;
         delete state.regexOutputRequirements[id];
         saveRegexRules();
         refreshRegexOnPage();
+        state.status = `已删除正则规则“${rule.name}”及其输出要求。`;
+        showRecoveryNotice(state.status);
         return;
       }
       const up = event.target.closest?.('[data-regex-up]');
@@ -10783,6 +10801,8 @@ roleStateReady = true;
         if (!row || !pageWindow.confirm(`确定删除“${row.title}”吗？`)) return;
         rows.splice(rows.indexOf(row), 1);
         saveMaterialLibraries();
+        state.status = `已删除“${row.title}”。`;
+        showRecoveryNotice(state.status);
         renderMaterialSection();
         return;
       }
