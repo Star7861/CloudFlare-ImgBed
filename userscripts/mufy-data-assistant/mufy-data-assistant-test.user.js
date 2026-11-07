@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.66
+// @version      3.0.0-dev.67
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.66';
+  const SCRIPT_VERSION = '3.0.0-dev.67';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -102,6 +102,7 @@
   let liveHistorySavedKey = '';
   let manualAutoChatProcessing = false;
   let manualAutoChatToastTimer = null;
+  let accountLogoutRequesting = false;
   let scriptUpdateTimer = null;
   let chatModelConfigCache = new Map();
   let shareFavoriteJobCache = null;
@@ -405,70 +406,41 @@
     try { sessionStorage.setItem(ACCOUNT_SWITCH_PENDING_KEY, JSON.stringify(value)); } catch (_) {}
   }
 
-  function officialLogoutControl() {
-    return [...document.querySelectorAll('button,a,[role="button"]')].find(item => !item.closest('#mufy-recovery-panel')
-      && /^(退出登录|退出账号|退出|登出|logout|log out|sign out)$/i.test(String(item.textContent || '').replace(/\s+/g, ' ').trim()));
-  }
-
-  function accountMenuControl() {
-    const candidates = [...document.querySelectorAll('button,a,[role="button"]')].filter(item => !item.closest('#mufy-recovery-panel'));
-    let best = null;
-    let bestScore = 0;
-    for (const item of candidates) {
-      const text = String(item.textContent || '').replace(/\s+/g, ' ').trim();
-      const hint = `${item.getAttribute('aria-label') || ''} ${item.getAttribute('title') || ''} ${item.getAttribute('href') || ''} ${text}`;
-      const rect = item.getBoundingClientRect();
-      let score = 0;
-      if (/个人中心|账户|账号|profile|account/i.test(hint)) score += 4;
-      if (/设置|setting/i.test(hint)) score += 1;
-      if (/\/profile(?:\/|$)/i.test(String(item.getAttribute('href') || ''))) score += 4;
-      if (rect.left < Math.min(260, pageWindow.innerWidth * 0.25) && rect.top > pageWindow.innerHeight * 0.55) score += 5;
-      if (item.querySelector('svg,img')) score += 1;
-      if (score > bestScore) { best = item; bestScore = score; }
-    }
-    return bestScore >= 5 ? best : null;
-  }
-
-  function finishAccountLogout(pending, clickedLogout = false) {
+  function finishAccountLogout(pending) {
     const next = { ...pending, phase: 'login', logoutRequestedAt: Date.now() };
     savePendingAccountSwitch(next);
-    if (clickedLogout) {
-      const fallback = setTimeout(() => {
-        clearWebsiteAuthStorage();
-        pageWindow.location.assign('/');
-      }, 1400);
-      addMountedGlobalListener(pageWindow, 'beforeunload', () => clearTimeout(fallback), { once: true });
-      return;
-    }
     clearWebsiteAuthStorage();
     pageWindow.location.assign('/');
   }
 
-  function attemptOfficialAccountLogout(pending = pendingAccountSwitch()) {
-    if (!pending) return;
-    const logout = officialLogoutControl();
-    if (logout) {
-      finishAccountLogout(pending, true);
-      logout.click();
-      return;
+  async function attemptOfficialAccountLogout(pending = pendingAccountSwitch()) {
+    if (!pending || accountLogoutRequesting) return;
+    accountLogoutRequesting = true;
+    try {
+      scanStoredAuthorization();
+      const headers = { Accept: 'application/json' };
+      if (authorization) headers.Authorization = authorization;
+      const response = await pageWindow.fetch('/api/users/logout', {
+        method: 'POST',
+        headers,
+        credentials: 'include',
+        cache: 'no-store'
+      });
+      let body = null;
+      try { body = await response.json(); } catch (_) {}
+      const success = response.ok && (Number(body?.code) === 200 || String(body?.reason || '').toLowerCase() === 'success');
+      if (!success) throw new Error(`官方 logout 失败（HTTP ${response.status}${body?.reason ? `：${body.reason}` : ''}）`);
+      appendRunLog('info', '已通过 POST /api/users/logout 正式退出当前账号。');
+      finishAccountLogout(pending);
+    } catch (error) {
+      try { sessionStorage.removeItem(ACCOUNT_SWITCH_PENDING_KEY); } catch (_) {}
+      state.status = `切换已停止：${explainFailure(error)}。当前账号不会被清除。`;
+      appendRunLog('error', '账号切换的官方 logout 请求失败', error);
+      showManualAutoChatToast(state.status, { tone: 'error', duration: 9000 });
+      render();
+    } finally {
+      accountLogoutRequesting = false;
     }
-    const menu = accountMenuControl();
-    menu?.click();
-    let attempts = 0;
-    const timer = setInterval(() => {
-      attempts += 1;
-      const found = officialLogoutControl();
-      if (found) {
-        clearInterval(timer);
-        finishAccountLogout(pending, true);
-        found.click();
-        return;
-      }
-      if (attempts >= 8) {
-        clearInterval(timer);
-        finishAccountLogout(pending, false);
-      }
-    }, 300);
   }
 
   function switchToSavedAccount(accountId) {
