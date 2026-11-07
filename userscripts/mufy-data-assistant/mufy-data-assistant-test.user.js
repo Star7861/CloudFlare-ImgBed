@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.58
+// @version      3.0.0-dev.59
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.58';
+  const SCRIPT_VERSION = '3.0.0-dev.59';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -93,6 +93,7 @@
   let contentStorageGeneration = 0;
   let contentStorageWriteQueue = Promise.resolve();
   let regexSandboxStoragePersistTimer = null;
+  const regexSandboxSiblingRefreshTimers = new Map();
   let liveHistoryPendingKey = '';
   let liveHistorySavedKey = '';
   let manualAutoChatProcessing = false;
@@ -975,7 +976,7 @@
     const persistent = state.regexSandboxStorage?.[String(ruleId || '')] || { localStorage: {}, indexedDB: {} };
     const initial = JSON.stringify(persistent).replace(/</g, '\\u003c').replace(/<\/script/gi, '<\\/script');
     const safeRuleId = JSON.stringify(String(ruleId || '')).replace(/</g, '\\u003c');
-    const storageShim = `<script>(()=>{const ruleId=${safeRuleId};const root=${initial};root.localStorage=root.localStorage&&typeof root.localStorage==='object'?root.localStorage:{};root.indexedDB=root.indexedDB&&typeof root.indexedDB==='object'?root.indexedDB:{};let persistTimer=0;const clone=v=>v==null?v:JSON.parse(JSON.stringify(v));const persist=()=>{clearTimeout(persistTimer);persistTimer=setTimeout(()=>parent.postMessage({type:'mufy-regex-sandbox-storage',ruleId,data:root},'*'),80)};window.__mufySafeStorage={get length(){return Object.keys(root.localStorage).length},key:i=>Object.keys(root.localStorage)[i]??null,getItem:k=>Object.prototype.hasOwnProperty.call(root.localStorage,String(k))?String(root.localStorage[String(k)]):null,setItem:(k,v)=>{root.localStorage[String(k)]=String(v);persist()},removeItem:k=>{delete root.localStorage[String(k)];persist()},clear:()=>{root.localStorage={};persist()}};const names=stores=>({get length(){return Object.keys(stores).length},contains:n=>Object.prototype.hasOwnProperty.call(stores,String(n)),item:i=>Object.keys(stores)[i]??null,[Symbol.iterator]:function*(){yield*Object.keys(stores)}});const finish=(target,ok,value,error)=>setTimeout(()=>{target.result=value;target.error=error||null;const fn=ok?target.onsuccess:target.onerror;if(typeof fn==='function')fn({target})},0);const makeDb=(name,entry)=>({name,version:entry.version,objectStoreNames:names(entry.stores),createObjectStore(storeName,options={}){const key=String(storeName);if(!entry.stores[key])entry.stores[key]={keyPath:String(options.keyPath||'id'),records:{}};persist();return makeStore(entry.stores[key],null)},transaction(storeName){const key=String(Array.isArray(storeName)?storeName[0]:storeName);const tx={error:null,oncomplete:null,onerror:null,onabort:null,objectStore(){if(!entry.stores[key])throw new Error('NotFoundError');return makeStore(entry.stores[key],tx)}};return tx},close(){}});const complete=tx=>setTimeout(()=>{if(typeof tx?.oncomplete==='function')tx.oncomplete({target:tx})},0);const makeStore=(store,tx)=>({keyPath:store.keyPath,put(value){const req={result:null,error:null,onsuccess:null,onerror:null};try{const item=clone(value);const key=String(item?.[store.keyPath]);if(!key||key==='undefined')throw new Error('DataError');store.records[key]=item;persist();finish(req,true,key);complete(tx)}catch(error){finish(req,false,null,error);if(tx){tx.error=error;setTimeout(()=>tx.onerror?.({target:tx}),0)}}return req},get(key){const req={result:null,error:null,onsuccess:null,onerror:null};finish(req,true,clone(store.records[String(key)]));complete(tx);return req},delete(key){const req={result:null,error:null,onsuccess:null,onerror:null};delete store.records[String(key)];persist();finish(req,true,undefined);complete(tx);return req},clear(){const req={result:null,error:null,onsuccess:null,onerror:null};store.records={};persist();finish(req,true,undefined);complete(tx);return req}});window.__mufySafeIndexedDB={open(name,version=1){const req={result:null,error:null,onupgradeneeded:null,onsuccess:null,onerror:null};setTimeout(()=>{const key=String(name);let entry=root.indexedDB[key];const oldVersion=Number(entry?.version||0);if(!entry)entry=root.indexedDB[key]={version:Number(version)||1,stores:{}};if(Number(version)>Number(entry.version||0))entry.version=Number(version);const db=makeDb(key,entry);req.result=db;if(oldVersion<entry.version&&typeof req.onupgradeneeded==='function')req.onupgradeneeded({target:req,oldVersion,newVersion:entry.version});persist();setTimeout(()=>req.onsuccess?.({target:req}),0)},0);return req},deleteDatabase(name){const req={result:null,error:null,onsuccess:null,onerror:null};delete root.indexedDB[String(name)];persist();finish(req,true,undefined);return req}};})();<\/script>`;
+    const storageShim = `<script>(()=>{const ruleId=${safeRuleId};const root=${initial};root.localStorage=root.localStorage&&typeof root.localStorage==='object'?root.localStorage:{};root.indexedDB=root.indexedDB&&typeof root.indexedDB==='object'?root.indexedDB:{};let persistTimer=0;const clone=v=>v==null?v:JSON.parse(JSON.stringify(v));const persist=()=>{clearTimeout(persistTimer);persistTimer=setTimeout(()=>parent.postMessage({type:'mufy-regex-sandbox-storage',ruleId,data:root},'*'),80)};window.__mufySafeStorage={get length(){return Object.keys(root.localStorage).length},key:i=>Object.keys(root.localStorage)[i]??null,getItem:k=>Object.prototype.hasOwnProperty.call(root.localStorage,String(k))?String(root.localStorage[String(k)]):null,setItem:(k,v)=>{root.localStorage[String(k)]=String(v);persist()},removeItem:k=>{delete root.localStorage[String(k)];persist()},clear:()=>{root.localStorage={};persist()}};const names=stores=>({get length(){return Object.keys(stores).length},contains:n=>Object.prototype.hasOwnProperty.call(stores,String(n)),item:i=>Object.keys(stores)[i]??null,[Symbol.iterator]:function*(){yield*Object.keys(stores)}});const finish=(target,ok,value,error)=>setTimeout(()=>{target.result=value;target.error=error||null;const fn=ok?target.onsuccess:target.onerror;if(typeof fn==='function')fn({target})},0);const makeDb=(name,entry)=>({name,version:entry.version,objectStoreNames:names(entry.stores),createObjectStore(storeName,options={}){const key=String(storeName);if(!entry.stores[key])entry.stores[key]={keyPath:String(options.keyPath||'id'),records:{}};persist();return makeStore(entry.stores[key],null)},transaction(storeName){const key=String(Array.isArray(storeName)?storeName[0]:storeName);const tx={error:null,oncomplete:null,onerror:null,onabort:null,objectStore(){if(!entry.stores[key])throw new Error('NotFoundError');return makeStore(entry.stores[key],tx)}};return tx},close(){}});const complete=tx=>setTimeout(()=>{if(typeof tx?.oncomplete==='function')tx.oncomplete({target:tx})},0);const makeStore=(store,tx)=>({keyPath:store.keyPath,put(value){const req={result:null,error:null,onsuccess:null,onerror:null};try{const item=clone(value);const key=String(item?.[store.keyPath]);if(!key||key==='undefined')throw new Error('DataError');store.records[key]=item;persist();finish(req,true,key);complete(tx)}catch(error){finish(req,false,null,error);if(tx){tx.error=error;setTimeout(()=>tx.onerror?.({target:tx}),0)}}return req},get(key){const req={result:null,error:null,onsuccess:null,onerror:null};finish(req,true,clone(store.records[String(key)]));complete(tx);return req},delete(key){const req={result:null,error:null,onsuccess:null,onerror:null};delete store.records[String(key)];persist();finish(req,true,undefined);complete(tx);return req},clear(){const req={result:null,error:null,onsuccess:null,onerror:null};store.records={};persist();finish(req,true,undefined);complete(tx);return req}});window.__mufySafeIndexedDB={open(name,version=1){const req={result:null,error:null,onupgradeneeded:null,onsuccess:null,onerror:null};setTimeout(()=>{const key=String(name);let entry=root.indexedDB[key];const oldVersion=Number(entry?.version||0);if(!entry)entry=root.indexedDB[key]={version:Number(version)||1,stores:{}};if(Number(version)>Number(entry.version||0))entry.version=Number(version);const db=makeDb(key,entry);req.result=db;if(oldVersion<entry.version&&typeof req.onupgradeneeded==='function')req.onupgradeneeded({target:req,oldVersion,newVersion:entry.version});if(oldVersion<entry.version)persist();setTimeout(()=>req.onsuccess?.({target:req}),0)},0);return req},deleteDatabase(name){const req={result:null,error:null,onsuccess:null,onerror:null};delete root.indexedDB[String(name)];persist();finish(req,true,undefined);return req}};})();<\/script>`;
     const transparentShim = '<style id="mufy-transparent-host">html,body{margin:0!important;background:transparent!important;background-color:transparent!important}body{overflow-x:hidden!important}</style>';
     let safeHtml = String(html || '').replace(/(?:window\.)?localStorage\b/g, 'window.__mufySafeStorage').replace(/(?:window\.)?indexedDB\b/g, 'window.__mufySafeIndexedDB');
     if (/<head(?:\s[^>]*)?>/i.test(safeHtml)) safeHtml = safeHtml.replace(/<head(\s[^>]*)?>/i, match => `${match}<base target="_blank">${transparentShim}${storageShim}`);
@@ -992,6 +993,20 @@
     state.regexSandboxStorage[String(data.ruleId)] = cloneValue(data.data);
     clearTimeout(regexSandboxStoragePersistTimer);
     regexSandboxStoragePersistTimer = setTimeout(() => queueContentStoragePersist('正则关联数据'), 250);
+    clearTimeout(regexSandboxSiblingRefreshTimers.get(String(data.ruleId)));
+    regexSandboxSiblingRefreshTimers.set(String(data.ruleId), setTimeout(() => {
+      const frames = [...document.querySelectorAll('iframe.mufy-rich-regex-frame, #mufy-recovery-regex-html-preview')]
+        .filter(item => item !== frame && String(item.dataset.mufyRegexRuleId || '') === String(data.ruleId) && typeof item.__mufyRegexOriginalHtml === 'string');
+      frames.forEach(item => { item.srcdoc = sandboxRichRegexHtml(item.__mufyRegexOriginalHtml, String(data.ruleId)); });
+      regexSandboxSiblingRefreshTimers.delete(String(data.ruleId));
+    }, 320));
+  }
+
+  function reloadRegexSandboxFrames() {
+    document.querySelectorAll('iframe.mufy-rich-regex-frame, #mufy-recovery-regex-html-preview').forEach(frame => {
+      const ruleId = String(frame.dataset.mufyRegexRuleId || '');
+      if (ruleId && typeof frame.__mufyRegexOriginalHtml === 'string') frame.srcdoc = sandboxRichRegexHtml(frame.__mufyRegexOriginalHtml, ruleId);
+    });
   }
 
   const richRegexState = new WeakMap();
@@ -1073,6 +1088,7 @@
       iframe.title = `${selected.rule.name || 'HTML 正则'}渲染结果${htmls.length > 1 ? ` ${index + 1}` : ''}`;
       iframe.setAttribute('sandbox', 'allow-scripts allow-forms allow-modals allow-popups allow-downloads');
       iframe.setAttribute('referrerpolicy', 'no-referrer');
+      iframe.__mufyRegexOriginalHtml = htmls[index];
       iframe.srcdoc = sandboxRichRegexHtml(htmls[index], selected.rule.id);
       wrapper.appendChild(iframe);
       range.insertNode(wrapper);
@@ -1102,6 +1118,7 @@
       iframe.title = `${selected.rule.name || 'HTML 正则'}渲染结果${htmls.length > 1 ? ` ${index + 1}` : ''}`;
       iframe.setAttribute('sandbox', 'allow-scripts allow-forms allow-modals allow-popups allow-downloads');
       iframe.setAttribute('referrerpolicy', 'no-referrer');
+      iframe.__mufyRegexOriginalHtml = html;
       iframe.srcdoc = sandboxRichRegexHtml(html, selected.rule.id);
       wrapper.appendChild(iframe);
     });
@@ -1320,6 +1337,7 @@
         const signature = `${richPreview.rule.id}:${sample.value.length}:${sample.value.slice(0, 80)}:${sample.value.slice(-80)}`;
         if (preview.dataset.signature !== signature) {
           preview.dataset.mufyRegexRuleId = richPreview.rule.id;
+          preview.__mufyRegexOriginalHtml = richPreview.html;
           preview.srcdoc = sandboxRichRegexHtml(richPreview.html, richPreview.rule.id);
           preview.dataset.signature = signature;
         }
@@ -3071,6 +3089,7 @@ roleStateReady = true;
         applyContentDataSnapshot(record.current);
         contentStorageMode = 'indexedDB';
         removeLegacyContentStorage(scope);
+        reloadRegexSandboxFrames();
         appendRunLog('info', `已从 IndexedDB 载入正则、指令库和番外库。`, { rules: state.regexRules.length, prompts: state.promptLibrary.length, extras: state.extraLibrary.length });
       } else {
         const snapshot = contentDataSnapshot();
