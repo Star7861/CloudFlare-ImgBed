@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.52
+// @version      3.0.0-dev.53
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.52';
+  const SCRIPT_VERSION = '3.0.0-dev.53';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -60,6 +60,7 @@
   const REGEX_RICH_RENDER_LIMIT_KEY = 'mufy-role-links-only-regex-rich-render-limit-v1';
   const PROMPT_LIBRARY_KEY = 'mufy-role-links-only-prompt-library-v1';
   const EXTRA_LIBRARY_KEY = 'mufy-role-links-only-extra-library-v1';
+  const CONTENT_LIBRARY_RECORD_PREFIX = 'content-library:';
   const MODEL_MONITOR_SELECTION_KEY = 'mufy-role-links-only-model-monitor-selection-v1';
   const MODEL_MONITOR_SNAPSHOT_KEY = 'mufy-role-links-only-model-monitor-snapshot-v1';
   const MODEL_MONITOR_NOTIFY_KEY = 'mufy-role-links-only-model-monitor-notify-v1';
@@ -88,6 +89,9 @@
   let maskStorageGeneration = 0;
   let roleHistoryWriteQueue = Promise.resolve();
   let roleHistoryGeneration = 0;
+  let contentStorageMode = 'localStorage';
+  let contentStorageGeneration = 0;
+  let contentStorageWriteQueue = Promise.resolve();
   let liveHistoryPendingKey = '';
   let liveHistorySavedKey = '';
   let manualAutoChatProcessing = false;
@@ -294,6 +298,7 @@
     state.regexRichRenderLimit = loadRegexRichRenderLimit();
     state.promptLibrary = loadMaterialLibrary(PROMPT_LIBRARY_KEY, 'prompt');
     state.extraLibrary = loadMaterialLibrary(EXTRA_LIBRARY_KEY, 'extra');
+    initializeContentStorageForAccount(nextScope);
     rawDialogRows.clear();
     rawDialogRichCache.clear();
     rawRegexHydratedPages.clear();
@@ -836,6 +841,7 @@
   }
 
   function saveRegexOutputRequirements() {
+    if (contentStorageMode === 'indexedDB') return queueContentStoragePersist('正则输出要求');
     try {
       localStorage.setItem(accountStorageKey(REGEX_OUTPUT_REQUIREMENTS_KEY), JSON.stringify(state.regexOutputRequirements || {}));
       return true;
@@ -854,11 +860,13 @@
   function saveRegexRichRenderLimit(value) {
     const limit = Math.max(1, Math.min(10, Number(value) || 3));
     state.regexRichRenderLimit = limit;
-    try { localStorage.setItem(accountStorageKey(REGEX_RICH_RENDER_LIMIT_KEY), String(limit)); } catch (_) {}
+    if (contentStorageMode === 'indexedDB') queueContentStoragePersist('HTML 渲染数量设置');
+    else try { localStorage.setItem(accountStorageKey(REGEX_RICH_RENDER_LIMIT_KEY), String(limit)); } catch (_) {}
     return limit;
   }
 
   function saveRegexRules() {
+    if (contentStorageMode === 'indexedDB') return queueContentStoragePersist('正则规则');
     try {
       localStorage.setItem(accountStorageKey(REGEX_RULES_KEY), JSON.stringify(state.regexRules));
       saveRegexOutputRequirements();
@@ -1419,6 +1427,7 @@
   }
 
   function saveMaterialLibraries() {
+    if (contentStorageMode === 'indexedDB') return queueContentStoragePersist('指令与番外库');
     try {
       localStorage.setItem(accountStorageKey(PROMPT_LIBRARY_KEY), JSON.stringify(state.promptLibrary));
       localStorage.setItem(accountStorageKey(EXTRA_LIBRARY_KEY), JSON.stringify(state.extraLibrary));
@@ -1490,6 +1499,40 @@
     composer.textarea.focus();
     state.status = `已将“${row.title}”填入聊天输入框，尚未发送。`;
     render();
+  }
+
+  function exportMaterialLibrary() {
+    const kind = state.materialKind === 'extra' ? 'extra' : 'prompt';
+    const label = kind === 'extra' ? '番外库' : '指令库';
+    const items = activeMaterialRows();
+    download(`mufy-${kind}-library-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify({ version: 1, kind, label, items }, null, 2), 'application/json;charset=utf-8');
+    state.status = `已导出${label}（${items.length} 条）。`;
+    render();
+  }
+
+  async function importMaterialLibrary(file) {
+    if (!file) return;
+    const kind = state.materialKind === 'extra' ? 'extra' : 'prompt';
+    const label = kind === 'extra' ? '番外库' : '指令库';
+    try {
+      const parsed = JSON.parse(await file.text());
+      const source = Array.isArray(parsed) ? parsed
+        : Array.isArray(parsed?.items) ? parsed.items
+          : Array.isArray(parsed?.[kind === 'extra' ? 'extraLibrary' : 'promptLibrary']) ? parsed[kind === 'extra' ? 'extraLibrary' : 'promptLibrary'] : [];
+      const imported = source.filter(row => row && typeof row === 'object').map(row => normalizeMaterialItem(row, kind)).filter(row => row.content);
+      if (!imported.length) throw new Error(`文件中没有可识别的${label}内容`);
+      const replace = pageWindow.confirm(`读取到 ${imported.length} 条${label}内容。\n\n确定：替换当前${label}\n取消：与当前${label}合并`);
+      const target = kind === 'extra' ? 'extraLibrary' : 'promptLibrary';
+      state[target] = replace ? imported : [...state[target], ...imported];
+      if (!saveMaterialLibraries()) return;
+      state.status = `已导入 ${imported.length} 条${label}内容。`;
+      renderMaterialSection();
+      render();
+    } catch (error) {
+      state.status = `${label}导入失败：${explainFailure(error)}`;
+      appendRunLog('error', `${label}导入失败`, error);
+      render();
+    }
   }
 
   function loadModelMonitorSelection() {
@@ -1687,6 +1730,7 @@ roleStateReady = true;
   // 初始化阶段先只清理内存；待 IndexedDB 就绪后再写入，避免已满的 localStorage 再次报错。
   cleanOrphanedMaskBindings(false);
   initializeMaskStorageForAccount(maskAccountScope);
+  initializeContentStorageForAccount(maskAccountScope);
   if (maskAccountScope) initializeRoleHistoryForAccount(maskAccountScope);
   initializeShareFavoriteJobStorage();
 
@@ -2885,6 +2929,110 @@ roleStateReady = true;
     const record = await requestResult(transaction.objectStore(MASK_DATABASE_STORE).get(accountKey));
     await done;
     return record || null;
+  }
+
+  function contentDataSnapshot() {
+    return {
+      regexRules: cloneValue(state.regexRules || []),
+      regexOutputRequirements: cloneValue(state.regexOutputRequirements || {}),
+      regexRichRenderLimit: Math.max(1, Math.min(10, Number(state.regexRichRenderLimit) || 3)),
+      promptLibrary: cloneValue(state.promptLibrary || []),
+      extraLibrary: cloneValue(state.extraLibrary || [])
+    };
+  }
+
+  function normalizeContentDataSnapshot(value) {
+    const source = value && typeof value === 'object' ? value : {};
+    const regexRules = Array.isArray(source.regexRules) ? source.regexRules.map(normalizeRegexRule) : [];
+    const requirements = source.regexOutputRequirements && typeof source.regexOutputRequirements === 'object' && !Array.isArray(source.regexOutputRequirements)
+      ? Object.fromEntries(Object.entries(source.regexOutputRequirements).map(([id, text]) => [String(id), String(text || '')]).filter(([, text]) => text)) : {};
+    return {
+      regexRules,
+      regexOutputRequirements: requirements,
+      regexRichRenderLimit: Math.max(1, Math.min(10, Number(source.regexRichRenderLimit) || 3)),
+      promptLibrary: Array.isArray(source.promptLibrary) ? source.promptLibrary.map(row => normalizeMaterialItem(row, 'prompt')).filter(row => row.content) : [],
+      extraLibrary: Array.isArray(source.extraLibrary) ? source.extraLibrary.map(row => normalizeMaterialItem(row, 'extra')).filter(row => row.content) : []
+    };
+  }
+
+  async function writeContentDatabaseSnapshot(database, scope, snapshot) {
+    const accountKey = `${CONTENT_LIBRARY_RECORD_PREFIX}${scope}`;
+    const transaction = database.transaction(MASK_DATABASE_STORE, 'readwrite');
+    const done = transactionDone(transaction);
+    transaction.objectStore(MASK_DATABASE_STORE).put({ accountKey, schemaVersion: 1, current: cloneValue(snapshot), updatedAt: new Date().toISOString() });
+    await done;
+    const verified = await readMaskDatabaseRecord(database, accountKey);
+    if (!verified?.current || JSON.stringify(normalizeContentDataSnapshot(verified.current)) !== JSON.stringify(normalizeContentDataSnapshot(snapshot))) {
+      throw new Error('正则与素材库写入 IndexedDB 后回读校验失败');
+    }
+    return verified;
+  }
+
+  function removeLegacyContentStorage(scope) {
+    [REGEX_RULES_KEY, REGEX_OUTPUT_REQUIREMENTS_KEY, REGEX_RICH_RENDER_LIMIT_KEY, PROMPT_LIBRARY_KEY, EXTRA_LIBRARY_KEY].forEach(key => {
+      try { localStorage.removeItem(accountStorageKey(key, scope)); } catch (_) {}
+    });
+  }
+
+  function applyContentDataSnapshot(snapshot) {
+    const normalized = normalizeContentDataSnapshot(snapshot);
+    state.regexRules = normalized.regexRules;
+    state.regexOutputRequirements = normalized.regexOutputRequirements;
+    state.regexRichRenderLimit = normalized.regexRichRenderLimit;
+    state.promptLibrary = normalized.promptLibrary;
+    state.extraLibrary = normalized.extraLibrary;
+  }
+
+  async function initializeContentStorageForAccount(scope = maskAccountScope) {
+    const generation = ++contentStorageGeneration;
+    if (!scope) { contentStorageMode = 'localStorage'; return; }
+    contentStorageMode = 'initializing';
+    try {
+      const database = await openMaskDatabase();
+      await testMaskDatabase(database);
+      if (generation !== contentStorageGeneration || scope !== maskAccountScope) return;
+      const accountKey = `${CONTENT_LIBRARY_RECORD_PREFIX}${scope}`;
+      const record = await readMaskDatabaseRecord(database, accountKey);
+      if (record?.current) {
+        applyContentDataSnapshot(record.current);
+        contentStorageMode = 'indexedDB';
+        removeLegacyContentStorage(scope);
+        appendRunLog('info', `已从 IndexedDB 载入正则、指令库和番外库。`, { rules: state.regexRules.length, prompts: state.promptLibrary.length, extras: state.extraLibrary.length });
+      } else {
+        const snapshot = contentDataSnapshot();
+        await writeContentDatabaseSnapshot(database, scope, snapshot);
+        if (generation !== contentStorageGeneration || scope !== maskAccountScope) return;
+        contentStorageMode = 'indexedDB';
+        removeLegacyContentStorage(scope);
+        appendRunLog('info', `已将正则、指令库和番外库迁移到 IndexedDB。`, { rules: snapshot.regexRules.length, prompts: snapshot.promptLibrary.length, extras: snapshot.extraLibrary.length });
+      }
+      refreshRegexOnPage();
+      renderMaterialSection();
+      render();
+    } catch (error) {
+      if (generation !== contentStorageGeneration || scope !== maskAccountScope) return;
+      contentStorageMode = 'localStorage';
+      appendRunLog('error', '正则与素材库 IndexedDB 初始化失败，继续使用 localStorage', error);
+      state.status = `IndexedDB 初始化失败，正则、指令和番外暂时继续保存在 localStorage：${explainFailure(error)}`;
+      render();
+    }
+  }
+
+  function queueContentStoragePersist(reason) {
+    const scope = maskAccountScope;
+    if (!scope || contentStorageMode !== 'indexedDB') return false;
+    const snapshot = contentDataSnapshot();
+    contentStorageWriteQueue = contentStorageWriteQueue.catch(() => {}).then(async () => {
+      if (scope !== maskAccountScope || contentStorageMode !== 'indexedDB') return;
+      const database = await openMaskDatabase();
+      await writeContentDatabaseSnapshot(database, scope, snapshot);
+      appendRunLog('info', `${reason}已写入 IndexedDB`);
+    }).catch(error => {
+      appendRunLog('error', `${reason}写入 IndexedDB 失败`, error);
+      state.status = `${reason}保存失败：${explainFailure(error)}`;
+      render();
+    });
+    return true;
   }
 
   function compactRoleHistoryRow(row, previous = null) {
@@ -10040,7 +10188,7 @@ roleStateReady = true;
       #mufy-recovery-tabs button.active,#mufy-recovery-favorite-tabs button.active,#mufy-recovery-chat-tabs button.active,#mufy-recovery-mask-tabs button.active{background:#786bd4;border-color:#8f84dd;color:#fff}
       #mufy-recovery-tabs .mufy-recovery-tab-action,#mufy-recovery-mask-tabs .mufy-recovery-tab-action{background:#453d69;border-color:#8578c8;color:#f4efff}
       #mufy-recovery-role-section,#mufy-recovery-favorite-section,#mufy-recovery-chat-section,#mufy-recovery-beauty-section,#mufy-recovery-regex-section,#mufy-recovery-material-section,#mufy-recovery-mask-section{display:flex;flex-direction:column;gap:8px}
-      #mufy-recovery-material-tabs{display:grid;grid-template-columns:1fr 1fr;gap:6px}#mufy-recovery-material-tabs button.active{background:#786bd4;border-color:#8f84dd;color:#fff}
+      #mufy-recovery-material-tabs{display:grid;grid-template-columns:1fr 1fr;gap:6px}#mufy-recovery-material-tabs button.active{background:#786bd4;border-color:#8f84dd;color:#fff}#mufy-recovery-material-tools{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}#mufy-recovery-material-add{background:#5e4f91!important;border-color:#8373bb!important;font-weight:700}
       #mufy-recovery-material-list{display:grid;align-content:start;gap:7px;overflow:auto;padding-bottom:20px}.mufy-material-card{display:flex;align-items:flex-start;justify-content:space-between;gap:9px;padding:10px 11px;border:1px solid #4c485d;border-radius:10px;background:#272630;cursor:pointer}.mufy-material-card:hover{border-color:#8c7bd1;background:#302d40}.mufy-material-card>div{min-width:0;display:grid;gap:4px}.mufy-material-card strong{color:#f0edff}.mufy-material-card small{display:-webkit-box;overflow:hidden;color:#aaa;font-size:10px;line-height:1.5;-webkit-line-clamp:4;-webkit-box-orient:vertical;white-space:pre-wrap;overflow-wrap:anywhere}.mufy-material-card>span{display:flex;flex:none;gap:5px}.mufy-material-card>span button{padding:4px 7px!important;font-size:10px!important}
       #mufy-recovery-material-editor{position:absolute;inset:48px 10px 10px;z-index:14;display:flex;flex-direction:column;overflow:hidden;border:1px solid #766bb1;border-radius:12px;background:#292930;box-shadow:0 16px 45px #000c}#mufy-recovery-material-editor[hidden]{display:none}#mufy-recovery-material-editor-head{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid #4b4b55;background:#35353e}#mufy-recovery-material-editor-head button{padding:1px 7px!important;font-size:20px!important}#mufy-recovery-material-editor-body{flex:1;min-height:0;display:grid;grid-template-rows:auto 1fr;gap:10px;padding:12px}#mufy-recovery-material-editor-body label{display:grid;min-height:0;gap:5px;color:#bbb;font-size:11px}#mufy-recovery-material-editor-body input,#mufy-recovery-material-editor-body textarea{box-sizing:border-box;width:100%;border:1px solid #555;border-radius:8px;background:#18181c;color:#fff;padding:9px;font:13px/1.55 system-ui;outline:none}#mufy-recovery-material-editor-body textarea{min-height:180px;resize:none}#mufy-recovery-material-editor-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:0 12px 12px}#mufy-recovery-material-editor-save{background:#62539a!important;border-color:#8878c5!important}
       .mufy-recovery-section-note{display:grid;gap:4px;padding:10px 11px;border:1px solid #4d4962;border-radius:8px;background:#292733}.mufy-recovery-section-note span{color:#aaa;font-size:11px;line-height:1.5}
@@ -10400,7 +10548,7 @@ roleStateReady = true;
           <div id="mufy-recovery-regex-test"><label>测试原文<textarea id="mufy-recovery-regex-test-input" placeholder="输入一段文字，立即查看全部已启用规则的结果"></textarea></label><label>处理结果<textarea id="mufy-recovery-regex-test-output" readonly></textarea></label></div><iframe id="mufy-recovery-regex-html-preview" title="HTML 正则交互预览" sandbox="allow-scripts allow-forms allow-modals allow-popups allow-downloads" referrerpolicy="no-referrer" hidden></iframe>
           <div id="mufy-recovery-regex-list"></div>
         </div>
-        <div id="mufy-recovery-material-section" hidden><div id="mufy-recovery-material-tabs"><button data-material-kind="prompt">指令库</button><button data-material-kind="extra">番外库</button></div><div class="mufy-recovery-section-note"><strong>聊天素材库</strong><span>内容按账号保存在当前浏览器本地；点击卡片会填入聊天输入框，但不会自动发送。</span></div><button id="mufy-recovery-material-add">新增指令</button><div id="mufy-recovery-material-list"></div></div>
+        <div id="mufy-recovery-material-section" hidden><div id="mufy-recovery-material-tabs"><button data-material-kind="prompt">指令库</button><button data-material-kind="extra">番外库</button></div><div class="mufy-recovery-section-note"><strong>聊天素材库</strong><span>内容按账号保存在 IndexedDB；点击卡片会填入聊天输入框，但不会自动发送。</span></div><div id="mufy-recovery-material-tools"><button id="mufy-recovery-material-add">新增指令</button><button id="mufy-recovery-material-import">导入 JSON</button><button id="mufy-recovery-material-export">导出 JSON</button><input id="mufy-recovery-material-file" type="file" accept=".json,application/json" hidden></div><div id="mufy-recovery-material-list"></div></div>
         <div id="mufy-recovery-mask-section" hidden>
           <div id="mufy-recovery-mask-tabs"><button data-category="masks">面具 (0)</button><button data-category="library">面具库 (0)</button><button id="mufy-recovery-save-all" class="mufy-recovery-tab-action">全部存入面具库</button></div>
           <input id="mufy-recovery-mask-search" placeholder="搜索面具名或面具 ID" hidden>
@@ -10613,6 +10761,12 @@ roleStateReady = true;
       };
     });
     panel.querySelector('#mufy-recovery-material-add').onclick = () => openMaterialEditor();
+    panel.querySelector('#mufy-recovery-material-export').onclick = exportMaterialLibrary;
+    panel.querySelector('#mufy-recovery-material-import').onclick = () => panel.querySelector('#mufy-recovery-material-file').click();
+    panel.querySelector('#mufy-recovery-material-file').onchange = event => {
+      importMaterialLibrary(event.target.files?.[0]);
+      event.target.value = '';
+    };
     const materialEditor = panel.querySelector('#mufy-recovery-material-editor');
     const closeMaterialEditor = () => { materialEditor.hidden = true; state.materialEditingId = ''; };
     panel.querySelector('#mufy-recovery-material-editor-close').onclick = closeMaterialEditor;
