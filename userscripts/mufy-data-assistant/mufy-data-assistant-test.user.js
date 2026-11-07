@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.65
+// @version      3.0.0-dev.66
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.65';
+  const SCRIPT_VERSION = '3.0.0-dev.66';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -687,6 +687,7 @@
           if (candidate) {
             authorization = candidate;
             adoptMaskAccountFromAuthorization(candidate);
+            completePendingAccountSwitch(candidate);
             return authorization;
           }
         }
@@ -1823,8 +1824,11 @@
     const current = accountIdentityFromAuthorization();
     state.accountSwitchProfiles = loadAccountSwitchProfiles();
     let currentId = currentAccountSwitchId();
-    if (!state.accountSwitchProfiles.some(row => row.id === currentId)) {
-      const scopeMatches = current.scope ? state.accountSwitchProfiles.filter(row => row.scope === current.scope) : [];
+    const scopeMatches = current.scope ? state.accountSwitchProfiles.filter(row => row.scope === current.scope) : [];
+    if (scopeMatches.length === 1 && scopeMatches[0].id !== currentId) {
+      currentId = scopeMatches[0].id;
+      setCurrentAccountSwitchId(currentId);
+    } else if (!state.accountSwitchProfiles.some(row => row.id === currentId)) {
       currentId = scopeMatches.length === 1 ? scopeMatches[0].id : '';
       if (currentId) setCurrentAccountSwitchId(currentId);
     }
@@ -1833,7 +1837,7 @@
     if (currentBox) currentBox.innerHTML = `<strong>当前账号</strong><span>${esc(currentSaved?.label || current.label || current.email || maskAccountLabel())}</span><small>${esc(currentSaved?.email || current.email || '网站令牌没有提供邮箱，可用“保存当前账号”手动填写')}</small>`;
     list.innerHTML = state.accountSwitchProfiles.map(row => {
       const active = row.id === currentId;
-      return `<article class="mufy-account-card ${active ? 'is-current' : ''}"><div><strong>${esc(row.label)}</strong><small>${esc(row.email)}</small>${active ? '<em>当前登录</em>' : ''}</div><span>${active ? '' : `<button data-account-switch="${esc(row.id)}">切换</button>`}<button data-account-edit="${esc(row.id)}">修改</button><button data-account-delete="${esc(row.id)}">删除</button></span></article>`;
+      return `<article class="mufy-account-card ${active ? 'is-current' : ''}"><div><strong>${esc(row.label)}</strong><small>${esc(row.email)}</small>${active ? '<em>当前登录</em>' : ''}</div><span>${active ? '' : `<button data-account-mark-current="${esc(row.id)}" title="网站已经登录此账号时，用它纠正当前标记">设为当前</button><button data-account-switch="${esc(row.id)}">切换</button>`}<button data-account-edit="${esc(row.id)}">修改</button><button data-account-delete="${esc(row.id)}">删除</button></span></article>`;
     }).join('') || '<div class="mufy-recovery-empty">还没有保存账号。先登录一个 Mufy 账号，再点“保存当前账号”。</div>';
   }
 
@@ -1848,6 +1852,23 @@
     row.label = label;
     saveAccountSwitchProfiles(rows);
     renderAccountSection();
+  }
+
+  function markSavedAccountCurrent(accountId) {
+    const rows = loadAccountSwitchProfiles();
+    const row = rows.find(item => item.id === String(accountId || ''));
+    if (!row) return;
+    const currentScope = accountIdentityFromAuthorization().scope || maskAccountScope;
+    for (const item of rows) {
+      if (item.id === row.id) item.scope = currentScope || item.scope;
+      else if (currentScope && item.scope === currentScope) item.scope = '';
+    }
+    saveAccountSwitchProfiles(rows);
+    setCurrentAccountSwitchId(row.id);
+    try { sessionStorage.removeItem(ACCOUNT_SWITCH_PENDING_KEY); } catch (_) {}
+    state.status = `已将“${row.label}”标记为当前实际登录账号。`;
+    showManualAutoChatToast(state.status, { tone: 'success', duration: 5000 });
+    render();
   }
 
   function deleteSavedAccount(accountId) {
@@ -11229,6 +11250,8 @@ roleStateReady = true;
     };
     panel.querySelector('#mufy-recovery-account-save').onclick = saveCurrentAccountShortcut;
     panel.querySelector('#mufy-recovery-account-list').onclick = event => {
+      const markButton = event.target.closest?.('[data-account-mark-current]');
+      if (markButton) { markSavedAccountCurrent(String(markButton.dataset.accountMarkCurrent || '')); return; }
       const switchButton = event.target.closest?.('[data-account-switch]');
       if (switchButton) { switchToSavedAccount(String(switchButton.dataset.accountSwitch || '')); return; }
       const editButton = event.target.closest?.('[data-account-edit]');
