@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.70
+// @version      3.0.0-dev.71
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.70';
+  const SCRIPT_VERSION = '3.0.0-dev.71';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -362,10 +362,10 @@
         || /邮箱|email/i.test(`${input.placeholder || ''} ${input.name || ''} ${input.autocomplete || ''}`));
       if (emailInput) {
         sawEmailInput = true;
+        if (!emailReadyAt) emailReadyAt = Date.now();
         if (String(emailInput.value || '').trim() !== String(pending.email)) {
           setWebsiteInputValue(emailInput, pending.email);
-          emailReadyAt = Date.now();
-        } else if (!emailReadyAt) emailReadyAt = Date.now();
+        }
         const form = emailInput.closest('form') || officialDialog?.querySelector('form');
         const passwordInput = form?.querySelector('input[type="password"][name="password"],input[type="password"]');
         const submitButton = form?.querySelector('button[type="submit"],input[type="submit"]');
