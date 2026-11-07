@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.45
+// @version      3.0.0-dev.46
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.45';
+  const SCRIPT_VERSION = '3.0.0-dev.46';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const MASK_LIBRARY_KEY = 'mufy-recovery-mask-library-v1';
   const MASK_LIBRARY_BACKUP_KEY = 'mufy-recovery-mask-library-backup-v1';
@@ -823,6 +823,20 @@
     return [];
   }
 
+  function richRegexPhoneTextsForSource(source, rule) {
+    if (!source || !rule?.pattern) return [];
+    let matcher;
+    try {
+      const baseFlags = String(rule.flags || '').replace(/y/g, '');
+      matcher = new RegExp(rule.pattern, baseFlags.includes('g') ? baseFlags : `${baseFlags}g`);
+    } catch (_) { return []; }
+    return [...String(source).matchAll(matcher)].slice(0, 10).map(match => {
+      const holder = document.createElement('div');
+      holder.innerHTML = match[0].replace(/<br\s*\/?>/gi, '\n');
+      return String(holder.textContent || '').replace(/\s+/g, '');
+    }).filter(text => text.length >= 6);
+  }
+
   function sandboxRichRegexHtml(html) {
     const storageShim = `<script>(()=>{const data=new Map();window.__mufySafeStorage={get length(){return data.size},key:i=>[...data.keys()][i]??null,getItem:k=>data.has(String(k))?data.get(String(k)):null,setItem:(k,v)=>data.set(String(k),String(v)),removeItem:k=>data.delete(String(k)),clear:()=>data.clear()};})();<\/script>`;
     const transparentShim = '<style id="mufy-transparent-host">html,body{margin:0!important;background:transparent!important;background-color:transparent!important}body{overflow-x:hidden!important}</style>';
@@ -837,9 +851,86 @@
   function restoreRichRegexElement(element) {
     const previous = richRegexState.get(element);
     if (!previous) return;
+    if (previous.source === 'raw-inline' && typeof previous.originalHtml === 'string') {
+      element.innerHTML = previous.originalHtml;
+      element.style.display = previous.display;
+      richRegexState.delete(element);
+      return;
+    }
     previous.wrapper?.remove?.();
     element.style.display = previous.display;
     richRegexState.delete(element);
+  }
+
+  function normalizedTextMap(element) {
+    const chars = [];
+    const points = [];
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    let node;
+    while ((node = walker.nextNode())) {
+      if (node.parentElement?.closest?.('.mufy-rich-regex-inline-wrap')) continue;
+      const text = String(node.nodeValue || '');
+      for (let offset = 0; offset < text.length; offset += 1) {
+        if (/\s/.test(text[offset])) continue;
+        chars.push(text[offset]);
+        points.push({ node, offset });
+      }
+    }
+    return { text: chars.join(''), points };
+  }
+
+  function locatePhoneTextRange(haystack, needle, fromIndex = 0) {
+    const exact = haystack.indexOf(needle, fromIndex);
+    if (exact >= 0) return { start: exact, end: exact + needle.length };
+    const anchorSize = Math.min(42, Math.max(14, Math.floor(needle.length / 5)));
+    const first = needle.slice(0, anchorSize);
+    const last = needle.slice(-anchorSize);
+    const start = haystack.indexOf(first, fromIndex);
+    if (start < 0) return null;
+    const lastStart = haystack.indexOf(last, start + first.length);
+    if (lastStart < 0) return null;
+    return { start, end: lastStart + last.length };
+  }
+
+  function mountRawInlineRegexElement(element, selected, sourceKey, htmlSignature) {
+    const phoneTexts = Array.isArray(selected.phoneTexts) ? selected.phoneTexts : [];
+    const htmls = Array.isArray(selected.htmls) ? selected.htmls : [];
+    if (!phoneTexts.length || phoneTexts.length !== htmls.length) return false;
+    const mapped = normalizedTextMap(element);
+    const locations = [];
+    let cursor = 0;
+    for (const phoneText of phoneTexts) {
+      const location = locatePhoneTextRange(mapped.text, phoneText, cursor);
+      if (!location) return false;
+      locations.push(location);
+      cursor = location.end;
+    }
+    const originalHtml = element.innerHTML;
+    const wrappers = [];
+    for (let index = locations.length - 1; index >= 0; index -= 1) {
+      const location = locations[index];
+      const start = mapped.points[location.start];
+      const end = mapped.points[location.end - 1];
+      if (!start || !end || !start.node.isConnected || !end.node.isConnected) return false;
+      const range = document.createRange();
+      range.setStart(start.node, start.offset);
+      range.setEnd(end.node, end.offset + 1);
+      range.deleteContents();
+      const wrapper = document.createElement('span');
+      wrapper.className = 'mufy-rich-regex-inline-wrap';
+      wrapper.dataset.mufyDialogId = sourceKey;
+      const iframe = document.createElement('iframe');
+      iframe.className = 'mufy-rich-regex-frame';
+      iframe.title = `${selected.rule.name || 'HTML 正则'}渲染结果${htmls.length > 1 ? ` ${index + 1}` : ''}`;
+      iframe.setAttribute('sandbox', 'allow-scripts allow-forms allow-modals allow-popups allow-downloads');
+      iframe.setAttribute('referrerpolicy', 'no-referrer');
+      iframe.srcdoc = sandboxRichRegexHtml(htmls[index]);
+      wrapper.appendChild(iframe);
+      range.insertNode(wrapper);
+      wrappers.unshift(wrapper);
+    }
+    richRegexState.set(element, { ruleId: selected.rule.id, htmlSignature, wrapper: wrappers[0], wrappers, display: element.style.display, source: 'raw-inline', sourceKey, originalHtml });
+    return true;
   }
 
   function mountRichRegexElement(element, selected, source = 'dom', sourceKey = '') {
@@ -847,8 +938,10 @@
     if (!htmls.length) return;
     const htmlSignature = htmls.map(html => `${html.length}:${html.slice(0, 60)}:${html.slice(-60)}`).join('|');
     const previous = richRegexState.get(element);
-    if (previous?.ruleId === selected.rule.id && previous.htmlSignature === htmlSignature && previous.source === source && previous.sourceKey === sourceKey && previous.wrapper?.isConnected) return;
+    const sameSource = previous?.source === source || (source === 'raw' && previous?.source === 'raw-inline');
+    if (previous?.ruleId === selected.rule.id && previous.htmlSignature === htmlSignature && sameSource && previous.sourceKey === sourceKey && previous.wrapper?.isConnected) return;
     if (previous) restoreRichRegexElement(element);
+    if (source === 'raw' && mountRawInlineRegexElement(element, selected, sourceKey, htmlSignature)) return;
     const wrapper = document.createElement('div');
     wrapper.className = 'mufy-rich-regex-frame-wrap';
     wrapper.dataset.mufyRichRegex = selected.rule.id;
@@ -878,7 +971,7 @@
     }
     const previous = richRegexState.get(element);
     if (!selected) {
-      if (previous?.source === 'raw') return;
+      if (previous?.source === 'raw' || previous?.source === 'raw-inline') return;
       restoreRichRegexElement(element);
       return;
     }
@@ -900,12 +993,9 @@
 
   function trimRichRegexFrames() {
     const limit = Math.max(1, Number(state.regexRichRenderLimit) || 3);
-    const wrappers = [...document.querySelectorAll('.mufy-rich-regex-frame-wrap')].filter(item => !item.closest('#mufy-recovery-panel'));
-    wrappers.slice(0, Math.max(0, wrappers.length - limit)).forEach(wrapper => {
-      const source = wrapper.previousElementSibling;
-      if (source && richRegexState.get(source)?.wrapper === wrapper) restoreRichRegexElement(source);
-      else wrapper.remove();
-    });
+    const renderedMessages = [...document.querySelectorAll('.react-markdown')]
+      .filter(element => !element.closest('#mufy-recovery-panel') && richRegexState.get(element)?.wrapper?.isConnected);
+    renderedMessages.slice(0, Math.max(0, renderedMessages.length - limit)).forEach(restoreRichRegexElement);
   }
 
   function rawRichRegexMatch(row) {
@@ -923,13 +1013,14 @@
       if (!rule.enabled || !isRichHtmlRegexRule(rule)) continue;
       const htmls = richRegexHtmlListForSource(source, rule);
       if (!htmls.length) continue;
+      const phoneTexts = richRegexPhoneTextsForSource(source, rule);
       let visibleSource = source;
       try { visibleSource = source.replace(new RegExp(rule.pattern, rule.flags), ' '); } catch (_) {}
       const holder = document.createElement('div');
       holder.innerHTML = visibleSource.replace(/<br\s*\/?>/gi, '\n');
       holder.querySelectorAll('script,style').forEach(node => node.remove());
       const visibleText = String(holder.textContent || '').replace(/\s+/g, '');
-      const result = { rule, htmls, visibleText };
+      const result = { rule, htmls, phoneTexts, visibleText };
       if (rowId) rawDialogRichCache.set(rowId, { signature, match: result });
       return result;
     }
@@ -984,7 +1075,7 @@
     }
     for (const element of candidates) {
       const previous = richRegexState.get(element);
-      if (previous?.source === 'raw' && !used.has(element)) restoreRichRegexElement(element);
+      if ((previous?.source === 'raw' || previous?.source === 'raw-inline') && !used.has(element)) restoreRichRegexElement(element);
     }
     trimRichRegexFrames();
   }
@@ -9620,7 +9711,7 @@ roleStateReady = true;
       #mufy-recovery-regex-test{display:grid;grid-template-columns:1fr 1fr;gap:7px}#mufy-recovery-regex-test label{display:grid;gap:4px;color:#aaa;font-size:10px}#mufy-recovery-regex-test textarea{box-sizing:border-box;width:100%;min-height:72px;resize:vertical;border:1px solid #555;border-radius:7px;background:#18181c;color:#eee;padding:7px;font:11px/1.45 system-ui}
       #mufy-recovery-regex-html-preview{box-sizing:border-box;width:100%;height:clamp(520px,70vh,760px);border:1px solid #766bb1;border-radius:16px;background:transparent;box-shadow:0 16px 40px #0008}#mufy-recovery-regex-html-preview[hidden]{display:none}
       #mufy-recovery-regex-list{display:grid;gap:6px}.mufy-regex-rule{display:flex;align-items:flex-start;justify-content:space-between;gap:7px;padding:8px;border:1px solid #444;border-radius:7px;background:#27272e}.mufy-regex-rule.is-enabled{border-color:#665b91}.mufy-regex-rule>label{display:flex;align-items:flex-start;gap:7px;min-width:0}.mufy-regex-rule>label input{margin-top:3px;accent-color:#8272cc}.mufy-regex-rule>label span{display:grid;gap:2px;min-width:0}.mufy-regex-rule small{color:#aaa;word-break:break-all}.mufy-regex-output-requirement{color:#d6c9ff!important;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}.mufy-regex-rule em{color:#ff9b9b;font-size:10px}.mufy-regex-rule .mufy-regex-html-status{color:#9fd8b1}.mufy-regex-rule-actions{display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end}.mufy-regex-rule-actions button{padding:3px 6px!important;font-size:10px}
-      .mufy-rich-regex-frame-wrap{box-sizing:border-box;width:100%;height:auto;margin:10px 0;display:grid;gap:12px;overflow:visible;border:0;background:transparent}.mufy-rich-regex-frame{display:block;width:100%;height:clamp(520px,76vh,760px);border:0;background:transparent}
+      .mufy-rich-regex-frame-wrap{box-sizing:border-box;width:100%;height:auto;margin:10px 0;display:grid;gap:12px;overflow:visible;border:0;background:transparent}.mufy-rich-regex-inline-wrap{display:block;width:100%;height:auto;margin:10px 0;background:transparent}.mufy-rich-regex-frame{display:block;width:100%;height:clamp(520px,76vh,760px);border:0;background:transparent}
       #mufy-recovery-list{flex:1 1 auto;min-height:0;overflow:auto;border-top:1px solid #444;padding:0 10px 16px}
       .mufy-recovery-row{display:flex;gap:8px;padding:7px 2px;border-bottom:1px solid #3e3e45}
       .mufy-recovery-row img{width:40px;height:40px;flex:none;border-radius:10px;object-fit:cover}
