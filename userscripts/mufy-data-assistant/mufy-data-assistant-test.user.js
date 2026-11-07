@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.38
+// @version      3.0.0-dev.39
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.38';
+  const SCRIPT_VERSION = '3.0.0-dev.39';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const MASK_LIBRARY_KEY = 'mufy-recovery-mask-library-v1';
   const MASK_LIBRARY_BACKUP_KEY = 'mufy-recovery-mask-library-backup-v1';
@@ -646,7 +646,11 @@
       replacement: String(row.replacement || ''),
       outputRequirement: String(row.outputRequirement || row.outputRequirements || row.outputRequest || row.output_requirement || row.prompt || row.instruction || ''),
       flags: String(row.flags || 'g').replace(/[^dgimsuvy]/g, ''),
-      enabled: row.enabled !== false
+      enabled: row.enabled !== false,
+      targetSymbol: String(row.targetSymbol || ''),
+      mode: Number.isFinite(Number(row.mode)) ? Number(row.mode) : 0,
+      visibility: row.visibility !== false,
+      sourceFormat: String(row.sourceFormat || '')
     };
   }
 
@@ -674,10 +678,22 @@
     catch (error) { return { regex: null, error: String(error?.message || error) }; }
   }
 
+  function isRichHtmlRegexRule(rule) {
+    const replacement = String(rule?.replacement || '');
+    return replacement.length > 20000
+      || /```html\b/i.test(replacement)
+      || /<!doctype\s+html|<html\b|<script\b|<style\b/i.test(replacement);
+  }
+
+  function regexRulePreview(value, maxLength = 180) {
+    const text = String(value ?? '').replace(/\s+/g, ' ').trim();
+    return text.length > maxLength ? `${text.slice(0, maxLength)}…` : text;
+  }
+
   function applyRegexRulesToText(text) {
     let output = String(text ?? '');
     for (const rule of state.regexRules) {
-      if (!rule.enabled) continue;
+      if (!rule.enabled || isRichHtmlRegexRule(rule)) continue;
       const compiled = compiledRegexRule(rule);
       if (!compiled.regex) continue;
       try {
@@ -735,7 +751,11 @@
     if (!list) return;
     list.innerHTML = state.regexRules.map((rule, index) => {
       const error = compiledRegexRule(rule).error;
-      return `<div class="mufy-regex-rule ${rule.enabled ? 'is-enabled' : ''}" ${rule.enabled && rule.outputRequirement ? `data-regex-card-insert="${esc(rule.id)}" title="点击空白处将输出要求写入聊天输入框"` : ''}><label><input type="checkbox" data-regex-toggle="${esc(rule.id)}" ${rule.enabled ? 'checked' : ''}><span><b>${esc(rule.name)}</b><small>/${esc(rule.pattern)}/${esc(rule.flags)} → ${esc(rule.replacement || '（删除匹配内容）')}</small>${rule.outputRequirement ? `<small class="mufy-regex-output-requirement">输出要求：${esc(rule.outputRequirement)}</small>` : ''}${error ? `<em>${esc(error)}</em>` : ''}</span></label><span class="mufy-regex-rule-actions">${rule.enabled && rule.outputRequirement ? `<button data-regex-insert="${esc(rule.id)}">写入要求</button>` : ''}<button data-regex-edit="${esc(rule.id)}">编辑</button><button data-regex-delete="${esc(rule.id)}">删除</button><button data-regex-up="${esc(rule.id)}" ${index === 0 ? 'disabled' : ''}>上移</button></span></div>`;
+      const richHtml = isRichHtmlRegexRule(rule);
+      const patternPreview = regexRulePreview(rule.pattern, 120);
+      const replacementPreview = regexRulePreview(rule.replacement || '（删除匹配内容）', 180);
+      const outputPreview = regexRulePreview(rule.outputRequirement, 180);
+      return `<div class="mufy-regex-rule ${rule.enabled ? 'is-enabled' : ''}" ${rule.enabled && rule.outputRequirement ? `data-regex-card-insert="${esc(rule.id)}" title="点击空白处将输出要求写入聊天输入框"` : ''}><label><input type="checkbox" data-regex-toggle="${esc(rule.id)}" ${rule.enabled ? 'checked' : ''}><span><b>${esc(rule.name)}</b><small>/${esc(patternPreview)}/${esc(rule.flags)} → ${esc(replacementPreview)}</small>${richHtml ? '<em>网站 HTML 规则 · 已完整导入并可再次导出，暂不由文字替换器执行</em>' : ''}${rule.outputRequirement ? `<small class="mufy-regex-output-requirement">输出要求：${esc(outputPreview)}</small>` : ''}${error ? `<em>${esc(error)}</em>` : ''}</span></label><span class="mufy-regex-rule-actions">${rule.enabled && rule.outputRequirement ? `<button data-regex-insert="${esc(rule.id)}">写入要求</button>` : ''}<button data-regex-edit="${esc(rule.id)}">编辑</button><button data-regex-delete="${esc(rule.id)}">删除</button><button data-regex-up="${esc(rule.id)}" ${index === 0 ? 'disabled' : ''}>上移</button></span></div>`;
     }).join('') || '<div class="mufy-recovery-empty">还没有正则规则。点击“新增规则”创建第一条。</div>';
     const sample = panel.querySelector('#mufy-recovery-regex-test-input');
     const output = panel.querySelector('#mufy-recovery-regex-test-output');
@@ -772,21 +792,25 @@
         : Array.isArray(value?.regexRules) ? value.regexRules
           : Array.isArray(value?.regex) ? value.regex
             : Array.isArray(value?.data) ? value.data
-              : value && typeof value === 'object' && (value.pattern || value.findRegex || value.regex) ? [value] : [];
+              : value && typeof value === 'object' && (value.pattern || value.findRegex || value.regex || value.regexPattern) ? [value] : [];
     return rows.map(item => {
       const source = item && typeof item === 'object' ? item : {};
-      let pattern = String(source.pattern ?? source.findRegex ?? source.regex ?? source.find ?? '');
+      let pattern = String(source.pattern ?? source.findRegex ?? source.regex ?? source.regexPattern ?? source.find ?? '');
       let flags = String(source.flags ?? source.regexFlags ?? 'g');
       const slashMatch = pattern.match(/^\/(.*)\/([dgimsuvy]*)$/s);
       if (slashMatch) { pattern = slashMatch[1]; flags = slashMatch[2] || flags; }
       return normalizeRegexRule({
         id: source.id,
-        name: source.name ?? source.scriptName ?? source.title ?? '导入规则',
+        name: source.name ?? source.ruleName ?? source.scriptName ?? source.title ?? '导入规则',
         pattern,
         flags,
         replacement: source.replacement ?? source.replaceString ?? source.replace ?? '',
         outputRequirement: source.outputRequirement ?? source.outputRequirements ?? source.outputRequest ?? source.output_requirement ?? source.prompt ?? source.instruction ?? source.output ?? '',
-        enabled: source.enabled !== false && source.disabled !== true
+        enabled: source.enabled !== false && source.disabled !== true,
+        targetSymbol: source.targetSymbol ?? '',
+        mode: source.mode ?? 0,
+        visibility: source.visibility !== false,
+        sourceFormat: source.regexPattern != null || source.ruleName != null ? 'mufy-website' : source.sourceFormat
       });
     }).filter(rule => rule.pattern && !compiledRegexRule(rule).error);
   }
@@ -801,7 +825,8 @@
       state.regexRules = replace ? imported : [...state.regexRules, ...imported];
       saveRegexRules();
       refreshRegexOnPage();
-      state.status = `已导入 ${imported.length} 条正则规则。`;
+      const richCount = imported.filter(isRichHtmlRegexRule).length;
+      state.status = `已导入 ${imported.length} 条正则规则。${richCount ? `其中 ${richCount} 条为网站 HTML 规则，已保留完整内容但暂不执行。` : ''}`;
       render();
     } catch (error) {
       state.status = `正则导入失败：${explainFailure(error)}`;
