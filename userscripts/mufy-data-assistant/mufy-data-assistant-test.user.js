@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.55
+// @version      3.0.0-dev.56
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.55';
+  const SCRIPT_VERSION = '3.0.0-dev.56';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -92,6 +92,7 @@
   let contentStorageMode = 'localStorage';
   let contentStorageGeneration = 0;
   let contentStorageWriteQueue = Promise.resolve();
+  let regexSandboxStoragePersistTimer = null;
   let liveHistoryPendingKey = '';
   let liveHistorySavedKey = '';
   let manualAutoChatProcessing = false;
@@ -295,6 +296,7 @@
     state.quoteSelectedId = '';
     state.regexRules = loadRegexRules();
     state.regexOutputRequirements = loadRegexOutputRequirements();
+    state.regexSandboxStorage = {};
     state.regexRichRenderLimit = loadRegexRichRenderLimit();
     state.promptLibrary = loadMaterialLibrary(PROMPT_LIBRARY_KEY, 'prompt');
     state.extraLibrary = loadMaterialLibrary(EXTRA_LIBRARY_KEY, 'extra');
@@ -969,13 +971,27 @@
     }).filter(text => text.length >= 6);
   }
 
-  function sandboxRichRegexHtml(html) {
-    const storageShim = `<script>(()=>{const data=new Map();window.__mufySafeStorage={get length(){return data.size},key:i=>[...data.keys()][i]??null,getItem:k=>data.has(String(k))?data.get(String(k)):null,setItem:(k,v)=>data.set(String(k),String(v)),removeItem:k=>data.delete(String(k)),clear:()=>data.clear()};})();<\/script>`;
+  function sandboxRichRegexHtml(html, ruleId = '') {
+    const persistent = state.regexSandboxStorage?.[String(ruleId || '')] || { localStorage: {}, indexedDB: {} };
+    const initial = JSON.stringify(persistent).replace(/</g, '\\u003c').replace(/<\/script/gi, '<\\/script');
+    const safeRuleId = JSON.stringify(String(ruleId || '')).replace(/</g, '\\u003c');
+    const storageShim = `<script>(()=>{const ruleId=${safeRuleId};const root=${initial};root.localStorage=root.localStorage&&typeof root.localStorage==='object'?root.localStorage:{};root.indexedDB=root.indexedDB&&typeof root.indexedDB==='object'?root.indexedDB:{};let persistTimer=0;const clone=v=>v==null?v:JSON.parse(JSON.stringify(v));const persist=()=>{clearTimeout(persistTimer);persistTimer=setTimeout(()=>parent.postMessage({type:'mufy-regex-sandbox-storage',ruleId,data:root},'*'),80)};window.__mufySafeStorage={get length(){return Object.keys(root.localStorage).length},key:i=>Object.keys(root.localStorage)[i]??null,getItem:k=>Object.prototype.hasOwnProperty.call(root.localStorage,String(k))?String(root.localStorage[String(k)]):null,setItem:(k,v)=>{root.localStorage[String(k)]=String(v);persist()},removeItem:k=>{delete root.localStorage[String(k)];persist()},clear:()=>{root.localStorage={};persist()}};const names=stores=>({get length(){return Object.keys(stores).length},contains:n=>Object.prototype.hasOwnProperty.call(stores,String(n)),item:i=>Object.keys(stores)[i]??null,[Symbol.iterator]:function*(){yield*Object.keys(stores)}});const finish=(target,ok,value,error)=>setTimeout(()=>{target.result=value;target.error=error||null;const fn=ok?target.onsuccess:target.onerror;if(typeof fn==='function')fn({target})},0);const makeDb=(name,entry)=>({name,version:entry.version,objectStoreNames:names(entry.stores),createObjectStore(storeName,options={}){const key=String(storeName);if(!entry.stores[key])entry.stores[key]={keyPath:String(options.keyPath||'id'),records:{}};persist();return makeStore(entry.stores[key],null)},transaction(storeName){const key=String(Array.isArray(storeName)?storeName[0]:storeName);const tx={error:null,oncomplete:null,onerror:null,onabort:null,objectStore(){if(!entry.stores[key])throw new Error('NotFoundError');return makeStore(entry.stores[key],tx)}};return tx},close(){}});const complete=tx=>setTimeout(()=>{if(typeof tx?.oncomplete==='function')tx.oncomplete({target:tx})},0);const makeStore=(store,tx)=>({keyPath:store.keyPath,put(value){const req={result:null,error:null,onsuccess:null,onerror:null};try{const item=clone(value);const key=String(item?.[store.keyPath]);if(!key||key==='undefined')throw new Error('DataError');store.records[key]=item;persist();finish(req,true,key);complete(tx)}catch(error){finish(req,false,null,error);if(tx){tx.error=error;setTimeout(()=>tx.onerror?.({target:tx}),0)}}return req},get(key){const req={result:null,error:null,onsuccess:null,onerror:null};finish(req,true,clone(store.records[String(key)]));complete(tx);return req},delete(key){const req={result:null,error:null,onsuccess:null,onerror:null};delete store.records[String(key)];persist();finish(req,true,undefined);complete(tx);return req},clear(){const req={result:null,error:null,onsuccess:null,onerror:null};store.records={};persist();finish(req,true,undefined);complete(tx);return req}});window.__mufySafeIndexedDB={open(name,version=1){const req={result:null,error:null,onupgradeneeded:null,onsuccess:null,onerror:null};setTimeout(()=>{const key=String(name);let entry=root.indexedDB[key];const oldVersion=Number(entry?.version||0);if(!entry)entry=root.indexedDB[key]={version:Number(version)||1,stores:{}};if(Number(version)>Number(entry.version||0))entry.version=Number(version);const db=makeDb(key,entry);req.result=db;if(oldVersion<entry.version&&typeof req.onupgradeneeded==='function')req.onupgradeneeded({target:req,oldVersion,newVersion:entry.version});persist();setTimeout(()=>req.onsuccess?.({target:req}),0)},0);return req},deleteDatabase(name){const req={result:null,error:null,onsuccess:null,onerror:null};delete root.indexedDB[String(name)];persist();finish(req,true,undefined);return req}};})();<\/script>`;
     const transparentShim = '<style id="mufy-transparent-host">html,body{margin:0!important;background:transparent!important;background-color:transparent!important}body{overflow-x:hidden!important}</style>';
-    let safeHtml = String(html || '').replace(/(?:window\.)?localStorage\b/g, 'window.__mufySafeStorage');
+    let safeHtml = String(html || '').replace(/(?:window\.)?localStorage\b/g, 'window.__mufySafeStorage').replace(/(?:window\.)?indexedDB\b/g, 'window.__mufySafeIndexedDB');
     if (/<head(?:\s[^>]*)?>/i.test(safeHtml)) safeHtml = safeHtml.replace(/<head(\s[^>]*)?>/i, match => `${match}<base target="_blank">${transparentShim}${storageShim}`);
     else safeHtml = `${transparentShim}${storageShim}${safeHtml}`;
     return safeHtml;
+  }
+
+  function handleRegexSandboxStorageMessage(event) {
+    const data = event?.data;
+    if (!data || data.type !== 'mufy-regex-sandbox-storage' || !data.ruleId || !data.data || typeof data.data !== 'object') return;
+    const frame = [...document.querySelectorAll('iframe.mufy-rich-regex-frame, #mufy-recovery-regex-html-preview')].find(item => item.contentWindow === event.source);
+    if (!frame || String(frame.dataset.mufyRegexRuleId || '') !== String(data.ruleId)) return;
+    if (!state.regexRules.some(rule => rule.id === String(data.ruleId))) return;
+    state.regexSandboxStorage[String(data.ruleId)] = cloneValue(data.data);
+    clearTimeout(regexSandboxStoragePersistTimer);
+    regexSandboxStoragePersistTimer = setTimeout(() => queueContentStoragePersist('正则关联数据'), 250);
   }
 
   const richRegexState = new WeakMap();
@@ -1053,10 +1069,11 @@
       wrapper.dataset.mufyDialogId = sourceKey;
       const iframe = document.createElement('iframe');
       iframe.className = 'mufy-rich-regex-frame';
+      iframe.dataset.mufyRegexRuleId = selected.rule.id;
       iframe.title = `${selected.rule.name || 'HTML 正则'}渲染结果${htmls.length > 1 ? ` ${index + 1}` : ''}`;
       iframe.setAttribute('sandbox', 'allow-scripts allow-forms allow-modals allow-popups allow-downloads');
       iframe.setAttribute('referrerpolicy', 'no-referrer');
-      iframe.srcdoc = sandboxRichRegexHtml(htmls[index]);
+      iframe.srcdoc = sandboxRichRegexHtml(htmls[index], selected.rule.id);
       wrapper.appendChild(iframe);
       range.insertNode(wrapper);
       wrappers.unshift(wrapper);
@@ -1081,10 +1098,11 @@
     htmls.forEach((html, index) => {
       const iframe = document.createElement('iframe');
       iframe.className = 'mufy-rich-regex-frame';
+      iframe.dataset.mufyRegexRuleId = selected.rule.id;
       iframe.title = `${selected.rule.name || 'HTML 正则'}渲染结果${htmls.length > 1 ? ` ${index + 1}` : ''}`;
       iframe.setAttribute('sandbox', 'allow-scripts allow-forms allow-modals allow-popups allow-downloads');
       iframe.setAttribute('referrerpolicy', 'no-referrer');
-      iframe.srcdoc = sandboxRichRegexHtml(html);
+      iframe.srcdoc = sandboxRichRegexHtml(html, selected.rule.id);
       wrapper.appendChild(iframe);
     });
     const display = element.style.display;
@@ -1095,6 +1113,11 @@
 
   function applyRichRegexToElement(element) {
     if (!element || element.closest?.('#mufy-recovery-panel')) return;
+    const recentFloors = recentChatFloorElements();
+    if (!recentFloors.has(element)) {
+      restoreRichRegexElement(element);
+      return;
+    }
     let selected = null;
     for (const rule of state.regexRules) {
       if (!rule.enabled || !isRichHtmlRegexRule(rule)) continue;
@@ -1124,10 +1147,16 @@
   }
 
   function trimRichRegexFrames() {
+    const recentFloors = recentChatFloorElements();
+    [...document.querySelectorAll('.react-markdown')]
+      .filter(element => !element.closest('#mufy-recovery-panel') && richRegexState.get(element)?.wrapper?.isConnected && !recentFloors.has(element))
+      .forEach(restoreRichRegexElement);
+  }
+
+  function recentChatFloorElements() {
     const limit = Math.max(1, Number(state.regexRichRenderLimit) || 3);
-    const renderedMessages = [...document.querySelectorAll('.react-markdown')]
-      .filter(element => !element.closest('#mufy-recovery-panel') && richRegexState.get(element)?.wrapper?.isConnected);
-    renderedMessages.slice(0, Math.max(0, renderedMessages.length - limit)).forEach(restoreRichRegexElement);
+    const floors = [...document.querySelectorAll('.react-markdown')].filter(element => !element.closest('#mufy-recovery-panel'));
+    return new Set(floors.slice(-limit));
   }
 
   function rawRichRegexMatch(row) {
@@ -1185,10 +1214,11 @@
     const used = new Set();
     const rows = [...rawDialogRows.values()]
       .filter(row => !row.sessionId || String(row.sessionId) === String(context.sessionId))
+      .sort((a, b) => String(a.createdTime || '').localeCompare(String(b.createdTime || '')))
+      .slice(-Math.max(1, Number(state.regexRichRenderLimit) || 3))
       .map(row => ({ row, match: rawRichRegexMatch(row) }))
       .filter(item => item.match)
-      .sort((a, b) => String(a.row.createdTime || '').localeCompare(String(b.row.createdTime || '')))
-      .slice(-Math.max(1, Number(state.regexRichRenderLimit) || 3));
+      .sort((a, b) => String(a.row.createdTime || '').localeCompare(String(b.row.createdTime || '')));
     for (const item of rows) {
       const dialogId = String(item.row.dialogsId || item.row.dialogId || item.row.id || '');
       const fingerprints = rawRegexFingerprintParts(item.match.visibleText);
@@ -1283,7 +1313,8 @@
         output.value = `已匹配 HTML 交互规则“${richPreview.rule.name}”，请在下方预览操作。`;
         const signature = `${richPreview.rule.id}:${sample.value.length}:${sample.value.slice(0, 80)}:${sample.value.slice(-80)}`;
         if (preview.dataset.signature !== signature) {
-          preview.srcdoc = sandboxRichRegexHtml(richPreview.html);
+          preview.dataset.mufyRegexRuleId = richPreview.rule.id;
+          preview.srcdoc = sandboxRichRegexHtml(richPreview.html, richPreview.rule.id);
           preview.dataset.signature = signature;
         }
         preview.hidden = false;
@@ -1645,6 +1676,7 @@
     quoteSelectedId: '',
     regexRules: loadRegexRules(),
     regexOutputRequirements: loadRegexOutputRequirements(),
+    regexSandboxStorage: {},
     regexRichRenderLimit: loadRegexRichRenderLimit(),
     promptLibrary: loadMaterialLibrary(PROMPT_LIBRARY_KEY, 'prompt'),
     extraLibrary: loadMaterialLibrary(EXTRA_LIBRARY_KEY, 'extra'),
@@ -2951,6 +2983,7 @@ roleStateReady = true;
     return {
       regexRules: cloneValue(state.regexRules || []),
       regexOutputRequirements: cloneValue(state.regexOutputRequirements || {}),
+      regexSandboxStorage: cloneValue(state.regexSandboxStorage || {}),
       regexRichRenderLimit: Math.max(1, Math.min(10, Number(state.regexRichRenderLimit) || 3)),
       promptLibrary: cloneValue(state.promptLibrary || []),
       extraLibrary: cloneValue(state.extraLibrary || [])
@@ -2965,6 +2998,7 @@ roleStateReady = true;
     return {
       regexRules,
       regexOutputRequirements: requirements,
+      regexSandboxStorage: source.regexSandboxStorage && typeof source.regexSandboxStorage === 'object' && !Array.isArray(source.regexSandboxStorage) ? cloneValue(source.regexSandboxStorage) : {},
       regexRichRenderLimit: Math.max(1, Math.min(10, Number(source.regexRichRenderLimit) || 3)),
       promptLibrary: Array.isArray(source.promptLibrary) ? source.promptLibrary.map(row => normalizeMaterialItem(row, 'prompt')).filter(row => row.content) : [],
       extraLibrary: Array.isArray(source.extraLibrary) ? source.extraLibrary.map(row => normalizeMaterialItem(row, 'extra')).filter(row => row.content) : []
@@ -2994,6 +3028,7 @@ roleStateReady = true;
     const normalized = normalizeContentDataSnapshot(snapshot);
     state.regexRules = normalized.regexRules;
     state.regexOutputRequirements = normalized.regexOutputRequirements;
+    state.regexSandboxStorage = normalized.regexSandboxStorage;
     state.regexRichRenderLimit = normalized.regexRichRenderLimit;
     state.promptLibrary = normalized.promptLibrary;
     state.extraLibrary = normalized.extraLibrary;
@@ -10560,7 +10595,7 @@ roleStateReady = true;
         <div id="mufy-recovery-beauty-section" hidden><div class="mufy-recovery-section-note"><strong>摘录牌美化</strong><span>调整塔罗牌样式、字体、颜色、字号和对齐方式，并导出当前牌面。</span></div><button id="mufy-recovery-quote-entry" title="查看并美化角色摘录牌组">打开摘录牌组与美化设置</button></div>
         <div id="mufy-recovery-regex-section" hidden>
           <div class="mufy-recovery-section-note"><strong>聊天显示正则</strong><span>只改变网页当前显示的聊天正文，不修改服务器原文。按列表顺序依次执行。</span></div>
-          <div id="mufy-recovery-regex-tools"><button id="mufy-recovery-regex-add">新增规则</button><button id="mufy-recovery-regex-import">导入 JSON</button><button id="mufy-recovery-regex-export">导出 JSON</button><button id="mufy-recovery-regex-refresh">重新应用</button><label id="mufy-recovery-regex-rich-limit-label">HTML 最近渲染 <input id="mufy-recovery-regex-rich-limit" type="number" min="1" max="10" value="${esc(state.regexRichRenderLimit)}"> 条 <span>旧界面自动卸载，减少长聊天内存占用</span></label><input id="mufy-recovery-regex-file" type="file" accept=".json,application/json" hidden></div>
+          <div id="mufy-recovery-regex-tools"><button id="mufy-recovery-regex-add">新增规则</button><button id="mufy-recovery-regex-import">导入 JSON</button><button id="mufy-recovery-regex-export">导出 JSON</button><button id="mufy-recovery-regex-refresh">重新应用</button><label id="mufy-recovery-regex-rich-limit-label">仅检查最近 <input id="mufy-recovery-regex-rich-limit" type="number" min="1" max="10" value="${esc(state.regexRichRenderLimit)}"> 楼 <span>范围外的 HTML 界面自动卸载</span></label><input id="mufy-recovery-regex-file" type="file" accept=".json,application/json" hidden></div>
           <div id="mufy-recovery-regex-test"><label>测试原文<textarea id="mufy-recovery-regex-test-input" placeholder="输入一段文字，立即查看全部已启用规则的结果"></textarea></label><label>处理结果<textarea id="mufy-recovery-regex-test-output" readonly></textarea></label></div><iframe id="mufy-recovery-regex-html-preview" title="HTML 正则交互预览" sandbox="allow-scripts allow-forms allow-modals allow-popups allow-downloads" referrerpolicy="no-referrer" hidden></iframe>
           <div id="mufy-recovery-regex-list"></div>
         </div>
@@ -10751,11 +10786,15 @@ roleStateReady = true;
         const id = String(remove.dataset.regexDelete || '');
         const rule = state.regexRules.find(row => row.id === id);
         if (!rule || !pageWindow.confirm(`确定删除正则规则“${rule.name}”吗？`)) return;
+        const associated = state.regexSandboxStorage?.[id];
+        const hasAssociatedData = Boolean(associated && (Object.keys(associated.localStorage || {}).length || Object.keys(associated.indexedDB || {}).length));
+        const deleteAssociatedData = hasAssociatedData && pageWindow.confirm(`检测到“${rule.name}”保存过图片或其他界面数据。\n\n确定：规则和关联数据一起删除\n取消：只删除规则，保留关联数据`);
         state.regexRules = state.regexRules.filter(row => row.id !== id);
         delete state.regexOutputRequirements[id];
+        if (deleteAssociatedData) delete state.regexSandboxStorage[id];
         saveRegexRules();
         refreshRegexOnPage();
-        state.status = `已删除正则规则“${rule.name}”及其输出要求。`;
+        state.status = `已删除正则规则“${rule.name}”及其输出要求。${hasAssociatedData ? (deleteAssociatedData ? '关联图片和界面数据也已删除。' : '关联图片和界面数据已保留。') : ''}`;
         showRecoveryNotice(state.status);
         return;
       }
@@ -11191,6 +11230,7 @@ roleStateReady = true;
       if (!previousFavoriteResult.completionNotified) pageWindow.alert(state.status);
     }
     installAutoMaskSwitch();
+    addMountedGlobalListener(window, 'message', handleRegexSandboxStorageMessage);
     addMountedGlobalListener(document, 'selectionchange', rememberQuoteSelection);
     installMessageQuoteButtons();
     startModelMonitor();
