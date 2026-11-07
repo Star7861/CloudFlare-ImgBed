@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.46
+// @version      3.0.0-dev.47
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.46';
+  const SCRIPT_VERSION = '3.0.0-dev.47';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const MASK_LIBRARY_KEY = 'mufy-recovery-mask-library-v1';
   const MASK_LIBRARY_BACKUP_KEY = 'mufy-recovery-mask-library-backup-v1';
@@ -62,6 +62,7 @@
   const DEFAULT_MANUAL_AUTO_CHAT_MESSAGE = '≽^⚈⩊⚈^≼';
   const AUTHOR_FOLDER_MIGRATION_KEY = 'mufy-recovery-author-folder-migration-v1';
   const AUTHOR_FOLDER_MAP_KEY = 'mufy-recovery-author-folder-map-v1';
+  const AUTO_ADD_FAVORITE_FOLDER_KEY = 'mufy-recovery-auto-add-favorite-folder-v1';
   const MAX_SITE_MASKS = 5;
   const ROLE_EXPORT_BATCH_SIZE = 1000;
   const ROLE_REQUEST_INTERVAL_MS = 200;
@@ -224,6 +225,7 @@
     state.modelMonitorLastChecked = '';
     state.modelMonitorNotify = loadModelMonitorNotify();
     state.sessionlessRoleIds = loadSessionlessRoleIds();
+    state.autoAddFavoriteFolder = loadAutoAddFavoriteFolderSetting();
     reloadMaskAccountPartition(previousScope, nextScope);
   }
 
@@ -1397,6 +1399,7 @@
     lastRoleReadIds: null,
     favoriteRunning: false,
     favoriteInterruptMode: '',
+    autoAddFavoriteFolder: loadAutoAddFavoriteFolderSetting(),
     authorFolderLoading: false,
     favoriteFolderDeleteLoading: false,
     favoriteFolderDeleteRows: [],
@@ -6389,6 +6392,24 @@ roleStateReady = true;
     try { localStorage.setItem(accountStorageKey(AUTHOR_FOLDER_MIGRATION_KEY), '1'); } catch (_) {}
   }
 
+  function loadAutoAddFavoriteFolderSetting() {
+    try {
+      const saved = loadAndMigrateScopedValue(AUTO_ADD_FAVORITE_FOLDER_KEY);
+      return saved == null ? true : saved === '1';
+    } catch (_) { return true; }
+  }
+
+  function setAutoAddFavoriteFolderSetting(enabled) {
+    state.autoAddFavoriteFolder = Boolean(enabled);
+    try {
+      localStorage.setItem(accountStorageKey(AUTO_ADD_FAVORITE_FOLDER_KEY), state.autoAddFavoriteFolder ? '1' : '0');
+    } catch (error) {
+      appendRunLog('error', '保存“收藏后自动加入收藏夹”设置失败', error);
+      state.status = '设置未能保存到浏览器本地存储，刷新后可能恢复原值。';
+    }
+    render();
+  }
+
   function rowsForAuthorFolderSync(job) {
     const done = authorFolderMigrationDone();
     // 自动收藏只整理本次收藏成功的角色；历史收藏由“按作者整理收藏夹”手动整理。
@@ -6830,23 +6851,30 @@ roleStateReady = true;
     saveShareFavoriteResult(result);
     await clearShareFavoriteJob();
     clearFavoritePendingState(job);
-    state.status = favoriteJobStatus(job) + ' 收藏队列已完成并清除，正在后台整理作者收藏夹……';
-    render();
     let folderSummary;
-    state.authorFolderLoading = true;
-    try {
-      folderSummary = await organizeFavoritedCharactersByAuthor(job);
-    } catch (error) {
-      folderSummary = { attempted: (job?.favoritedIds || []).length, created: 0, reused: 0, added: 0, skippedNoAuthor: 0, failures: [`整理作者收藏夹：${explainFailure(error)}`] };
-      appendRunLog('error', '收藏完成后的作者收藏夹整理失败', error);
-    } finally {
-      state.authorFolderLoading = false;
+    if (state.autoAddFavoriteFolder) {
+      state.status = favoriteJobStatus(job) + ' 收藏队列已完成并清除，正在后台整理作者收藏夹……';
+      render();
+      state.authorFolderLoading = true;
+      try {
+        folderSummary = await organizeFavoritedCharactersByAuthor(job);
+      } catch (error) {
+        folderSummary = { attempted: (job?.favoritedIds || []).length, created: 0, reused: 0, added: 0, skippedNoAuthor: 0, failures: [`整理作者收藏夹：${explainFailure(error)}`] };
+        appendRunLog('error', '收藏完成后的作者收藏夹整理失败', error);
+      } finally {
+        state.authorFolderLoading = false;
+      }
+    } else {
+      folderSummary = null;
+      appendRunLog('info', '已按设置跳过收藏后的自动入夹', { favorited: (job?.favoritedIds || []).length });
     }
     job.authorFolderSummary = folderSummary;
     result.authorFolderSummary = folderSummary;
     saveShareFavoriteResult(result);
     const folderText = authorFolderSummaryText(folderSummary);
-    state.status = favoriteJobStatus(job) + (folderText ? ' ' + folderText + '。' : '');
+    state.status = favoriteJobStatus(job) + (folderText
+      ? ' ' + folderText + '。'
+      : (state.autoAddFavoriteFolder ? '' : ' 已按设置保留网站收藏，未自动放入收藏夹。'));
     render();
     pageWindow.alert(state.status);
   }
@@ -9238,6 +9266,11 @@ roleStateReady = true;
         ? '停止正在进行的角色读取'
         : '打开收藏夹功能：按作者整理，或管理并删除收藏夹';
     }
+    const autoAddFavoriteFolder = panel.querySelector('#mufy-recovery-auto-add-favorite-folder');
+    if (autoAddFavoriteFolder) {
+      autoAddFavoriteFolder.checked = state.autoAddFavoriteFolder;
+      autoAddFavoriteFolder.disabled = state.favoriteRunning || state.authorFolderLoading;
+    }
     const readMode = panel.querySelector('#mufy-recovery-role-read-mode');
     const latestPages = panel.querySelector('#mufy-recovery-role-latest-pages');
     readMode.value = state.roleReadMode;
@@ -9652,6 +9685,10 @@ roleStateReady = true;
       #mufy-recovery-controls.is-section-home,#mufy-recovery-controls.is-standalone-section{flex:1;min-height:0;max-height:none;align-content:start}
       #mufy-recovery-role-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;align-items:stretch}
       #mufy-recovery-favorite-actions{display:grid;grid-template-columns:1fr;gap:6px;align-items:stretch}
+      #mufy-recovery-auto-folder-label{display:flex;align-items:flex-start;gap:8px;margin-top:7px;padding:9px 10px;border:1px solid #4d4962;border-radius:8px;background:#292733;color:#ddd;cursor:pointer;user-select:none}
+      #mufy-recovery-auto-folder-label input{flex:none;margin-top:2px;accent-color:#786bd4}
+      #mufy-recovery-auto-folder-label span{display:grid;gap:2px;line-height:1.35}
+      #mufy-recovery-auto-folder-label small{color:#999;font-size:10px;font-weight:400}
       #mufy-recovery-chat-tools{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;align-items:stretch}
       #mufy-recovery-mask-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
       #mufy-recovery-role-actions > button,#mufy-recovery-mask-actions > button{min-width:0;white-space:normal;line-height:1.25}
@@ -10042,6 +10079,7 @@ roleStateReady = true;
         <div id="mufy-recovery-favorite-section" hidden>
           <div id="mufy-recovery-favorite-tabs"><button data-category="manualFavoriteChats">普通待聊 (0)</button></div>
           <div id="mufy-recovery-favorite-actions"><button id="mufy-recovery-stop-action" title="整理或管理收藏夹">收藏夹</button></div>
+          <label id="mufy-recovery-auto-folder-label"><input id="mufy-recovery-auto-add-favorite-folder" type="checkbox"><span>收藏后自动放入收藏夹<small>关闭后仍会正常收藏角色，只是不再自动按作者归入收藏夹；手动整理功能不受影响。</small></span></label>
           <div id="mufy-recovery-manual-auto-actions" hidden><input id="mufy-recovery-manual-auto-message" type="text" maxlength="500" value="${esc(state.manualAutoChatMessage)}" aria-label="一键扣数发送内容"><label class="mufy-recovery-auto-delay">间隔 <input id="mufy-recovery-manual-auto-delay-min" type="number" min="0" max="300" step="1" value="${esc(state.manualAutoChatDelayMin)}" aria-label="随机冷却最短秒数">～<input id="mufy-recovery-manual-auto-delay-max" type="number" min="0" max="300" step="1" value="${esc(state.manualAutoChatDelayMax)}" aria-label="随机冷却最长秒数"> 秒</label><button id="mufy-recovery-manual-auto-start">一键扣数</button><button id="mufy-recovery-manual-auto-cancel" hidden>取消任务</button><button id="mufy-recovery-manual-chat-next" title="按普通待聊列表顺序打开角色；再次点击视为当前角色已处理并前往下一个">下一个</button></div>
         </div>
         <div id="mufy-recovery-chat-section" hidden>
@@ -10370,6 +10408,7 @@ roleStateReady = true;
       if (state.roleLoading) pauseRoleReading();
       else folderMenuModal.hidden = false;
     };
+    panel.querySelector('#mufy-recovery-auto-add-favorite-folder').onchange = event => setAutoAddFavoriteFolderSetting(event.target.checked);
     panel.querySelector('#mufy-recovery-favorite-visible').onclick = () => favoriteRows(state.visibleRows, '当前列表');
     panel.querySelector('#mufy-recovery-share-recovery-one').onclick = async () => {
       const recoveryTask = loadFavoriteShareRecoveryJob();
