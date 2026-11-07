@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.47
+// @version      3.0.0-dev.48
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.47';
+  const SCRIPT_VERSION = '3.0.0-dev.48';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const MASK_LIBRARY_KEY = 'mufy-recovery-mask-library-v1';
   const MASK_LIBRARY_BACKUP_KEY = 'mufy-recovery-mask-library-backup-v1';
@@ -42,6 +42,7 @@
   const FAVORITE_SHARE_RECOVERY_JOB_KEY = 'mufy-role-links-only-favorite-share-recovery-test-v1';
   const MANUAL_FAVORITE_CHAT_KEY = 'mufy-role-links-only-manual-favorite-chat-v1';
   const MANUAL_FAVORITE_CHAT_CURRENT_KEY = 'mufy-role-links-only-manual-favorite-chat-current-v1';
+  const MANUAL_FAVORITE_NEXT_DISMISSED_KEY = 'mufy-role-links-only-manual-favorite-next-dismissed-v1';
   const MANUAL_AUTO_CHAT_MESSAGE_KEY = 'mufy-role-links-only-manual-auto-chat-message-v1';
   const MANUAL_AUTO_CHAT_DELAY_KEY = 'mufy-role-links-only-manual-auto-chat-delay-v1';
   const MANUAL_AUTO_CHAT_DELAY_MIN_KEY = 'mufy-role-links-only-manual-auto-chat-delay-min-v1';
@@ -602,6 +603,17 @@
   }
   function saveManualFavoriteChats(rows) {
     try { localStorage.setItem(accountStorageKey(MANUAL_FAVORITE_CHAT_KEY), JSON.stringify(rows)); } catch (_) {}
+  }
+
+  function loadManualFavoriteNextDismissed() {
+    try { return loadAndMigrateScopedValue(MANUAL_FAVORITE_NEXT_DISMISSED_KEY) === '1'; }
+    catch (_) { return false; }
+  }
+
+  function dismissManualFavoriteNext() {
+    state.manualFavoriteNextDismissed = true;
+    try { localStorage.setItem(accountStorageKey(MANUAL_FAVORITE_NEXT_DISMISSED_KEY), '1'); } catch (_) {}
+    render();
   }
 
   function loadManualAutoChatMessage() {
@@ -1334,7 +1346,7 @@
     favoriteOnly: cachedRoles?.favoriteOnly || [],
     manualFavoriteChats: loadManualFavoriteChats(),
     manualFavoriteChatCurrentId: (() => { try { return loadAndMigrateScopedValue(MANUAL_FAVORITE_CHAT_CURRENT_KEY) || ''; } catch (_) { return ''; } })(),
-    manualFavoriteNextDismissed: false,
+    manualFavoriteNextDismissed: loadManualFavoriteNextDismissed(),
     manualAutoChatMessage: loadManualAutoChatMessage(),
     manualAutoChatDelayMin: loadManualAutoChatDelayRange().min,
     manualAutoChatDelayMax: loadManualAutoChatDelayRange().max,
@@ -1474,6 +1486,7 @@ roleStateReady = true;
     state.archiveOpenCharacterIds.clear();
     state.manualFavoriteChats = loadManualFavoriteChats();
     try { state.manualFavoriteChatCurrentId = loadAndMigrateScopedValue(MANUAL_FAVORITE_CHAT_CURRENT_KEY) || ''; } catch (_) { state.manualFavoriteChatCurrentId = ''; }
+    state.manualFavoriteNextDismissed = loadManualFavoriteNextDismissed();
     state.manualAutoChatMessage = loadManualAutoChatMessage();
     ({ min: state.manualAutoChatDelayMin, max: state.manualAutoChatDelayMax } = loadManualAutoChatDelayRange());
     state.manualAutoChatRunning = Boolean(loadManualAutoChatJob() && !loadManualAutoChatJob()?.paused);
@@ -9896,7 +9909,7 @@ roleStateReady = true;
     const nextButton = document.createElement('button');
     nextButton.id = 'mufy-recovery-next';
     nextButton.type = 'button';
-    nextButton.innerHTML = '<span class="mufy-recovery-next-label">下一个</span><span class="mufy-recovery-next-close" data-close-next="1" role="button" tabindex="0" aria-label="关闭下一个按钮">×</span>';
+    nextButton.innerHTML = '<span class="mufy-recovery-next-label">下一个</span><span class="mufy-recovery-next-close" data-close-next="1" role="button" tabindex="0" aria-label="永久关闭悬浮按钮">×</span>';
     nextButton.title = '处理完当前普通待聊角色后，打开下一个角色';
     nextButton.setAttribute('aria-label', nextButton.title);
     document.body.appendChild(nextButton);
@@ -9983,8 +9996,7 @@ roleStateReady = true;
       if (close) {
         event.preventDefault();
         event.stopPropagation();
-        state.manualFavoriteNextDismissed = true;
-        render();
+        dismissManualFavoriteNext();
         return;
       }
       goToNextManualFavoriteChat();
@@ -9993,8 +10005,7 @@ roleStateReady = true;
       if (event.key !== 'Enter' && event.key !== ' ') return;
       event.preventDefault();
       event.stopPropagation();
-      state.manualFavoriteNextDismissed = true;
-      render();
+      dismissManualFavoriteNext();
     });
 
     panel = document.createElement('div');
