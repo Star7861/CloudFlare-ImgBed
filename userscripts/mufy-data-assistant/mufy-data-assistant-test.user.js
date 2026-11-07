@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.57
+// @version      3.0.0-dev.58
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.57';
+  const SCRIPT_VERSION = '3.0.0-dev.58';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -1189,6 +1189,11 @@
     return null;
   }
 
+  function isAssistantDialogRow(row) {
+    const role = String(row?.role || '').trim().toLowerCase();
+    return !role || role === 'assistant';
+  }
+
   function rawRegexFingerprintParts(text) {
     const value = String(text || '');
     if (value.length < 10) return [];
@@ -1214,11 +1219,12 @@
     const used = new Set();
     const rows = [...rawDialogRows.values()]
       .filter(row => !row.sessionId || String(row.sessionId) === String(context.sessionId))
-      .sort((a, b) => String(a.createdTime || '').localeCompare(String(b.createdTime || '')))
+      .filter(isAssistantDialogRow)
+      .sort((a, b) => String(a.createdTime || a.updatedTime || '').localeCompare(String(b.createdTime || b.updatedTime || '')))
       .slice(-Math.max(1, Number(state.regexRichRenderLimit) || 3))
       .map(row => ({ row, match: rawRichRegexMatch(row) }))
       .filter(item => item.match)
-      .sort((a, b) => String(a.row.createdTime || '').localeCompare(String(b.row.createdTime || '')));
+      .sort((a, b) => String(a.row.createdTime || a.row.updatedTime || '').localeCompare(String(b.row.createdTime || b.row.updatedTime || '')));
     for (const item of rows) {
       const dialogId = String(item.row.dialogsId || item.row.dialogId || item.row.id || '');
       const fingerprints = rawRegexFingerprintParts(item.match.visibleText);
@@ -10612,7 +10618,7 @@ roleStateReady = true;
         <div id="mufy-recovery-beauty-section" hidden><div class="mufy-recovery-section-note"><strong>摘录牌美化</strong><span>调整塔罗牌样式、字体、颜色、字号和对齐方式，并导出当前牌面。</span></div><button id="mufy-recovery-quote-entry" title="查看并美化角色摘录牌组">打开摘录牌组与美化设置</button></div>
         <div id="mufy-recovery-regex-section" hidden>
           <div class="mufy-recovery-section-note"><strong>聊天显示正则</strong><span>只改变网页当前显示的聊天正文，不修改服务器原文。按列表顺序依次执行。</span></div>
-          <div id="mufy-recovery-regex-tools"><button id="mufy-recovery-regex-add">新增规则</button><button id="mufy-recovery-regex-import">导入 JSON</button><button id="mufy-recovery-regex-export">导出 JSON</button><button id="mufy-recovery-regex-refresh">重新应用</button><label id="mufy-recovery-regex-rich-limit-label">仅检查最近 <input id="mufy-recovery-regex-rich-limit" type="number" min="1" max="10" value="${esc(state.regexRichRenderLimit)}"> 楼 <span>范围外的 HTML 界面自动卸载</span></label><input id="mufy-recovery-regex-file" type="file" accept=".json,application/json" hidden></div>
+          <div id="mufy-recovery-regex-tools"><button id="mufy-recovery-regex-add">新增规则</button><button id="mufy-recovery-regex-import">导入 JSON</button><button id="mufy-recovery-regex-export">导出 JSON</button><button id="mufy-recovery-regex-refresh">重新应用</button><label id="mufy-recovery-regex-rich-limit-label">仅检查最近 <input id="mufy-recovery-regex-rich-limit" type="number" min="1" max="10" value="${esc(state.regexRichRenderLimit)}"> 楼角色回复 <span>你方消息不计数，范围外界面自动卸载</span></label><input id="mufy-recovery-regex-file" type="file" accept=".json,application/json" hidden></div>
           <div id="mufy-recovery-regex-test"><label>测试原文<textarea id="mufy-recovery-regex-test-input" placeholder="输入一段文字，立即查看全部已启用规则的结果"></textarea></label><label>处理结果<textarea id="mufy-recovery-regex-test-output" readonly></textarea></label></div><iframe id="mufy-recovery-regex-html-preview" title="HTML 正则交互预览" sandbox="allow-scripts allow-forms allow-modals allow-popups allow-downloads" referrerpolicy="no-referrer" hidden></iframe>
           <div id="mufy-recovery-regex-list"></div>
         </div>
