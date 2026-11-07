@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.62
+// @version      3.0.0-dev.63
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.62';
+  const SCRIPT_VERSION = '3.0.0-dev.63';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -267,9 +267,13 @@
 
   function completePendingAccountSwitch(authValue = authorization) {
     const pending = pendingAccountSwitch();
-    if (!pending) return;
+    if (!pending || pending.phase === 'logout') return;
     const identity = accountIdentityFromAuthorization(authValue);
     if (identity.email && identity.email.toLowerCase() !== String(pending.email).toLowerCase()) return;
+    if (!identity.email) {
+      if (!identity.scope || !pending.sourceScope || identity.scope === pending.sourceScope) return;
+      if (pending.targetScope && pending.targetScope !== pending.sourceScope && identity.scope !== pending.targetScope) return;
+    }
     try { sessionStorage.removeItem(ACCOUNT_SWITCH_PENDING_KEY); } catch (_) {}
     const rows = loadAccountSwitchProfiles().map(row => row.id === pending.id ? { ...row, lastUsedAt: Date.now(), scope: identity.scope || row.scope } : row);
     saveAccountSwitchProfiles(rows);
@@ -312,6 +316,10 @@
   function installAccountSwitchLoginAssist() {
     const pending = pendingAccountSwitch();
     if (!pending) return;
+    if (pending.phase === 'logout') {
+      setTimeout(() => attemptOfficialAccountLogout(pending), 200);
+      return;
+    }
     let attempts = 0;
     const timer = setInterval(() => {
       attempts += 1;
@@ -347,20 +355,96 @@
         }
       } catch (_) {}
     }
+    try {
+      for (const part of String(document.cookie || '').split(';')) {
+        const name = part.split('=')[0]?.trim();
+        if (!name || !/(token|auth|session|jwt|login)/i.test(name)) continue;
+        document.cookie = `${name}=; Max-Age=0; path=/`;
+        document.cookie = `${name}=; Max-Age=0; path=/; domain=.mufy.ai`;
+      }
+    } catch (_) {}
     authorization = '';
+  }
+
+  function savePendingAccountSwitch(value) {
+    try { sessionStorage.setItem(ACCOUNT_SWITCH_PENDING_KEY, JSON.stringify(value)); } catch (_) {}
+  }
+
+  function officialLogoutControl() {
+    return [...document.querySelectorAll('button,a,[role="button"]')].find(item => !item.closest('#mufy-recovery-panel')
+      && /^(退出登录|退出账号|退出|登出|logout|log out|sign out)$/i.test(String(item.textContent || '').replace(/\s+/g, ' ').trim()));
+  }
+
+  function accountMenuControl() {
+    const candidates = [...document.querySelectorAll('button,a,[role="button"]')].filter(item => !item.closest('#mufy-recovery-panel'));
+    let best = null;
+    let bestScore = 0;
+    for (const item of candidates) {
+      const text = String(item.textContent || '').replace(/\s+/g, ' ').trim();
+      const hint = `${item.getAttribute('aria-label') || ''} ${item.getAttribute('title') || ''} ${item.getAttribute('href') || ''} ${text}`;
+      const rect = item.getBoundingClientRect();
+      let score = 0;
+      if (/个人中心|账户|账号|profile|account/i.test(hint)) score += 4;
+      if (/设置|setting/i.test(hint)) score += 1;
+      if (/\/profile(?:\/|$)/i.test(String(item.getAttribute('href') || ''))) score += 4;
+      if (rect.left < Math.min(260, pageWindow.innerWidth * 0.25) && rect.top > pageWindow.innerHeight * 0.55) score += 5;
+      if (item.querySelector('svg,img')) score += 1;
+      if (score > bestScore) { best = item; bestScore = score; }
+    }
+    return bestScore >= 5 ? best : null;
+  }
+
+  function finishAccountLogout(pending, clickedLogout = false) {
+    const next = { ...pending, phase: 'login', logoutRequestedAt: Date.now() };
+    savePendingAccountSwitch(next);
+    if (clickedLogout) {
+      const fallback = setTimeout(() => {
+        clearWebsiteAuthStorage();
+        pageWindow.location.assign('/');
+      }, 1400);
+      addMountedGlobalListener(pageWindow, 'beforeunload', () => clearTimeout(fallback), { once: true });
+      return;
+    }
+    clearWebsiteAuthStorage();
+    pageWindow.location.assign('/');
+  }
+
+  function attemptOfficialAccountLogout(pending = pendingAccountSwitch()) {
+    if (!pending) return;
+    const logout = officialLogoutControl();
+    if (logout) {
+      finishAccountLogout(pending, true);
+      logout.click();
+      return;
+    }
+    const menu = accountMenuControl();
+    menu?.click();
+    let attempts = 0;
+    const timer = setInterval(() => {
+      attempts += 1;
+      const found = officialLogoutControl();
+      if (found) {
+        clearInterval(timer);
+        finishAccountLogout(pending, true);
+        found.click();
+        return;
+      }
+      if (attempts >= 8) {
+        clearInterval(timer);
+        finishAccountLogout(pending, false);
+      }
+    }, 300);
   }
 
   function switchToSavedAccount(accountId) {
     const row = loadAccountSwitchProfiles().find(item => item.id === String(accountId || ''));
     if (!row) return;
     if (!pageWindow.confirm(`切换到“${row.label}”？\n\n脚本会退出当前 Mufy 登录并打开官方登录窗口，自动填入邮箱；密码仍由 Edge 或你本人填写。`)) return;
-    try { sessionStorage.setItem(ACCOUNT_SWITCH_PENDING_KEY, JSON.stringify({ id: row.id, email: row.email, label: row.label, startedAt: Date.now() })); } catch (_) {}
-    clearWebsiteAuthStorage();
-    const logout = [...document.querySelectorAll('button,a,[role="button"]')].find(item => !item.closest('#mufy-recovery-panel')
-      && /^(退出登录|退出账号|登出|logout|sign out)$/i.test(String(item.textContent || '').replace(/\s+/g, ' ').trim()));
+    const pending = { id: row.id, email: row.email, label: row.label, targetScope: row.scope || '', sourceScope: maskAccountScope || accountIdentityFromAuthorization().scope, phase: 'logout', startedAt: Date.now() };
+    savePendingAccountSwitch(pending);
     state.status = `正在切换到“${row.label}”…`;
-    if (logout) logout.click();
-    else pageWindow.location.assign('/');
+    showManualAutoChatToast(`正在退出当前账号，然后切换到“${row.label}”…`, { tone: 'info', duration: 5000 });
+    attemptOfficialAccountLogout(pending);
   }
 
   function loadUpdateCheckSnapshot() {
