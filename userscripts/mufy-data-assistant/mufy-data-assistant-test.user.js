@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.103
+// @version      3.0.0-dev.104
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,7 +21,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.103';
+    : '3.0.0-dev.104';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -1389,7 +1389,7 @@
       const hasPassword = Boolean(savedAccountPassword(row.id));
       const loginMode = accountLoginMode(row);
       return `<article class="mufy-account-card ${active ? 'is-current' : ''}"><div><strong>${esc(row.label)}</strong><small>${esc(row.email)}</small><span class="mufy-account-badges">${active ? '<em>当前登录</em>' : ''}<em class="login-mode ${loginMode}">${loginMode === 'direct' ? '接口直登' : '官方表单'}</em>${hasPassword ? '<em class="has-password">已存密码</em>' : ''}</span></div><span>${active ? '' : `<button data-account-mark-current="${esc(row.id)}" title="网站已经登录此账号时，用它纠正当前标记">设为当前</button><button data-account-switch="${esc(row.id)}">切换</button>`}<button data-account-mode="${esc(row.id)}">${loginMode === 'direct' ? '改用表单' : '启用直登'}</button><button data-account-edit="${esc(row.id)}">编辑</button><button data-account-delete="${esc(row.id)}">删除</button></span></article>`;
-    }).join('') || '<div class="mufy-recovery-empty">还没有保存账号。先登录一个 Mufy 账号，再点“保存当前账号”。</div>';
+    }).join('') || '<div class="mufy-recovery-empty">还没有保存账号。可添加其他账号，或保存当前登录账号。</div>';
   }
 
   function closeAccountPasswordEditor() {
@@ -1403,19 +1403,25 @@
     accountPasswordEnableDirectAfterSave = false;
   }
 
-  function openAccountPasswordEditor(accountId, enableDirectAfterSave = false) {
+  function openAccountPasswordEditor(accountId = '', enableDirectAfterSave = false) {
     const row = loadAccountSwitchProfiles().find(item => item.id === String(accountId || ''));
-    if (!row) return;
-    accountPasswordEditingId = row.id;
+    if (accountId && !row) return;
+    accountPasswordEditingId = row?.id || '';
     accountPasswordEnableDirectAfterSave = Boolean(enableDirectAfterSave);
     const modal = panel.querySelector('#mufy-recovery-account-password-modal');
-    panel.querySelector('#mufy-recovery-account-password-title').textContent = `编辑“${row.label}”`;
-    panel.querySelector('#mufy-recovery-account-password-summary').textContent = savedAccountPassword(row.id)
+    panel.querySelector('#mufy-recovery-account-password-title').textContent = row ? `编辑“${row.label}”` : '添加账号';
+    panel.querySelector('#mufy-recovery-account-password-save').textContent = row ? '保存修改' : '添加账号';
+    const hasPassword = Boolean(row && savedAccountPassword(row.id));
+    panel.querySelector('#mufy-recovery-account-password-clear').hidden = !hasPassword;
+    panel.querySelector('#mufy-recovery-account-password-summary').textContent = !row
+      ? '只填邮箱会使用官方登录表单。填写密码并保存会启用接口直登。'
+      : hasPassword
       ? '上下依次为登录邮箱和新密码。密码留空会保留现有密码，旧密码不会回显。'
       : '上下依次为登录邮箱和密码。密码留空表示不保存；只有主动输入并保存后，助手才会知道该密码。';
     const emailInput = panel.querySelector('#mufy-recovery-account-email-input');
     const passwordInput = panel.querySelector('#mufy-recovery-account-password-input');
-    emailInput.value = row.email;
+    emailInput.value = row?.email || '';
+    passwordInput.placeholder = hasPassword ? '新密码（留空则保留原值）' : '密码（选填）';
     passwordInput.value = '';
     modal.hidden = false;
     setTimeout(() => emailInput.focus(), 0);
@@ -1423,15 +1429,25 @@
 
   function commitAccountPasswordEditor() {
     const rows = loadAccountSwitchProfiles();
-    const row = rows.find(item => item.id === accountPasswordEditingId);
+    const adding = !accountPasswordEditingId;
+    let row = rows.find(item => item.id === accountPasswordEditingId);
     const emailInput = panel.querySelector('#mufy-recovery-account-email-input');
     const passwordInput = panel.querySelector('#mufy-recovery-account-password-input');
     const email = String(emailInput?.value || '').trim();
     const password = String(passwordInput?.value || '');
-    if (!row) { closeAccountPasswordEditor(); return; }
+    if (!adding && !row) { closeAccountPasswordEditor(); return; }
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       showManualAutoChatToast('请输入有效的登录邮箱。', { tone: 'error', duration: 6000 });
       emailInput?.focus();
+      return;
+    }
+    if (rows.some(item => item.id !== accountPasswordEditingId && item.email.toLowerCase() === email.toLowerCase())) {
+      showManualAutoChatToast('这个邮箱已在账号列表中，可直接编辑已有账号。', { tone: 'error', duration: 6000 });
+      emailInput?.focus();
+      return;
+    }
+    if (adding && rows.length >= 30) {
+      showManualAutoChatToast('账号列表最多保存 30 个账号。', { tone: 'error', duration: 6000 });
       return;
     }
     if (password && password.length < 6) {
@@ -1439,10 +1455,23 @@
       passwordInput?.focus();
       return;
     }
-    if (accountPasswordEnableDirectAfterSave && !password && !savedAccountPassword(row.id)) {
+    if (accountPasswordEnableDirectAfterSave && !password && !savedAccountPassword(row?.id)) {
       showManualAutoChatToast('启用接口直登需要输入至少 6 位密码。', { tone: 'error', duration: 6000 });
       passwordInput?.focus();
       return;
+    }
+    if (adding) {
+      const createdAt = Date.now();
+      row = {
+        id: pageWindow.crypto?.randomUUID?.() || `account-${createdAt}-${Math.random().toString(36).slice(2)}`,
+        email,
+        label: email.split('@')[0],
+        scope: '',
+        loginMode: password ? 'direct' : 'native',
+        createdAt,
+        lastUsedAt: 0
+      };
+      rows.push(row);
     }
     if (password && !saveAccountPassword(row.id, password)) {
       showManualAutoChatToast('无法写入篡改猴独立存储，密码没有保存。', { tone: 'error', duration: 7000 });
@@ -1454,10 +1483,18 @@
     if (accountPasswordEnableDirectAfterSave) {
       row.loginMode = 'direct';
     }
-    saveAccountSwitchProfiles(rows);
+    try {
+      saveAccountSwitchProfiles(rows);
+    } catch (_) {
+      if (adding && password) deleteAccountPassword(row.id);
+      showManualAutoChatToast('无法保存账号列表，请检查浏览器的存储权限或可用空间。', { tone: 'error', duration: 7000 });
+      return;
+    }
     const directEnabled = accountPasswordEnableDirectAfterSave;
     closeAccountPasswordEditor();
-    state.status = directEnabled
+    state.status = adding
+      ? `已添加“${row.label}”，使用${password ? '接口直登' : '官方表单'}。`
+      : directEnabled
       ? `已保存“${row.label}”的邮箱和密码，并启用接口直登。`
       : `已保存“${row.label}”的账号信息；登录模式未改变。`;
     showManualAutoChatToast(state.status, { tone: 'success', duration: 7000 });
@@ -10562,6 +10599,8 @@ roleStateReady = true;
       #mufy-recovery-panel #mufy-recovery-account-current { display: inline; padding: 0; border: 0; background: none !important; box-shadow: none; font-size: 11px; overflow-wrap: anywhere; }
       #mufy-recovery-panel #mufy-recovery-account-current[hidden] { display: none; }
       #mufy-recovery-panel #mufy-recovery-account-save { background: var(--mufy-panel-accent-button) !important; border-color: var(--mufy-panel-border) !important; color: var(--mufy-panel-text); }
+      #mufy-recovery-panel #mufy-recovery-account-password-save { background: var(--mufy-panel-accent-button) !important; border-color: var(--mufy-panel-accent) !important; color: var(--mufy-panel-text) !important; }
+      #mufy-recovery-account-password-actions:has(> button[hidden]) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       #mufy-recovery-panel #mufy-recovery-account-mode-guide { display: block; color: var(--mufy-panel-muted); }
       #mufy-recovery-panel #mufy-recovery-account-mode-guide summary { cursor: pointer; padding: 6px 2px; font-size: 11px; }
       #mufy-recovery-panel #mufy-recovery-account-mode-guide > div { margin-top: 5px; }
@@ -10940,6 +10979,7 @@ roleStateReady = true;
           <div id="mufy-recovery-account-tools">
             <span id="mufy-recovery-account-current" hidden></span>
             <button id="mufy-recovery-account-save">保存当前账号</button>
+            <button id="mufy-recovery-account-add">添加账号</button>
           </div>
           <details id="mufy-recovery-account-mode-guide">
             <summary>登录方式与密码说明</summary>
@@ -11212,6 +11252,7 @@ roleStateReady = true;
       if (card) fillMaterialIntoComposer(String(card.dataset.materialFill || ''));
     };
     panel.querySelector('#mufy-recovery-account-save').onclick = saveCurrentAccountShortcut;
+    panel.querySelector('#mufy-recovery-account-add').onclick = () => openAccountPasswordEditor();
     panel.querySelector('#mufy-recovery-account-list').onclick = event => {
       const markButton = event.target.closest?.('[data-account-mark-current]');
       if (markButton) { markSavedAccountCurrent(String(markButton.dataset.accountMarkCurrent || '')); return; }
