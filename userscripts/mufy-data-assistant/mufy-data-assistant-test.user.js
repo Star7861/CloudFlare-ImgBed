@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.73
+// @version      3.0.0-dev.74
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.73';
+  const SCRIPT_VERSION = '3.0.0-dev.74';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -9389,21 +9389,24 @@ roleStateReady = true;
     const sectionHome = panel.querySelector('#mufy-recovery-section-home');
     const sectionNav = panel.querySelector('#mufy-recovery-section-nav');
     const sectionTitle = panel.querySelector('#mufy-recovery-section-title');
+    const isRoleHistoryView = state.section === 'roles' && state.active === 'roleHistory';
     const sectionNames = { roles: '角色', favorites: '收藏', chats: '聊天记录', beauty: '美化', accounts: '账号切换', materials: '素材库', masks: '面具' };
     if (sectionHome) sectionHome.hidden = state.section !== 'home';
     if (sectionNav) sectionNav.hidden = state.section === 'home';
-    if (sectionTitle) sectionTitle.textContent = state.section === 'materials'
-      ? (state.materialKind === 'extra' ? '番外库' : '指令库')
-      : (sectionNames[state.section] || '');
+    if (sectionTitle) sectionTitle.textContent = isRoleHistoryView
+      ? '历史索引'
+      : state.section === 'materials'
+        ? (state.materialKind === 'extra' ? '番外库' : '指令库')
+        : (sectionNames[state.section] || '');
     const controls = panel.querySelector('#mufy-recovery-controls');
     if (controls) {
       controls.classList.toggle('is-section-home', state.section === 'home');
       controls.classList.toggle('is-standalone-section', ['beauty', 'accounts', 'materials'].includes(state.section));
     }
     const statusBox = panel.querySelector('#mufy-recovery-status');
-    if (statusBox) statusBox.hidden = state.section === 'home';
+    if (statusBox) statusBox.hidden = state.section === 'home' || isRoleHistoryView;
     if (favoriteTaskControls && state.section === 'home') favoriteTaskControls.hidden = true;
-    if (roleSection) roleSection.hidden = state.section !== 'roles';
+    if (roleSection) roleSection.hidden = state.section !== 'roles' || isRoleHistoryView;
     if (favoriteSection) favoriteSection.hidden = state.section !== 'favorites';
     if (chatSection) chatSection.hidden = state.section !== 'chats';
     if (beautySection) beautySection.hidden = state.section !== 'beauty';
@@ -9416,7 +9419,7 @@ roleStateReady = true;
     if (state.section === 'accounts') renderAccountSection();
     const roleFilterRow = panel.querySelector('#mufy-recovery-role-filter-row');
     const maskSearch = panel.querySelector('#mufy-recovery-mask-search');
-    if (roleFilterRow) roleFilterRow.hidden = state.section !== 'roles';
+    if (roleFilterRow) roleFilterRow.hidden = state.section !== 'roles' || isRoleHistoryView;
     if (maskSearch) maskSearch.hidden = !isMaskView;
     const statusFilter = panel.querySelector('#mufy-recovery-status-filter');
     if (statusFilter) {
@@ -10357,6 +10360,7 @@ roleStateReady = true;
     panel.querySelector('#mufy-recovery-history-entry').onclick = () => {
       state.section = 'roles';
       state.active = 'roleHistory';
+      state.roleQuery = '';
       render();
     };
     const helpModal = panel.querySelector('#mufy-recovery-help-modal');
