@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.102
+// @version      3.0.0-dev.103
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,7 +21,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.102';
+    : '3.0.0-dev.103';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -1145,7 +1145,12 @@
   function loadManualAutoChatJob() {
     try {
       const job = JSON.parse(loadAndMigrateScopedValue(MANUAL_AUTO_CHAT_JOB_KEY) || 'null');
-      return job && typeof job === 'object' && job.active ? job : null;
+      if (!job || typeof job !== 'object' || !job.active) return null;
+      if (job.phase === 'sending' && job.pauseReason === '已收到回复完成标记，但没有取得新生成的 sessionId') {
+        // 旧版已收到完成标记，只是未能从列表查到会话 ID。
+        job.phase = 'response-complete';
+      }
+      return job;
     } catch (_) { return null; }
   }
 
@@ -2132,42 +2137,27 @@ roleStateReady = true;
     throw new Error('没有获取到当前角色所选模型的 modelId/modelTemplateId；请刷新该角色页面，等待模型名称显示后再继续');
   }
 
-  function sessionIdFromStreamValue(value, depth = 0) {
-    if (!value || depth > 7) return '';
-    if (typeof value === 'object') {
-      if (value.sessionId && String(value.sessionId) !== '00000000-0000-0000-0000-000000000000') return String(value.sessionId);
-      for (const child of Array.isArray(value) ? value : Object.values(value)) {
-        const found = sessionIdFromStreamValue(child, depth + 1);
-        if (found) return found;
-      }
-    }
-    return '';
+  function hasExistingManualChatSession(characterId) {
+    const current = currentRoleContext();
+    const hasSession = value => Boolean(value && String(value) !== '00000000-0000-0000-0000-000000000000');
+    if (current.characterId === characterId && hasSession(current.sessionId)) return true;
+    return [...state.manualFavoriteChats, ...state.chatted, ...state.roleHistory].some(row =>
+      String(row.characterId) === characterId && hasSession(row.lastSessionId)
+    );
   }
 
-  async function findCreatedManualChatSession(characterId, previousSessionId = '', timeoutMs = 20000) {
-    const startedAt = Date.now();
-    while (Date.now() - startedAt < timeoutMs) {
-      const data = await requestPage(1, false);
-      const row = extractCharacterRows(data).map(normalize).find(item => String(item.characterId) === String(characterId));
-      const sessionId = String(row?.lastSessionId || '');
-      if (sessionId && sessionId !== String(previousSessionId || '')) return sessionId;
-      await wait(800);
-    }
-    return '';
-  }
-
-  async function sendManualChatViaApi(job, textarea) {
+  async function sendManualChatViaApi(job) {
     scanStoredAuthorization();
     const characterId = String(job.activeCharacterId || '');
+    if (hasExistingManualChatSession(characterId)) return false;
     const config = await resolveManualChatModelConfig(characterId);
-    const current = currentRoleContext();
-    const previousSessionId = String(current.sessionId || '');
-    const requestSessionId = previousSessionId || '00000000-0000-0000-0000-000000000000';
+    if (manualAutoChatWasStopped()) throw new ManualAutoChatPausedError('任务已暂停');
+    if (hasExistingManualChatSession(characterId)) return false;
     const headers = { Accept: 'text/event-stream', 'Content-Type': 'application/json' };
     if (authorization) headers.Authorization = authorization;
     const payload = {
       userInput: String(job.message || DEFAULT_MANUAL_AUTO_CHAT_MESSAGE),
-      sessionId: requestSessionId,
+      sessionId: '00000000-0000-0000-0000-000000000000',
       modelId: Number(config.modelId),
       modelTemplateId: Number(config.modelTemplateId),
       characterId,
@@ -2190,7 +2180,6 @@ roleStateReady = true;
     const decoder = new TextDecoder();
     let buffer = '';
     let doneReceived = false;
-    let createdSessionId = '';
     const inspectLine = line => {
       const trimmed = String(line || '').trim();
       if (!trimmed || trimmed.startsWith(':') || /^(?:event|id|retry):/i.test(trimmed)) return;
@@ -2198,7 +2187,6 @@ roleStateReady = true;
       if (dataText === '[DONE]') { doneReceived = true; return; }
       try {
         const event = JSON.parse(dataText);
-        createdSessionId = createdSessionId || sessionIdFromStreamValue(event);
         if (String(event?.type || '').toLowerCase() === 'done' || String(event?.content || '').trim() === '[DONE]') doneReceived = true;
       } catch (_) {}
     };
@@ -2216,10 +2204,7 @@ roleStateReady = true;
     }
     if (buffer) inspectLine(buffer);
     if (!doneReceived) throw new Error('EventStream 已结束，但没有收到 done/[DONE] 完成标记');
-    if (!createdSessionId) createdSessionId = await findCreatedManualChatSession(characterId, previousSessionId);
-    if (!createdSessionId) throw new Error('已收到回复完成标记，但没有取得新生成的 sessionId');
-    if (textarea) setManualChatTextareaValue(textarea, '');
-    return createdSessionId;
+    return true;
   }
 
   async function waitForManualChatResponse(job) {
@@ -2314,9 +2299,11 @@ roleStateReady = true;
     state.manualAutoChatRunning = false;
     state.manualFavoriteChatCurrentId = '';
     try { localStorage.removeItem(accountStorageKey(MANUAL_FAVORITE_CHAT_CURRENT_KEY)); } catch (_) {}
-    state.status = `一键扣数完成：成功处理 ${Number(job.completed) || 0}/${Number(job.total) || Number(job.completed) || 0} 个普通收藏角色。`;
+    const skipped = Number(job.skipped) || 0;
+    const sent = Math.max(0, (Number(job.completed) || 0) - skipped);
+    state.status = `一键扣数完成：发送 ${sent} 个，跳过已聊角色 ${skipped} 个。`;
     render();
-    showManualAutoChatToast(`所有发言已结束（${Number(job.completed) || 0}/${Number(job.total) || Number(job.completed) || 0}），请刷新页面获取最新情况。`, { tone: 'success', duration: 12000 });
+    showManualAutoChatToast(state.status, { tone: 'success', duration: 12000 });
   }
 
   async function processManualAutoChatJob() {
@@ -2342,27 +2329,18 @@ roleStateReady = true;
       }
       const current = currentRoleContext();
       if (pageWindow.location.pathname !== '/chat' || String(current.characterId) !== String(job.activeCharacterId)) {
-        job.phase = 'navigating';
         job.navigationStartedAt = Date.now();
         saveManualAutoChatJob(job);
         pageWindow.location.assign(roleUrl(job.activeCharacterId));
         return;
       }
+      if (!['response-complete', 'waiting-response', 'already-chatted'].includes(job.phase)
+        && hasExistingManualChatSession(String(job.activeCharacterId))) {
+        job.phase = 'already-chatted';
+        if (!saveManualAutoChatJob(job)) throw new Error('无法保存跳过状态');
+      }
       if (job.phase === 'sending') {
-        const composer = findManualChatComposer();
-        const messageStillInDraft = Boolean(
-          composer.textarea
-          && String(composer.textarea.value || '').trim() === String(job.message || '').trim()
-          && !current.sessionId
-          && !hasVisibleChatStopControl()
-        );
-        if (messageStillInDraft) {
-          job.phase = 'ready-to-send';
-          job.sentAt = 0;
-          if (!saveManualAutoChatJob(job)) throw new Error('无法恢复发送未生效的任务');
-        } else {
-          throw new Error('上次任务在点击发送时中断，页面状态无法确认；为避免重复发送已暂停');
-        }
+        throw new Error('上一条消息的发送结果无法确认。为避免重复发送，请先在对话中核对。');
       }
       if (job.phase === 'waiting-response') {
         const composer = findManualChatComposer();
@@ -2380,7 +2358,7 @@ roleStateReady = true;
           render();
         }
       }
-      if (job.phase !== 'waiting-response' && job.phase !== 'response-complete') {
+      if (!['waiting-response', 'response-complete', 'already-chatted'].includes(job.phase)) {
         state.status = `一键扣数 ${Number(job.completed || 0) + 1}/${job.total}：正在等待“${job.activeCharacterName || job.activeCharacterId}”的输入框……`;
         render();
         showManualAutoChatToast(`一键扣数 ${Number(job.completed || 0) + 1}/${job.total}：正在准备并发送消息…`);
@@ -2395,21 +2373,25 @@ roleStateReady = true;
         job.sentAt = Date.now();
         if (!saveManualAutoChatJob(job)) throw new Error('发送前无法保存任务状态');
         showManualAutoChatToast(`一键扣数 ${Number(job.completed || 0) + 1}/${job.total}：消息发送中，正在等待完整回复…`);
-        const createdSessionId = await sendManualChatViaApi(job, textarea);
-        job.phase = 'response-complete';
-        job.completedSessionId = createdSessionId;
-        if (!saveManualAutoChatJob(job)) throw new Error('回复完成后无法保存任务状态');
+        const sent = await sendManualChatViaApi(job);
+        job.phase = sent ? 'response-complete' : 'already-chatted';
+        if (!saveManualAutoChatJob(job)) throw new Error('无法保存当前角色的处理结果');
+        if (String(textarea.value || '') === String(job.message || DEFAULT_MANUAL_AUTO_CHAT_MESSAGE)) {
+          setManualChatTextareaValue(textarea, '');
+        }
       }
       if (job.phase === 'waiting-response') {
         state.status = `一键扣数 ${Number(job.completed || 0) + 1}/${job.total}：消息已发送，正在等待完整回复和 sessionId……`;
         render();
         showManualAutoChatToast(`一键扣数 ${Number(job.completed || 0) + 1}/${job.total}：已发送，正在等待完整回复…`);
-        job.completedSessionId = await waitForManualChatResponse(job);
-      } else {
+        await waitForManualChatResponse(job);
+      } else if (job.phase === 'response-complete') {
         state.status = `一键扣数 ${Number(job.completed || 0) + 1}/${job.total}：EventStream 已收到 done，回复完成。`;
         render();
       }
       if (manualAutoChatWasStopped()) throw new ManualAutoChatPausedError('任务已暂停');
+      const skipped = job.phase === 'already-chatted';
+      if (skipped) job.skipped = (Number(job.skipped) || 0) + 1;
       const finishedId = String(job.activeCharacterId);
       state.manualFavoriteChats = state.manualFavoriteChats.filter(row => String(row.characterId) !== finishedId);
       saveManualFavoriteChats(state.manualFavoriteChats);
@@ -2420,15 +2402,14 @@ roleStateReady = true;
       job.activeCharacterName = '';
       job.phase = 'navigating';
       job.sentAt = 0;
-      job.completedSessionId = '';
       if (!state.manualFavoriteChats.length) {
         finishManualAutoChatJob(job);
         return;
       }
       saveManualAutoChatJob(job);
-      state.status = `已完成 ${job.completed}/${job.total} 个，准备打开下一个普通收藏角色……`;
+      state.status = `已处理 ${job.completed}/${job.total} 个${skipped ? '，已跳过聊过的角色' : ''}，准备打开下一个……`;
       render();
-      await waitManualAutoChatCooldown(job);
+      if (!skipped) await waitManualAutoChatCooldown(job);
       navigateManualAutoChatToNext(job);
     } catch (error) {
       const persistedJob = loadManualAutoChatJob();
@@ -8084,10 +8065,11 @@ roleStateReady = true;
   }
 
   async function copyErrorLogs() {
+    const now = Date.now();
+    const cutoff = now - 3 * 24 * 60 * 60 * 1000;
     const rows = loadRunLogs().filter(row => {
-      const level = String(row.level || '').toLowerCase();
-      const message = String(row.message || '');
-      return ['error', 'warn'].includes(level) || /(IndexedDB|localStorage|迁移|面具库.*载入|聊天接口侦测)/i.test(message);
+      const time = Date.parse(row.time);
+      return String(row.level || '').toLowerCase() === 'error' && time >= cutoff && time <= now;
     });
     const diagnostics = [
       `脚本版本：${SCRIPT_VERSION}`,
@@ -8097,13 +8079,13 @@ roleStateReady = true;
     ].join('\n');
     const text = `${diagnostics}\n\n${formatRunLogs(rows)}`;
     if (!rows.length) {
-      state.status = '当前没有可复制的错误或存储迁移日志。';
+      state.status = '最近 3 天没有可复制的错误日志。';
       render();
       return;
     }
     try {
       await writeClipboardText(text);
-      state.status = `已复制 ${rows.length} 条反馈日志，并附带脚本版本和浏览器信息。`;
+      state.status = `已复制最近 3 天的 ${rows.length} 条错误日志。`;
     } catch (error) {
       appendRunLog('error', '复制错误日志失败', error);
       state.status = `复制错误日志失败：${explainFailure(error)}`;
