@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.88
+// @version      3.0.0-dev.89
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -18,7 +18,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.88';
+    : '3.0.0-dev.89';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -266,12 +266,27 @@
 
   function completePendingAccountSwitch(authValue = authorization) {
     const pending = pendingAccountSwitch();
-    if (!pending || pending.phase === 'logout') return;
+    if (!pending || pending.phase !== 'login') return;
     const identity = accountIdentityFromAuthorization(authValue);
-    if (identity.email && identity.email.toLowerCase() !== String(pending.email).toLowerCase()) return;
-    if (!identity.email) {
-      if (!identity.scope || !pending.sourceScope || identity.scope === pending.sourceScope) return;
-      if (pending.targetScope && pending.targetScope !== pending.sourceScope && identity.scope !== pending.targetScope) return;
+    const targetEmail = String(pending.email || '').trim().toLowerCase();
+    let mismatch = '';
+    if (identity.email) {
+      if (identity.email.toLowerCase() !== targetEmail) mismatch = `网站实际登录的是 ${identity.email}，不是目标邮箱 ${pending.email}`;
+    } else if (pending.targetScope && pending.targetScope !== pending.sourceScope) {
+      if (!identity.scope || identity.scope !== pending.targetScope) mismatch = '网站返回的账号 ID 与目标账号不一致';
+    } else {
+      mismatch = '网站登录信息里没有邮箱，而这个快捷账号还没有已确认的账号 ID，暂时无法自动证明登录的是目标账号';
+    }
+    if (mismatch) {
+      const noticeKey = `${identity.email || identity.scope || 'unknown'}|${mismatch}`;
+      if (pending.verificationNoticeKey !== noticeKey) {
+        savePendingAccountSwitch({ ...pending, verificationNoticeKey: noticeKey });
+        const message = `尚未确认切换成功：${mismatch}。请核对当前账号；确认无误后可在账号切换页点“设为当前”。`;
+        if (roleStateReady) state.status = message;
+        appendRunLog('warn', `账号切换登录后核对未通过：${mismatch}。`);
+        showManualAutoChatToast(message, { tone: 'warn', duration: 10000 });
+      }
+      return;
     }
     try { sessionStorage.removeItem(ACCOUNT_SWITCH_PENDING_KEY); } catch (_) {}
     const rows = loadAccountSwitchProfiles().map(row => row.id === pending.id ? { ...row, lastUsedAt: Date.now(), scope: identity.scope || row.scope } : row);
@@ -341,8 +356,24 @@
     return bestScore >= 4 ? best : null;
   }
 
+  function officialAccountEmailInput() {
+    const officialDialog = document.querySelector('div[role="dialog"][aria-modal="true"][data-state="open"]');
+    return officialDialog?.querySelector('input[type="email"][name="email"]')
+      || [...document.querySelectorAll('input')].find(input => input.type === 'email'
+      || /邮箱|email/i.test(`${input.placeholder || ''} ${input.name || ''} ${input.autocomplete || ''}`))
+      || null;
+  }
+
+  function stopPendingAccountSwitch(message) {
+    try { sessionStorage.removeItem(ACCOUNT_SWITCH_PENDING_KEY); } catch (_) {}
+    state.status = `切换已停止：${message}`;
+    appendRunLog('error', `账号切换已停止：${message}`);
+    showManualAutoChatToast(state.status, { tone: 'error', duration: 10000 });
+    if (panel) render();
+  }
+
   function installAccountSwitchLoginAssist() {
-    const pending = pendingAccountSwitch();
+    let pending = pendingAccountSwitch();
     if (!pending) return;
     if (pending.phase === 'logout') {
       setTimeout(() => attemptOfficialAccountLogout(pending), 200);
@@ -351,36 +382,46 @@
     let attempts = 0;
     let sawEmailInput = false;
     let emailNoticeShown = false;
-    let emailReadyAt = 0;
     const timer = setInterval(() => {
       attempts += 1;
-      const officialDialog = document.querySelector('div[role="dialog"][aria-modal="true"][data-state="open"]');
-      const emailInput = officialDialog?.querySelector('input[type="email"][name="email"]')
-        || [...document.querySelectorAll('input')].find(input => input.type === 'email'
-        || /邮箱|email/i.test(`${input.placeholder || ''} ${input.name || ''} ${input.autocomplete || ''}`));
+      const emailInput = officialAccountEmailInput();
+      if (pending.phase === 'verify-logout') {
+        const loginButton = emailInput ? null : officialLoginControl();
+        if (emailInput || loginButton) {
+          pending = { ...pending, phase: 'login', logoutVerifiedAt: Date.now() };
+          savePendingAccountSwitch(pending);
+          attempts = 0;
+          authorization = '';
+          appendRunLog('info', '刷新后已看到 Mufy 官方登录入口，确认当前账号已经退出。');
+          state.status = `已确认退出当前账号，正在准备登录“${pending.label || pending.email}”…`;
+          if (panel) render();
+          if (loginButton) {
+            loginButton.click();
+            return;
+          }
+        } else if (attempts >= 60) {
+          clearInterval(timer);
+          stopPendingAccountSwitch('官方 logout 虽返回成功，但刷新后 30 秒内没有出现登录入口，无法确认网站已经退出。请先检查当前登录状态再重试。');
+          return;
+        } else {
+          return;
+        }
+      }
       if (emailInput) {
         sawEmailInput = true;
-        if (!emailReadyAt) emailReadyAt = Date.now();
         if (String(emailInput.value || '').trim() !== String(pending.email)) {
           setWebsiteInputValue(emailInput, pending.email);
-        }
-        const form = emailInput.closest('form') || officialDialog?.querySelector('form');
-        const passwordInput = form?.querySelector('input[type="password"][name="password"],input[type="password"]');
-        const submitButton = form?.querySelector('button[type="submit"],input[type="submit"]');
-        const browserHadTimeToAutofill = emailReadyAt && Date.now() - emailReadyAt >= 1200;
-        if (passwordInput && submitButton && !submitButton.disabled
-          && (String(passwordInput.value || '').length > 0 || browserHadTimeToAutofill)) {
-          clearInterval(timer);
-          state.status = `正在通过 Mufy 官方登录表单切换到“${pending.label || pending.email}”…`;
-          showManualAutoChatToast(state.status, { tone: 'success', duration: 6000 });
-          // 走 Mufy 登录按钮自身的点击处理，避免 requestSubmit 绕过按钮绑定的表单状态同步。
-          submitButton.click();
-          return;
         }
         if (!emailNoticeShown) {
           emailNoticeShown = true;
           emailInput.focus();
-          showManualAutoChatToast(`已填入“${pending.label || pending.email}”的邮箱，正在等待 Edge 自动补全密码…`, { tone: 'info', duration: 6000 });
+          state.status = `已填入“${pending.label || pending.email}”的邮箱。请让 Edge 填入密码或手动输入，再由你点击 Mufy 官方“登录”。`;
+          showManualAutoChatToast(state.status, { tone: 'info', duration: 9000 });
+          if (panel) render();
+        }
+        if (attempts >= 90) {
+          clearInterval(timer);
+          showManualAutoChatToast('目标邮箱已经填入。为避免浏览器密码尚未同步，脚本不会自动点击登录；请核对邮箱后手动点击 Mufy 官方“登录”。', { tone: 'warn', duration: 9000 });
         }
         return;
       }
@@ -395,7 +436,7 @@
       if (attempts >= 90) {
         clearInterval(timer);
         showManualAutoChatToast(sawEmailInput
-          ? '邮箱已填入，但 Edge 没有在等待时间内补全密码，请手动选择已保存的密码并登录。'
+          ? '目标邮箱已经填入。为避免浏览器密码尚未同步，脚本不会自动点击登录；请核对邮箱后手动点击 Mufy 官方“登录”。'
           : '仍未找到 Mufy 登录邮箱框，请手动点网站“登录”；目标邮箱仍保留，可刷新后继续自动填入。', { tone: 'warn', duration: 9000 });
       }
     }, 500);
@@ -406,7 +447,7 @@
   }
 
   function finishAccountLogout(pending) {
-    const next = { ...pending, phase: 'login', logoutRequestedAt: Date.now() };
+    const next = { ...pending, phase: 'verify-logout', logoutRequestedAt: Date.now() };
     savePendingAccountSwitch(next);
     pageWindow.location.assign('/');
   }
@@ -444,7 +485,7 @@
   function switchToSavedAccount(accountId) {
     const row = loadAccountSwitchProfiles().find(item => item.id === String(accountId || ''));
     if (!row) return;
-    if (!pageWindow.confirm(`切换到“${row.label}”？\n\n脚本会退出当前 Mufy 登录并打开官方登录窗口，自动填入邮箱；密码仍由 Edge 或你本人填写。`)) return;
+    if (!pageWindow.confirm(`切换到“${row.label}”？\n\n脚本会退出当前 Mufy 登录，刷新后确认已经退出，再打开官方登录窗口并填入邮箱。密码由 Edge 或你本人填写，最后请你手动点击官方“登录”。`)) return;
     const pending = { id: row.id, email: row.email, label: row.label, targetScope: row.scope || '', sourceScope: maskAccountScope || accountIdentityFromAuthorization().scope, phase: 'logout', startedAt: Date.now() };
     savePendingAccountSwitch(pending);
     state.status = `正在切换到“${row.label}”…`;
@@ -10375,7 +10416,7 @@ roleStateReady = true;
 <li><strong>根据聊天内容找角色：</strong>进入“聊天记录”点击“搜索聊天记录”，可选择搜索所有角色或指定单个角色。单角色允许搜索 1 个字，所有角色至少需要 2 个字。结果会标记关键词；点击“打开并定位”后进入原会话，自动向上加载并尝试滚动到对应消息。</li>
 <li><strong>角色回复摘录：</strong>在角色回复里选中文字，展开该消息的省略号操作栏并点击“摘录”；不选文字时会把整条回复放进编辑框。摘录按角色组成牌组，进入“摘录/美化”选择“打开摘录”即可查看、编辑或导出；牌面样式从具体摘录牌内的“牌面样式”进入。</li>
 <li><strong>面板美化：</strong>进入“摘录/美化”选择“打开美化”，可独立调整整个助手面板的主题、背景色、强调色、文字色、透明度、字号和圆角，不会修改摘录牌样式。</li>
-<li><strong>账号快速切换：</strong>进入“账号切换”保存当前账号的邮箱与备注。切换时脚本会退出当前登录、打开 Mufy 官方登录窗口并填入目标邮箱；不会保存密码、Cookie 或登录令牌。</li>
+<li><strong>账号快速切换：</strong>进入“账号切换”保存当前账号的邮箱与备注。切换时脚本会退出当前登录，刷新确认登录入口已经出现，再打开 Mufy 官方登录窗口并填入目标邮箱；密码由 Edge 或你本人填写，最后由你手动点击官方“登录”。脚本不会保存密码、Cookie 或登录令牌。</li>
 <li><strong>模型可用性监控：</strong>在功能首页底部点击“模型监控”，勾选需要监控的模型。脚本每 5 分钟读取一次网站模型状态；悬浮按钮上方用绿、黄、红、灰色圆点分别表示流畅、拥堵、中断和暂时未知。点击状态点可查看响应时长、成功率和最后检测时间。</li>
 <li><strong>导出分享链接：</strong>点击“导出角色”，再选择“仅分享链接 TXT”。角色 JSON/CSV 也会附带已保存的分享链接；独立 TXT 会导出当前账号缓存中的全部分享链接，包括当前角色列表里已经找不到但本地仍有记录的角色。</li>
 <li><strong>收藏未聊转为链接收藏：</strong>进入“角色”→“收藏未聊”，点击“检测未记录角色”。分享链接记录按账号隔离，本账号已有记录的角色会直接跳过；其余角色严格一次处理一个：先保存分享链接，再取消原收藏，从分享链接进入并重新收藏。任务可以中断、继续或彻底取消。</li>
@@ -10480,7 +10521,7 @@ roleStateReady = true;
           </form>
           <div id="mufy-recovery-chat-result-count" class="mufy-recovery-muted">搜索结果 · 0</div>
         </div>
-        <div id="mufy-recovery-account-section" hidden><div class="mufy-recovery-section-note"><strong>账号快速切换</strong><span>一次只登录一个账号。脚本仅在本机保存邮箱与备注，不保存密码、Cookie 或登录令牌。</span></div><div id="mufy-recovery-account-current"></div><div id="mufy-recovery-account-tools"><button id="mufy-recovery-account-save">保存当前账号</button></div><div id="mufy-recovery-account-list"></div><small class="mufy-recovery-account-hint">点击“切换”后会退出当前登录、打开 Mufy 官方登录窗口并填入目标邮箱；密码仍由 Edge 自动填充或由你手动输入。</small></div>
+        <div id="mufy-recovery-account-section" hidden><div class="mufy-recovery-section-note"><strong>账号快速切换</strong><span>一次只登录一个账号。脚本仅在本机保存邮箱与备注，不保存密码、Cookie 或登录令牌。</span></div><div id="mufy-recovery-account-current"></div><div id="mufy-recovery-account-tools"><button id="mufy-recovery-account-save">保存当前账号</button></div><div id="mufy-recovery-account-list"></div><small class="mufy-recovery-account-hint">点击“切换”后会退出当前登录并刷新核验，再打开 Mufy 官方登录窗口、填入目标邮箱。密码仍由 Edge 自动填充或由你手动输入；核对邮箱后请手动点击官方“登录”。</small></div>
         <div id="mufy-recovery-material-section" hidden><div id="mufy-recovery-material-tabs"><button data-material-kind="prompt">指令库</button><button data-material-kind="extra">番外库</button></div><div id="mufy-recovery-material-tools"><button id="mufy-recovery-material-add">新增指令</button><button id="mufy-recovery-material-import">导入 JSON</button><button id="mufy-recovery-material-export">导出 JSON</button><input id="mufy-recovery-material-file" type="file" accept=".json,application/json" hidden></div><div id="mufy-recovery-material-list"></div></div>
         <div id="mufy-recovery-mask-section" hidden>
           <div id="mufy-recovery-mask-tabs"><button data-category="masks">面具 (0)</button><button data-category="library">面具库 (0)</button><button id="mufy-recovery-save-all" class="mufy-recovery-tab-action">全部存入面具库</button></div>
@@ -11261,3 +11302,4 @@ roleStateReady = true;
     mountGuard.observe(document.documentElement, { childList: true, subtree: true });
   } catch (_) {}
 })();
+
