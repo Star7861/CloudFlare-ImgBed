@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.94
+// @version      3.0.0-dev.95
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,7 +21,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.94';
+    : '3.0.0-dev.95';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -1376,7 +1376,10 @@
     }
     const currentSaved = state.accountSwitchProfiles.find(row => row.id === currentId);
     const currentBox = panel.querySelector('#mufy-recovery-account-current');
-    if (currentBox) currentBox.innerHTML = `<strong>当前账号</strong><span>${esc(currentSaved?.label || current.label || current.email || maskAccountLabel())}</span><small>${esc(currentSaved?.email || current.email || '网站令牌没有提供邮箱，可用“保存当前账号”手动填写')}</small>`;
+    if (currentBox) {
+      currentBox.hidden = Boolean(currentSaved);
+      currentBox.textContent = currentSaved ? '' : `当前账号：${current.label || current.email || maskAccountLabel()}`;
+    }
     list.innerHTML = state.accountSwitchProfiles.map(row => {
       const active = row.id === currentId;
       const hasPassword = Boolean(savedAccountPassword(row.id));
@@ -10466,7 +10469,20 @@ roleStateReady = true;
       .mufy-recovery-section-note{padding:12px 13px;border-color:#a995ff2e;border-radius:14px;background:linear-gradient(135deg,#8d73df18,#ffffff06);box-shadow:inset 0 1px #ffffff0d}.mufy-recovery-section-note strong{color:#f1edff;font-size:13px}.mufy-recovery-section-note span{color:#9d98ad}
       #mufy-recovery-panel input:not([type="checkbox"]):not([type="range"]):not([type="color"]),#mufy-recovery-panel select,#mufy-recovery-panel textarea{border-color:var(--mufy-panel-border)!important;border-radius:11px!important;background:var(--mufy-panel-input)!important;color:var(--mufy-panel-text)!important;box-shadow:inset 0 1px 4px #0002!important;outline:none}#mufy-recovery-panel input:focus,#mufy-recovery-panel select:focus,#mufy-recovery-panel textarea:focus{border-color:var(--mufy-panel-accent)!important;box-shadow:0 0 0 3px var(--mufy-panel-accent-soft)!important}
       #mufy-recovery-panel #mufy-recovery-account-email-input,#mufy-recovery-panel #mufy-recovery-account-password-input{box-sizing:border-box;width:100%;padding:10px;font-size:14px}#mufy-recovery-panel #mufy-recovery-account-current,#mufy-recovery-panel #mufy-recovery-account-mode-guide>div{background:var(--mufy-panel-surface)!important;border-color:var(--mufy-panel-border)!important;color:var(--mufy-panel-text)!important;box-shadow:inset 0 1px color-mix(in srgb,#fff 55%,transparent)}#mufy-recovery-panel #mufy-recovery-account-current span,#mufy-recovery-panel #mufy-recovery-account-mode-guide strong,#mufy-recovery-panel #mufy-recovery-account-password-title{color:var(--mufy-panel-text)!important}#mufy-recovery-panel #mufy-recovery-account-current small,#mufy-recovery-panel #mufy-recovery-account-mode-guide small,#mufy-recovery-panel #mufy-recovery-account-password-summary{color:var(--mufy-panel-muted)!important}#mufy-recovery-panel #mufy-recovery-account-password-warning{background:var(--mufy-panel-accent-soft)!important;border-color:var(--mufy-panel-border)!important;color:var(--mufy-panel-text)!important}
-      #mufy-recovery-panel #mufy-recovery-account-mode-guide{grid-template-columns:1fr!important}#mufy-recovery-panel .mufy-account-card>span{max-width:58%}#mufy-recovery-panel .mufy-account-card>span button{background:var(--mufy-panel-surface-strong)!important;border-color:var(--mufy-panel-border)!important;color:var(--mufy-panel-text)!important}#mufy-recovery-panel .mufy-account-card>span button:hover{background:var(--mufy-panel-accent-soft)!important;border-color:var(--mufy-panel-accent)!important}
+      #mufy-recovery-panel[data-section="accounts"] #mufy-recovery-account-section { order: -1; }
+      #mufy-recovery-panel #mufy-recovery-account-list { overflow: visible; padding-bottom: 0; }
+      #mufy-recovery-panel #mufy-recovery-account-tools { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; }
+      #mufy-recovery-panel #mufy-recovery-account-current { display: inline; padding: 0; border: 0; background: none !important; box-shadow: none; font-size: 11px; overflow-wrap: anywhere; }
+      #mufy-recovery-panel #mufy-recovery-account-current[hidden] { display: none; }
+      #mufy-recovery-panel #mufy-recovery-account-save { background: var(--mufy-panel-accent-button) !important; border-color: var(--mufy-panel-border) !important; color: var(--mufy-panel-text); }
+      #mufy-recovery-panel #mufy-recovery-account-mode-guide { display: block; color: var(--mufy-panel-muted); }
+      #mufy-recovery-panel #mufy-recovery-account-mode-guide summary { cursor: pointer; padding: 6px 2px; font-size: 11px; }
+      #mufy-recovery-panel #mufy-recovery-account-mode-guide > div { margin-top: 5px; }
+      #mufy-recovery-panel .mufy-account-card { flex-wrap: wrap; padding: 8px 10px; gap: 6px 10px; }
+      #mufy-recovery-panel .mufy-account-card > span { flex: 0 1 auto; margin-inline-start: auto; max-width: 100%; }
+      #mufy-recovery-panel .mufy-account-card > span button { background: var(--mufy-panel-surface-strong) !important; border-color: var(--mufy-panel-border) !important; color: var(--mufy-panel-text) !important; }
+      #mufy-recovery-panel .mufy-account-card > span button:hover,
+      #mufy-recovery-panel .mufy-account-card [data-account-switch] { background: var(--mufy-panel-accent-soft) !important; border-color: var(--mufy-panel-accent) !important; }
       #mufy-recovery-status{border-radius:11px;color:#c6bfdc}#mufy-recovery-list{border-color:#ffffff12}.mufy-recovery-row{margin:5px 0;padding:10px 9px;border:1px solid #ffffff0d;border-radius:13px;background:#ffffff05}.mufy-recovery-row:hover{border-color:#a995ff28;background:#ffffff08}.mufy-recovery-row img{border-radius:12px;box-shadow:0 5px 13px #0007}
       #mufy-recovery-model-modal,#mufy-recovery-log-modal,#mufy-recovery-export-modal{border-color:#ffffff24;border-radius:16px;background:linear-gradient(155deg,#292936f5,#17171ff8);box-shadow:0 22px 60px #000c}.mufy-model-monitor-row{border-color:#ffffff14;border-radius:12px;background:#ffffff07}.mufy-model-monitor-row:has(input:checked){border-color:#9f8bea55;background:#8d73df18}
       /* Selected theme owns every panel surface; no legacy purple/black mixing. */
@@ -10818,7 +10834,19 @@ roleStateReady = true;
           </form>
           <div id="mufy-recovery-chat-result-count" class="mufy-recovery-muted">搜索结果 · 0</div>
         </div>
-        <div id="mufy-recovery-account-section" hidden><div class="mufy-recovery-section-note"><strong>账号快速切换</strong><span>一次只登录一个账号。每个账号可独立选择登录方式；只有主动输入并保存后，助手才会知道该密码。</span></div><div id="mufy-recovery-account-mode-guide"><div><strong>官方表单 · 不保存密码</strong><small>只填邮箱；密码由 Edge 或本人交给 Mufy。脚本不记录或导出密码，也不另行发送到 Mufy 之外；没有本地保存密码的额外风险。</small></div><div><strong>接口直登 · 本机保存密码</strong><small>密码只保存在使用者自己的浏览器，直接发送给 Mufy 官方登录接口。请勿安装来源不明或被篡改的插件或脚本。</small></div></div><div id="mufy-recovery-account-current"></div><div id="mufy-recovery-account-tools"><button id="mufy-recovery-account-save">保存当前账号</button></div><div id="mufy-recovery-account-list"></div><small class="mufy-recovery-account-hint">“编辑”中上下修改登录邮箱和密码。点击“改用表单”会真正删除已存密码并弹出提示；删除快捷账号也会同步清除密码。</small></div>
+        <div id="mufy-recovery-account-section" hidden>
+          <div id="mufy-recovery-account-list"></div>
+          <div id="mufy-recovery-account-tools">
+            <span id="mufy-recovery-account-current" hidden></span>
+            <button id="mufy-recovery-account-save">保存当前账号</button>
+          </div>
+          <details id="mufy-recovery-account-mode-guide">
+            <summary>登录方式与密码说明</summary>
+            <div><strong>官方表单 · 不保存密码</strong><small>只填邮箱。密码由 Edge 或本人通过 Mufy 官方表单提交。</small></div>
+            <div><strong>接口直登 · 本机保存密码</strong><small>密码只保存在使用者自己的浏览器里，仅发送给 Mufy 官方登录接口。请勿安装来源不明或被篡改的插件或脚本，防止密码泄露。</small></div>
+            <div><small>改用表单、删除快捷账号或在编辑里点“清除已存”，都会清除对应的本机保存密码。</small></div>
+          </details>
+        </div>
         <div id="mufy-recovery-material-section" hidden><div id="mufy-recovery-material-tabs"><button data-material-kind="prompt">指令库</button><button data-material-kind="extra">番外库</button></div><div id="mufy-recovery-material-tools"><button id="mufy-recovery-material-add">新增指令</button><button id="mufy-recovery-material-import">导入 JSON</button><button id="mufy-recovery-material-export">导出 JSON</button><input id="mufy-recovery-material-file" type="file" accept=".json,application/json" hidden></div><div id="mufy-recovery-material-list"></div></div>
         <div id="mufy-recovery-mask-section" hidden>
           <div id="mufy-recovery-mask-tabs"><button data-category="masks">面具 (0)</button><button data-category="library">面具库 (0)</button><button id="mufy-recovery-save-all" class="mufy-recovery-tab-action">全部存入面具库</button></div>
