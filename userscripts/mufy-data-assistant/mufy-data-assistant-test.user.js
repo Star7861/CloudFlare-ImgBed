@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.84
+// @version      3.0.0-dev.85
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -18,7 +18,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.84';
+    : '3.0.0-dev.85';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -945,6 +945,17 @@
 
   function defaultQuoteStyle() {
     return { theme: 'tarot', background: '#29243d', textColor: '#f6f0ff', accent: '#b89cff', fontSize: 18, fontFamily: 'serif', align: 'left', showRole: true };
+  }
+
+  function effectiveQuoteStyle() {
+    const style = state.quoteStyle;
+    return style.theme === 'book'
+      ? { ...style, background: '#fff9ef', textColor: '#352824', accent: '#856556', fontFamily: 'serif', align: 'left' }
+      : style;
+  }
+
+  function bookQuoteParagraphs(text) {
+    return String(text).split(/\r?\n+/).map(paragraph => paragraph.trim()).filter(Boolean);
   }
 
   function loadQuoteCards() {
@@ -2987,10 +2998,11 @@ roleStateReady = true;
         maskStorageMode = 'indexedDB';
         maskStorageReady = true;
         cleanOrphanedMaskBindings();
-        state.status = recoveredFromPrevious
-          ? `IndexedDB 当前记录异常，已从上一版备份恢复 ${state.library.length} 个面具。`
-          : `已从 IndexedDB 载入${maskAccountLabel()}的面具库（${state.library.length} 个）。`;
-        appendRunLog('info', state.status);
+        if (recoveredFromPrevious) {
+          state.status = `IndexedDB 当前记录异常，已从上一版备份恢复 ${state.library.length} 个面具。`;
+        } else {
+          appendRunLog('info', `已从 IndexedDB 载入面具库（${state.library.length} 个）。`);
+        }
         render();
         if (state.autoSwitch) scheduleAutoMaskSwitch();
         return;
@@ -3010,8 +3022,7 @@ roleStateReady = true;
       setIndexedDbActiveMarker(scope);
       maskStorageMode = 'indexedDB';
       maskStorageReady = true;
-      state.status = `已将${maskAccountLabel()}的 ${state.library.length} 个面具迁移到 IndexedDB；旧 localStorage 主数据暂留到下次校验。`;
-      appendRunLog('info', state.status);
+      appendRunLog('info', `已将 ${state.library.length} 个面具迁移到 IndexedDB，旧数据暂留到下次校验。`);
       render();
       if (state.autoSwitch) scheduleAutoMaskSwitch();
     } catch (error) {
@@ -8653,7 +8664,16 @@ roleStateReady = true;
         ? (importedBindingCount ? `，恢复绑定 ${importedBindingCount} 条${skippedBindingCount ? `，跳过 ${skippedBindingCount} 条` : ''}` : '，未恢复角色绑定')
         : '';
       const modeText = clearExisting ? '，已清空旧面具库后导入' : '，已与原面具库合并';
-      state.status = `导入完成：读取 ${imported.length} 个面具，新增 ${additions.length} 个${modeText}；已有相同备份未重复写入${bindingText}。`;
+      const summary = `导入完成：读取 ${imported.length} 个面具，新增 ${additions.length} 个${modeText}；已有相同备份未重复写入${bindingText}。`;
+      state.status = '';
+      appendRunLog('info', summary);
+      const noticeKey = accountStorageKey('mufy-recovery-mask-first-import-notice-v1');
+      try {
+        if (!localStorage.getItem(noticeKey)) {
+          localStorage.setItem(noticeKey, '1');
+          showRecoveryNotice(`已导入面具 · 新增 ${additions.length} 个`);
+        }
+      } catch (_) {}
     } catch (error) {
       state.status = `面具导入失败：${explainFailure(error)}`;
       appendRunLog('error', '面具导入失败', error);
@@ -8754,7 +8774,9 @@ roleStateReady = true;
       <div class="mufy-recovery-info">
         <div class="mufy-recovery-row-title"><b>${index + 1}. ${esc(row.name)}</b>${old ? '<span class="mufy-recovery-old">旧记录</span>' : ''}${rowTools}</div>
         <div class="mufy-recovery-muted">作者：${esc(authorLabel(row))} ${visibilityBadge(row)}</div>
-        <div class="mufy-recovery-muted">${esc(row.lastInteracted || '时间未知')} · ${esc(row.characterId)}</div>
+        ${state.section === 'roles'
+          ? `<details class="mufy-role-record"><summary>记录详情</summary><div>${esc(row.lastInteracted || '时间未知')} · ${esc(row.characterId)}</div></details>`
+          : `<div class="mufy-recovery-muted">${esc(row.lastInteracted || '时间未知')} · ${esc(row.characterId)}</div>`}
         ${roleTagButtons(row)}
         ${matchSnippet}
         ${archiveList}
@@ -9001,7 +9023,8 @@ roleStateReady = true;
         : viewing ? (quotePreviewFlipped ? '摘录面' : '角色图面') : '角色摘录牌组';
     modal.querySelector('#mufy-recovery-quote-view-caption').textContent = hasCard ? card.characterName : '按角色浏览摘录';
     const preview = modal.querySelector('#mufy-recovery-quote-preview');
-    const style = state.quoteStyle;
+    const style = effectiveQuoteStyle();
+    const book = style.theme === 'book';
     preview.className = `mufy-quote-preview theme-${esc(style.theme)} ${quotePreviewFlipped ? 'is-flipped' : ''}`;
     preview.style.setProperty('--quote-bg', style.background);
     preview.style.setProperty('--quote-color', style.textColor);
@@ -9009,10 +9032,15 @@ roleStateReady = true;
     preview.style.setProperty('--quote-size', `${style.fontSize}px`);
     preview.style.setProperty('--quote-font', style.fontFamily === 'sans' ? 'system-ui,sans-serif' : style.fontFamily === 'mono' ? 'ui-monospace,monospace' : 'Georgia,"Noto Serif SC",serif');
     preview.style.setProperty('--quote-align', style.align);
-    preview.innerHTML = card ? `<div class="mufy-quote-card-inner"><div class="mufy-quote-card-face mufy-quote-card-image">${card.avatarUrl ? `<img src="${esc(card.avatarUrl)}" alt="${esc(card.characterName)}">` : '<div class="mufy-quote-card-image-fallback">✦</div>'}<div class="mufy-quote-card-image-shade"></div><strong>${esc(card.characterName)}</strong><small>点击翻转查看摘录</small></div><div class="mufy-quote-card-face mufy-quote-card-content">${style.showRole ? `<div class="mufy-quote-preview-role">${card.avatarUrl ? `<img src="${esc(card.avatarUrl)}" alt="">` : ''}<span>${esc(card.characterName)}</span></div>` : ''}<div class="mufy-quote-preview-text">${esc(card.text)}</div><div class="mufy-quote-preview-mark">MUFY · 摘录</div></div></div>` : '';
+    const quoteBack = book && card
+      ? `<div class="mufy-quote-book-kicker">摘录</div><div class="mufy-quote-preview-text">${bookQuoteParagraphs(card.text).map(paragraph => `<p>${esc(paragraph)}</p>`).join('')}</div>${style.showRole ? `<div class="mufy-quote-book-byline">${esc(card.characterName)}</div>` : ''}`
+      : card ? `${style.showRole ? `<div class="mufy-quote-preview-role">${card.avatarUrl ? `<img src="${esc(card.avatarUrl)}" alt="">` : ''}<span>${esc(card.characterName)}</span></div>` : ''}<div class="mufy-quote-preview-text">${esc(card.text)}</div><div class="mufy-quote-preview-mark">MUFY · 摘录</div>` : '';
+    preview.innerHTML = card ? `<div class="mufy-quote-card-inner"><div class="mufy-quote-card-face mufy-quote-card-image">${card.avatarUrl ? `<img src="${esc(card.avatarUrl)}" alt="${esc(card.characterName)}">` : '<div class="mufy-quote-card-image-fallback">✦</div>'}<div class="mufy-quote-card-image-shade"></div><strong>${esc(card.characterName)}</strong><small>点击翻转查看摘录</small></div><div class="mufy-quote-card-face mufy-quote-card-content">${quoteBack}</div></div>` : '';
     preview.setAttribute('aria-label', quotePreviewFlipped ? '翻到角色图面' : '翻到摘录面');
     modal.querySelectorAll('[data-quote-style]').forEach(control => {
       const key = control.dataset.quoteStyle;
+      control.disabled = book && ['background', 'textColor', 'accent', 'fontFamily', 'align'].includes(key);
+      control.closest('label').hidden = control.disabled;
       if (control.type === 'checkbox') control.checked = Boolean(style[key]);
       else control.value = String(style[key] ?? '');
     });
@@ -9111,52 +9139,90 @@ roleStateReady = true;
   async function exportSelectedQuoteImage() {
     const card = selectedQuoteCard();
     if (!card) return;
+    const mode = panel.querySelector('#mufy-recovery-quote-export-side').value;
+    const sides = mode === 'both' ? [false, true] : [mode === 'back' || (mode === 'current' && quotePreviewFlipped)];
+    const style = effectiveQuoteStyle();
+    try {
+      for (const back of sides) await downloadQuoteFace(card, style, back);
+    } catch (error) {
+      showRecoveryNotice(`导出摘录失败：${explainFailure(error)}`, 'error');
+    }
+  }
+
+  async function downloadQuoteFace(card, style, back) {
     const canvas = document.createElement('canvas');
     canvas.width = 900;
     canvas.height = 1400;
     const ctx = canvas.getContext('2d');
-    const style = state.quoteStyle;
-    ctx.fillStyle = style.background;
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    if (!quotePreviewFlipped) {
-      const image = await loadCanvasImage(card.avatarUrl);
-      if (image) {
-        const scale = Math.max(canvas.width / image.naturalWidth, canvas.height / image.naturalHeight);
-        const width = image.naturalWidth * scale;
-        const height = image.naturalHeight * scale;
-        ctx.drawImage(image, (canvas.width - width) / 2, (canvas.height - height) / 2, width, height);
-      }
-      const gradient = ctx.createLinearGradient(0, 650, 0, 1400);
-      gradient.addColorStop(0, 'rgba(0,0,0,0)'); gradient.addColorStop(1, 'rgba(0,0,0,.82)');
-      ctx.fillStyle = gradient; ctx.fillRect(0, 0, 900, 1400);
-      ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.font = '700 66px Georgia,serif';
-      ctx.fillText(card.characterName, 450, 1240);
-      ctx.font = '30px system-ui'; ctx.fillStyle = '#ffffffcc'; ctx.fillText('MUFY · 角色摘录牌', 450, 1305);
-    } else {
-      ctx.strokeStyle = style.accent; ctx.lineWidth = 10; ctx.strokeRect(28, 28, 844, 1344);
-      ctx.lineWidth = 2; ctx.strokeRect(52, 52, 796, 1296);
-      let fontSize = Math.max(30, Number(style.fontSize || 18) * 2.4);
-      let lines = [];
-      do {
-        ctx.font = `${fontSize}px ${style.fontFamily === 'mono' ? 'monospace' : style.fontFamily === 'sans' ? 'sans-serif' : 'serif'}`;
-        lines = canvasQuoteLines(ctx, card.text, 700);
-        if (lines.length * fontSize * 1.65 <= 1030) break;
-        fontSize -= 2;
-      } while (fontSize > 24);
-      ctx.fillStyle = style.textColor;
-      ctx.textAlign = style.align === 'center' ? 'center' : style.align === 'right' ? 'right' : 'left';
-      const x = style.align === 'center' ? 450 : style.align === 'right' ? 800 : 100;
-      const lineHeight = fontSize * 1.65;
-      let y = Math.max(190, (1400 - lines.length * lineHeight) / 2);
-      lines.forEach(line => { ctx.fillText(line, x, y); y += lineHeight; });
-      if (style.showRole) { ctx.textAlign = 'center'; ctx.fillStyle = style.accent; ctx.font = '700 36px serif'; ctx.fillText(card.characterName, 450, 115); }
-      ctx.textAlign = 'right'; ctx.font = '22px system-ui'; ctx.fillStyle = style.accent; ctx.fillText('MUFY · 摘录', 810, 1325);
+    const book = back && style.theme === 'book';
+    const bookFont = Math.max(30, Number(style.fontSize || 18) * 2.4);
+    const bookTypeface = '"Noto Serif SC", "Songti SC", SimSun, serif';
+    let bookLines = [];
+    if (book) {
+      ctx.font = `${bookFont}px ${bookTypeface}`;
+      bookLines = bookQuoteParagraphs(card.text).flatMap((paragraph, index) =>
+        [...(index ? [''] : []), ...canvasQuoteLines(ctx, `　　${paragraph}`, 700)]);
     }
-    canvas.toBlob(blob => {
-      if (!blob) return;
-      const safeName = String(card.characterName || '角色').replace(/[\\/:*?"<>|]+/g, '_');
-      downloadBlob(`${safeName}-摘录-${quotePreviewFlipped ? '文字' : '角色图'}.png`, blob);
-    }, 'image/png');
+    const pageLineCount = Math.floor(1050 / (bookFont * 1.7));
+    const pageCount = book ? Math.max(1, Math.ceil(bookLines.length / pageLineCount)) : 1;
+    const safeName = String(card.characterName || '角色').replace(/[\\/:*?"<>|]+/g, '_');
+    for (let page = 0; page < pageCount; page += 1) {
+      ctx.fillStyle = style.background;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      if (!back) {
+        const image = await loadCanvasImage(card.avatarUrl);
+        if (image) {
+          const scale = Math.max(canvas.width / image.naturalWidth, canvas.height / image.naturalHeight);
+          const width = image.naturalWidth * scale;
+          const height = image.naturalHeight * scale;
+          ctx.drawImage(image, (canvas.width - width) / 2, (canvas.height - height) / 2, width, height);
+        }
+        const gradient = ctx.createLinearGradient(0, 650, 0, 1400);
+        gradient.addColorStop(0, 'rgba(0,0,0,0)'); gradient.addColorStop(1, 'rgba(0,0,0,.82)');
+        ctx.fillStyle = gradient; ctx.fillRect(0, 0, 900, 1400);
+        ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.font = '700 66px Georgia,serif';
+        ctx.fillText(card.characterName, 450, 1240);
+        ctx.font = '30px system-ui'; ctx.fillStyle = '#ffffffcc'; ctx.fillText('MUFY · 角色摘录牌', 450, 1305);
+      } else if (book) {
+        ctx.textAlign = 'left';
+        ctx.fillStyle = style.accent;
+        ctx.font = `30px ${bookTypeface}`;
+        ctx.fillText(pageCount === 1 ? '摘录' : `摘录 · ${page + 1}/${pageCount}`, 100, 125);
+        ctx.fillStyle = style.textColor;
+        ctx.font = `${bookFont}px ${bookTypeface}`;
+        bookLines.slice(page * pageLineCount, (page + 1) * pageLineCount)
+          .forEach((line, index) => ctx.fillText(line, 100, 235 + index * bookFont * 1.7));
+        ctx.fillRect(100, 1290, 700, 1);
+        if (style.showRole) {
+          ctx.textAlign = 'right';
+          ctx.font = `32px ${bookTypeface}`;
+          ctx.fillText(card.characterName, 800, 1350);
+        }
+      } else {
+        ctx.strokeStyle = style.accent; ctx.lineWidth = 10; ctx.strokeRect(28, 28, 844, 1344);
+        ctx.lineWidth = 2; ctx.strokeRect(52, 52, 796, 1296);
+        let fontSize = Math.max(30, Number(style.fontSize || 18) * 2.4);
+        let lines = [];
+        do {
+          ctx.font = `${fontSize}px ${style.fontFamily === 'mono' ? 'monospace' : style.fontFamily === 'sans' ? 'sans-serif' : 'serif'}`;
+          lines = canvasQuoteLines(ctx, card.text, 700);
+          if (lines.length * fontSize * 1.65 <= 1030) break;
+          fontSize -= 2;
+        } while (fontSize > 24);
+        ctx.fillStyle = style.textColor;
+        ctx.textAlign = style.align === 'center' ? 'center' : style.align === 'right' ? 'right' : 'left';
+        const x = style.align === 'center' ? 450 : style.align === 'right' ? 800 : 100;
+        const lineHeight = fontSize * 1.65;
+        let y = Math.max(190, (1400 - lines.length * lineHeight) / 2);
+        lines.forEach(line => { ctx.fillText(line, x, y); y += lineHeight; });
+        if (style.showRole) { ctx.textAlign = 'center'; ctx.fillStyle = style.accent; ctx.font = '700 36px serif'; ctx.fillText(card.characterName, 450, 115); }
+        ctx.textAlign = 'right'; ctx.font = '22px system-ui'; ctx.fillStyle = style.accent; ctx.fillText('MUFY · 摘录', 810, 1325);
+      }
+      const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+      if (!blob) throw new Error('无法生成 PNG');
+      const pageSuffix = pageCount === 1 ? '' : `-${page + 1}`;
+      downloadBlob(`${safeName}-摘录-${back ? '文字' : '角色图'}${pageSuffix}.png`, blob);
+    }
   }
 
   function modelMonitorStatusClass(status) {
@@ -9509,6 +9575,8 @@ roleStateReady = true;
     const sectionNames = { roles: '角色', favorites: '收藏', chats: '聊天记录', beauty: '摘录/美化', accounts: '账号切换', materials: '素材库', masks: '面具' };
     if (sectionHome) sectionHome.hidden = state.section !== 'home';
     if (sectionNav) sectionNav.hidden = state.section === 'home';
+    panel.querySelector('#mufy-recovery-brand').hidden = state.section !== 'home';
+    panel.dataset.section = state.section;
     if (sectionTitle) sectionTitle.textContent = isRoleHistoryView
       ? '历史索引'
       : state.section === 'materials'
@@ -9611,13 +9679,13 @@ roleStateReady = true;
                 : button.dataset.category === 'siteSearch' ? state.siteSearchRows.length
                   : button.dataset.category === 'siteAuthors' ? authorGroups(state.siteSearchRows, '').length
                     : button.dataset.category === 'masks' ? state.masks.length : libraryRows.length;
-      const label = button.dataset.category === 'allRoles' ? '全部角色'
-        : button.dataset.category === 'chatted' ? '聊过的'
-          : button.dataset.category === 'chattedNotFavorite' ? '聊过未收藏'
+      const label = button.dataset.category === 'allRoles' ? '全部'
+        : button.dataset.category === 'chatted' ? '聊过'
+          : button.dataset.category === 'chattedNotFavorite' ? '未收藏'
             : button.dataset.category === 'favoriteOnly' ? '收藏未聊'
               : button.dataset.category === 'chatMatches' ? '搜索结果'
               : button.dataset.category === 'manualFavoriteChats' ? '普通待聊'
-                : button.dataset.category === 'authors' ? '作者合集'
+                : button.dataset.category === 'authors' ? '作者'
                 : button.dataset.category === 'siteSearch' ? '网站角色'
                   : button.dataset.category === 'siteAuthors' ? '网站作者'
                     : button.dataset.category === 'masks' ? '面具' : '面具库';
@@ -10062,6 +10130,32 @@ roleStateReady = true;
       #mufy-recovery-panel #mufy-recovery-chat-search-start,#mufy-recovery-panel #mufy-recovery-share-recovery-one,#mufy-recovery-panel #mufy-recovery-material-editor-save,#mufy-recovery-panel #mufy-recovery-quote-editor-save,#mufy-recovery-panel #mufy-recovery-quote-update,#mufy-recovery-panel #mufy-recovery-quote-style-entry,#mufy-recovery-panel #mufy-recovery-panel-beauty-done{background:var(--mufy-panel-accent-button)!important;border-color:var(--mufy-panel-accent)!important;color:var(--mufy-panel-accent-text)!important}
       #mufy-recovery-panel .mufy-recovery-export-head,#mufy-recovery-panel #mufy-recovery-help-head{background:var(--mufy-panel-surface-strong)!important;border-color:var(--mufy-panel-border)!important;color:var(--mufy-panel-text)!important}#mufy-recovery-panel #mufy-recovery-help-body,#mufy-recovery-panel .mufy-recovery-export-binding-option{color:var(--mufy-panel-text)!important}#mufy-recovery-panel .mufy-recovery-export-binding-hint{color:var(--mufy-panel-muted)!important}
       #mufy-recovery-panel #mufy-recovery-help{background:var(--mufy-panel-surface)!important;border-color:var(--mufy-panel-border)!important;color:var(--mufy-panel-text)!important}
+      #mufy-recovery-head #mufy-recovery-section-nav{gap:7px;padding:0;border:0}
+      #mufy-recovery-head #mufy-recovery-section-back{display:grid;place-items:center;width:27px;height:27px;padding:0!important;font-size:20px;line-height:1}
+      #mufy-recovery-head #mufy-recovery-section-title{font-size:14px;letter-spacing:0;white-space:nowrap}
+      #mufy-recovery-status:empty{display:none}
+      #mufy-recovery-panel[data-section="roles"] #mufy-recovery-controls{padding:9px 13px}
+      #mufy-recovery-panel #mufy-recovery-role-filter-row{grid-template-columns:minmax(0,1fr) minmax(0,34%)}
+      #mufy-recovery-panel #mufy-recovery-tabs{display:flex;gap:4px;overflow-x:auto;padding:0 0 3px;border-bottom:1px solid var(--mufy-panel-border)}
+      #mufy-recovery-panel #mufy-recovery-tabs button{flex:none;white-space:nowrap;background:none!important;border:0!important;border-bottom:2px solid transparent!important;border-radius:0;box-shadow:none}
+      #mufy-recovery-panel #mufy-recovery-tabs button.active{border-bottom-color:var(--mufy-panel-accent)!important;color:var(--mufy-panel-text)!important}
+      #mufy-recovery-role-section #mufy-recovery-role-actions{display:flex;flex-wrap:wrap;align-items:start}
+      #mufy-recovery-role-actions>button{flex:1;min-width:max-content}
+      #mufy-recovery-role-more{min-width:54px}
+      #mufy-recovery-role-more>summary{cursor:pointer;padding:6px 9px;border:1px solid var(--mufy-panel-border);border-radius:9px}
+      #mufy-recovery-role-more[open]{flex:1 0 100%}
+      #mufy-recovery-role-more[open]>summary{width:max-content;margin-left:auto}
+      #mufy-recovery-role-more>div{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:8px 0 0}
+      #mufy-recovery-panel[data-section="roles"] .mufy-recovery-row{margin:0;border-width:0 0 1px;border-radius:0;background:none!important}
+      .mufy-role-record{font-size:11px;color:var(--mufy-panel-muted);overflow-wrap:anywhere}
+      .mufy-role-record summary{cursor:pointer;width:max-content}
+      #mufy-recovery-panel .theme-book .mufy-quote-card-content{border:1px solid color-mix(in srgb,var(--quote-accent) 28%,transparent);box-shadow:0 6px 18px #0002;gap:10px;text-align:left;font-family:"Noto Serif SC","Songti SC",SimSun,serif;line-height:1.7}
+      .theme-book .mufy-quote-card-content::before{display:none}
+      .mufy-quote-book-kicker,.mufy-quote-book-byline{font-size:.75em;color:var(--quote-accent)}
+      .mufy-quote-book-byline{border-top:1px solid currentColor;padding-top:7px;text-align:right}
+      .theme-book .mufy-quote-preview-text p{margin:0 0 .75em;text-indent:2em}
+      .mufy-quote-export-options,.mufy-quote-export-options label{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+      .mufy-quote-export-options{justify-content:space-between;padding:8px 12px;border:1px solid var(--mufy-panel-border);border-radius:10px}
       #mufy-recovery-panel ::-webkit-scrollbar{width:7px;height:7px}#mufy-recovery-panel ::-webkit-scrollbar-track{background:transparent}#mufy-recovery-panel ::-webkit-scrollbar-thumb{border:2px solid transparent;border-radius:999px;background:#82769c;background-clip:padding-box}#mufy-recovery-panel ::-webkit-scrollbar-thumb:hover{background:#a594cb;background-clip:padding-box}
       #mufy-recovery-panel ::-webkit-scrollbar-thumb{background:var(--mufy-panel-accent)!important;background-clip:padding-box!important}#mufy-recovery-panel ::-webkit-scrollbar-thumb:hover{background:var(--mufy-panel-accent-text)!important;background-clip:padding-box!important}
       @media (max-width:520px){
@@ -10208,7 +10302,7 @@ roleStateReady = true;
     panel = document.createElement('div');
     panel.id = 'mufy-recovery-panel';
     panel.innerHTML = `<div id="mufy-recovery-resize-handle" title="上下拖动调整面板高度" aria-label="上下拖动调整面板高度"></div>
-      <div id="mufy-recovery-head"><span id="mufy-recovery-title"><span>Mufy 数据助手 <small class="mufy-recovery-version">v${DISPLAY_VERSION}</small> <small id="mufy-recovery-count">0/0</small></span><button id="mufy-recovery-help" title="使用说明" aria-label="使用说明">?</button></span><button id="mufy-recovery-log-entry" title="查看运行日志">日志</button><button id="mufy-recovery-history-entry" title="查看本账号历史角色索引">索引</button><button id="mufy-recovery-close">×</button></div>
+      <div id="mufy-recovery-head"><span id="mufy-recovery-title"><span id="mufy-recovery-section-nav" hidden><button id="mufy-recovery-section-back" aria-label="返回功能分区" title="返回功能分区">‹</button><strong id="mufy-recovery-section-title"></strong></span><span><span id="mufy-recovery-brand">Mufy 数据助手 <small class="mufy-recovery-version">v${DISPLAY_VERSION}</small></span> <small id="mufy-recovery-count">0/0</small></span><button id="mufy-recovery-help" title="使用说明" aria-label="使用说明">?</button></span><button id="mufy-recovery-log-entry" title="查看运行日志">日志</button><button id="mufy-recovery-history-entry" title="查看本账号历史角色索引">索引</button><button id="mufy-recovery-close">×</button></div>
       <div id="mufy-recovery-help-modal" hidden><div id="mufy-recovery-help-head"><strong>使用说明</strong><button id="mufy-recovery-help-close" title="关闭说明">×</button></div><div id="mufy-recovery-help-body"><ol>
 <li><strong>找回聊过的角色：</strong>打开“角色”面板，点击“找回角色链接”。可以选择完整读取或查找最新几页；读取过程中可以点击“停止找回”，之后再继续读取，已读取的数据会保留。</li>
 <li><strong>收藏趋势榜角色：</strong>打开 Mufy 趋势榜页面，再打开脚本面板。趋势榜返回的数据已经包含可靠的收藏状态，不需要点击“获取收藏状态”；直接在网页角色列表中多选要收藏的角色，点击“立即收藏”即可。收藏完成后回到“角色”区域点击“更新状态”，可核对这些角色的收藏和公开状态。</li>
@@ -10272,7 +10366,7 @@ roleStateReady = true;
             <div id="mufy-recovery-quote-stage-edit-actions">
               <button id="mufy-recovery-quote-update">修改摘录文字 <span aria-hidden="true">›</span></button>
               <button id="mufy-recovery-quote-style-entry">调整牌面样式 <span aria-hidden="true">›</span></button>
-              <button id="mufy-recovery-quote-export">导出当前牌面 PNG <span aria-hidden="true">↗</span></button>
+              <div class="mufy-quote-export-options"><label>导出范围 <select id="mufy-recovery-quote-export-side"><option value="current">当前一面</option><option value="front">仅卡面</option><option value="back">仅卡背</option><option value="both">正反两面</option></select></label><button id="mufy-recovery-quote-export">导出 PNG</button></div>
               <button id="mufy-recovery-quote-source">打开来源 <span aria-hidden="true">↗</span></button>
               <button id="mufy-recovery-quote-delete">删除这张摘录</button>
             </div>
@@ -10283,7 +10377,7 @@ roleStateReady = true;
             </div>
           </div>
           <div id="mufy-recovery-quote-style-modal" hidden><div id="mufy-recovery-quote-style">
-          <label class="mufy-quote-style-field">样式<select data-quote-style="theme"><option value="tarot">塔罗</option><option value="dark">简约深色</option><option value="paper">纸张</option><option value="rose">柔和花色</option></select></label>
+          <label class="mufy-quote-style-field">样式<select data-quote-style="theme"><option value="tarot">塔罗</option><option value="dark">简约深色</option><option value="paper">纸张</option><option value="rose">柔和花色</option><option value="book">书页 · 首行缩进</option></select></label>
           <label class="mufy-quote-style-field">字体<select data-quote-style="fontFamily"><option value="serif">衬线</option><option value="sans">简洁</option><option value="mono">等宽</option></select></label>
           <label class="mufy-quote-style-field">背景色<input data-quote-style="background" type="color"></label><label class="mufy-quote-style-field">文字色<input data-quote-style="textColor" type="color"></label>
           <label class="mufy-quote-style-field">装饰色<input data-quote-style="accent" type="color"></label><label class="mufy-quote-style-field">字号<input data-quote-style="fontSize" type="range" min="12" max="28" step="1"></label>
@@ -10295,7 +10389,6 @@ roleStateReady = true;
       <div id="mufy-recovery-material-editor" hidden><div id="mufy-recovery-material-editor-head"><strong id="mufy-recovery-material-editor-title">新增指令</strong><button id="mufy-recovery-material-editor-close" title="关闭">×</button></div><div id="mufy-recovery-material-editor-body"><label>标题<input id="mufy-recovery-material-title" maxlength="120" placeholder="例如：总结当前剧情"></label><label>内容<textarea id="mufy-recovery-material-content" maxlength="50000" placeholder="输入要填入聊天框的完整内容"></textarea></label></div><div id="mufy-recovery-material-editor-actions"><button id="mufy-recovery-material-editor-cancel">取消</button><button id="mufy-recovery-material-editor-save">保存</button></div></div>
       <div id="mufy-recovery-controls">
         <div id="mufy-recovery-section-home"><div id="mufy-recovery-section-home-head"><strong>选择功能分区</strong><small>进入后可通过返回按钮切换到其他分区</small></div><div id="mufy-recovery-section-cards"><button class="mufy-recovery-section-card" data-section="roles"><strong>角色</strong><small>找回、状态、收藏未聊、作者与标签</small></button><button class="mufy-recovery-section-card" data-section="favorites"><strong>收藏</strong><small>网页角色、普通待聊、一键扣数与收藏夹</small></button><button class="mufy-recovery-section-card" data-section="chats"><strong>聊天记录</strong><small>内容搜索与完整导出</small></button><button class="mufy-recovery-section-card" data-section="beauty"><strong>摘录/美化</strong><small>摘录牌与整体面板美化</small></button><button class="mufy-recovery-section-card" data-section="masks"><strong>面具</strong><small>面具库、编辑、绑定与导入导出</small></button><button class="mufy-recovery-section-card" data-section="accounts"><strong>账号切换</strong><small>一次登录一个账号，快速退出并填入另一个账号邮箱</small></button><button class="mufy-recovery-section-card" data-section="materials" data-material-home-kind="prompt"><strong>指令库</strong><small>保存常用指令，点击填入聊天输入框</small></button><button class="mufy-recovery-section-card" data-section="materials" data-material-home-kind="extra"><strong>番外库</strong><small>保存番外模板或内容，点击快速填入</small></button><button id="mufy-recovery-model-entry" class="mufy-recovery-section-card" title="选择并监控模型状态"><strong>模型监控</strong><small>选择模型并查看可用性、响应时间和成功率</small></button><button id="mufy-recovery-update-entry" class="mufy-recovery-section-card" title="检查并安装测试版更新"><strong>检查更新</strong><small id="mufy-recovery-update-text">当前 ${esc(SCRIPT_VERSION)} · 点击检查</small></button></div></div>
-        <div id="mufy-recovery-section-nav" hidden><button id="mufy-recovery-section-back">← 返回</button><strong id="mufy-recovery-section-title"></strong></div>
         <div id="mufy-recovery-status"></div>
         <div id="mufy-recovery-favorite-task-controls" hidden><button id="mufy-recovery-favorite-task-main">中断收藏</button><button id="mufy-recovery-favorite-task-cancel">取消任务</button></div>
         <div id="mufy-recovery-export-modal" hidden><div class="mufy-recovery-export-head"><strong>选择导出格式</strong><button id="mufy-recovery-export-close" title="关闭">×</button></div><label id="mufy-recovery-export-binding-option" class="mufy-recovery-export-binding-option" hidden><input id="mufy-recovery-export-bindings" type="checkbox" checked><span>同时导出角色的面具绑定信息</span></label><div id="mufy-recovery-export-binding-hint" class="mufy-recovery-export-binding-hint" hidden>绑定信息只支持 JSON；导入时会再询问是否恢复。</div><div class="mufy-recovery-export-options"><button data-export-format="csv">导出 CSV</button><button data-export-format="json">导出 JSON</button><button id="mufy-recovery-export-share-links" data-export-format="share-links">仅分享链接 TXT</button></div></div>
@@ -10305,10 +10398,10 @@ roleStateReady = true;
         <div id="mufy-recovery-folder-delete-modal" hidden><div id="mufy-recovery-folder-delete-head"><strong>管理 / 批量删除收藏夹</strong><button id="mufy-recovery-folder-delete-close" title="关闭">×</button></div><div id="mufy-recovery-folder-delete-summary">读取收藏夹后显示准确的角色数量。</div><label id="mufy-recovery-folder-delete-filter"><input id="mufy-recovery-folder-delete-empty-only" type="checkbox" checked>只看空收藏夹</label><div id="mufy-recovery-folder-delete-list"><div class="mufy-recovery-folder-delete-empty">尚未读取收藏夹</div></div><div id="mufy-recovery-folder-delete-actions"><button id="mufy-recovery-folder-delete-select-all">全选当前</button><button id="mufy-recovery-folder-delete-clear">清空选择</button><button id="mufy-recovery-folder-delete-empty">一键删除空夹 (0)</button><button id="mufy-recovery-folder-delete-confirm">删除已选 (0)</button></div></div>
         <div id="mufy-recovery-log-modal" hidden><div id="mufy-recovery-log-head"><span><strong>运行日志</strong><button id="mufy-recovery-copy-error-logs">复制反馈日志</button><button id="mufy-recovery-clear-logs">清除日志</button></span><button id="mufy-recovery-log-close" title="关闭">×</button></div><div id="mufy-recovery-log-output"><div class="mufy-recovery-log-empty">暂无运行日志</div></div></div>
         <div id="mufy-recovery-role-section">
-          <div id="mufy-recovery-tabs"><button class="active" data-category="allRoles">全部角色 (0)</button><button data-category="chatted">聊过的 (0)</button><button data-category="chattedNotFavorite">聊过未收藏 (0)</button><button data-category="favoriteOnly">收藏未聊 (0)</button><button data-category="authors">作者合集 (0)</button><button id="mufy-recovery-export-roles" class="mufy-recovery-tab-action">导出角色</button></div>
           <div id="mufy-recovery-role-filter-row"><input id="mufy-recovery-role-search" placeholder="搜索角色名、作者、ID或标签"><select id="mufy-recovery-status-filter" aria-label="按角色状态筛选"></select></div>
-          <div id="mufy-recovery-role-read-options"><span>读取方式</span><select id="mufy-recovery-role-read-mode" aria-label="角色读取方式"><option value="full">完整读取</option><option value="latest">查找最新几页</option></select><label>页数 <input id="mufy-recovery-role-latest-pages" type="number" min="1" max="500" value="2" aria-label="读取页数"></label><span>每页 20 个</span></div>
-          <div id="mufy-recovery-role-actions"><button id="mufy-recovery-run">找回角色链接</button><button id="mufy-recovery-refresh-status" title="更新最近一次链接读取到的角色状态和作者名称">更新状态</button></div><button id="mufy-recovery-favorite-visible" hidden>收藏当前列表</button><div id="mufy-recovery-share-recovery-controls" hidden><button id="mufy-recovery-share-recovery-one">检测全部收藏未聊</button><button id="mufy-recovery-share-recovery-cancel" hidden>取消任务</button></div>
+          <div id="mufy-recovery-tabs"><button class="active" data-category="allRoles">全部角色 (0)</button><button data-category="chatted">聊过的 (0)</button><button data-category="chattedNotFavorite">聊过未收藏 (0)</button><button data-category="favoriteOnly">收藏未聊 (0)</button><button data-category="authors">作者合集 (0)</button></div>
+          <div id="mufy-recovery-role-actions"><button id="mufy-recovery-run">找回角色链接</button><button id="mufy-recovery-refresh-status" title="更新最近一次链接读取到的角色状态和作者名称">更新状态</button><details id="mufy-recovery-role-more"><summary>更多</summary><div><div id="mufy-recovery-role-read-options"><span>读取方式</span><select id="mufy-recovery-role-read-mode" aria-label="角色读取方式"><option value="full">完整读取</option><option value="latest">查找最新几页</option></select><label>页数 <input id="mufy-recovery-role-latest-pages" type="number" min="1" max="500" value="2" aria-label="读取页数"></label><span>每页 20 个</span></div><button id="mufy-recovery-export-roles" class="mufy-recovery-tab-action">导出角色</button></div></details></div>
+          <button id="mufy-recovery-favorite-visible" hidden>收藏当前列表</button><div id="mufy-recovery-share-recovery-controls" hidden><button id="mufy-recovery-share-recovery-one">检测全部收藏未聊</button><button id="mufy-recovery-share-recovery-cancel" hidden>取消任务</button></div>
         </div>
         <div id="mufy-recovery-favorite-section" hidden>
           <div id="mufy-recovery-favorite-tabs"><button data-category="manualFavoriteChats">普通待聊 (0)</button><button data-category="siteSearch">网站角色 (0)</button><button data-category="siteAuthors">网站作者 (0)</button></div>
