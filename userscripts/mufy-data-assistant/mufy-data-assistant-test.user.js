@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.95
+// @version      3.0.0-dev.96
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,7 +21,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.95';
+    : '3.0.0-dev.96';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -619,14 +619,11 @@
   }
 
   function switchToSavedAccount(accountId) {
+    if (accountLogoutRequesting || accountDirectLoginRequesting) return;
     const row = loadAccountSwitchProfiles().find(item => item.id === String(accountId || ''));
     if (!row) return;
     const hasStoredPassword = Boolean(savedAccountPassword(row.id));
     const useDirectLogin = accountLoginMode(row) === 'direct' && hasStoredPassword;
-    const message = useDirectLogin
-      ? `切换到“${row.label}”？\n\n脚本会退出当前 Mufy 登录，刷新确认已经退出，再把此账号保存的邮箱和密码直接 POST 到 Mufy 官方 /api/users/login。密码不会写入日志或会话状态。`
-      : `切换到“${row.label}”？\n\n此账号当前使用“官方表单”模式。脚本会退出当前 Mufy 登录，刷新确认已经退出，再打开官方登录窗口并填入邮箱；密码由 Edge 或你本人提交，脚本不会保存本次密码。`;
-    if (!pageWindow.confirm(message)) return;
     const pending = { id: row.id, email: row.email, label: row.label, targetScope: row.scope || '', sourceScope: maskAccountScope || accountIdentityFromAuthorization().scope, useDirectLogin, authStorageSlot: useDirectLogin ? findAuthorizationStorageSlot() : null, phase: 'logout', startedAt: Date.now() };
     savePendingAccountSwitch(pending);
     state.status = `正在切换到“${row.label}”…`;
