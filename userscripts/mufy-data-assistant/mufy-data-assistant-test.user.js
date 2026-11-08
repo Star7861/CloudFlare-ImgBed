@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.74
+// @version      3.0.0-dev.75
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.74';
+  const SCRIPT_VERSION = '3.0.0-dev.75';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -9390,7 +9390,7 @@ roleStateReady = true;
     const sectionNav = panel.querySelector('#mufy-recovery-section-nav');
     const sectionTitle = panel.querySelector('#mufy-recovery-section-title');
     const isRoleHistoryView = state.section === 'roles' && state.active === 'roleHistory';
-    const sectionNames = { roles: '角色', favorites: '收藏', chats: '聊天记录', beauty: '美化', accounts: '账号切换', materials: '素材库', masks: '面具' };
+    const sectionNames = { roles: '角色', favorites: '收藏', chats: '聊天记录', beauty: '摘录/美化', accounts: '账号切换', materials: '素材库', masks: '面具' };
     if (sectionHome) sectionHome.hidden = state.section !== 'home';
     if (sectionNav) sectionNav.hidden = state.section === 'home';
     if (sectionTitle) sectionTitle.textContent = isRoleHistoryView
@@ -9459,7 +9459,7 @@ roleStateReady = true;
     const groups = state.active === 'authors' || state.active === 'siteAuthors' ? authorGroups(statusSource, query) : [];
     panel.querySelector('#mufy-recovery-count').textContent = state.section === 'home'
       ? '选择功能'
-      : state.section === 'beauty' ? '美化设置'
+      : state.section === 'beauty' ? '摘录/美化'
         : state.section === 'accounts' ? `${state.accountSwitchProfiles.length} 个账号`
         : state.section === 'materials' ? `${activeMaterialRows().length} 条${state.materialKind === 'extra' ? '番外' : '指令'}`
           : state.active === 'authors' || state.active === 'siteAuthors'
@@ -10053,7 +10053,7 @@ roleStateReady = true;
 <li><strong>完整导出当前聊天：</strong>进入一段已有 sessionId 的具体聊天，再到“聊天记录”点击“导出当前聊天”。脚本会直接分页读取服务器记录，按消息 ID 去重，并用服务器 total 与分页末尾双重校验；最终下载一个 ZIP，内含适合手机浏览器阅读的 HTML 和纯文字 TXT，不包含 JSON。再次点击可停止导出。</li>
 <li><strong>根据聊天内容找角色：</strong>进入“聊天记录”点击“搜索聊天记录”，可选择搜索所有角色或指定单个角色。单角色允许搜索 1 个字，所有角色至少需要 2 个字。结果会标记关键词；点击“打开并定位”后进入原会话，自动向上加载并尝试滚动到对应消息。</li>
 <li><strong>角色回复摘录：</strong>在角色回复里选中文字，展开该消息的省略号操作栏并点击“摘录”；不选文字时会把整条回复放进编辑框。摘录按角色组成牌组，进入“美化”点击摘录牌组可查看、调整卡片样式或返回原聊天位置。当前只支持角色回复，暂不处理自己的消息。</li>
-<li><strong>美化：</strong>进入“美化”可打开摘录牌组并调整牌面样式。之后新增的网站字体、背景和面板主题也会集中放在这个分区。</li>
+<li><strong>摘录/美化：</strong>进入“摘录/美化”可打开摘录牌组并调整牌面样式；整个面板的视觉美化也归在这个分区。</li>
 <li><strong>账号快速切换：</strong>进入“账号切换”保存当前账号的邮箱与备注。切换时脚本会退出当前登录、打开 Mufy 官方登录窗口并填入目标邮箱；不会保存密码、Cookie 或登录令牌。</li>
 <li><strong>模型可用性监控：</strong>在功能首页底部点击“模型监控”，勾选需要监控的模型。脚本每 5 分钟读取一次网站模型状态；悬浮按钮上方用绿、黄、红、灰色圆点分别表示流畅、拥堵、中断和暂时未知。点击状态点可查看响应时长、成功率和最后检测时间。</li>
 <li><strong>导出分享链接：</strong>点击“导出角色”，再选择“仅分享链接 TXT”。角色 JSON/CSV 也会附带已保存的分享链接；独立 TXT 会导出当前账号缓存中的全部分享链接，包括当前角色列表里已经找不到但本地仍有记录的角色。</li>
@@ -10103,7 +10103,7 @@ roleStateReady = true;
       <div id="mufy-recovery-model-modal" hidden><div id="mufy-recovery-model-head"><span><strong>模型可用性监控</strong><small id="mufy-recovery-model-summary">每 5 分钟检测一次</small></span><button id="mufy-recovery-model-close" title="关闭">×</button></div><div id="mufy-recovery-model-tools"><input id="mufy-recovery-model-search" placeholder="搜索模型名称"><button id="mufy-recovery-model-refresh">立即检测</button><label id="mufy-recovery-model-notify-label"><input id="mufy-recovery-model-notify" type="checkbox"><span id="mufy-recovery-model-notify-text">异常通知（可选）</span><small>仅在已选模型由正常变为拥堵或中断时提醒</small></label></div><div id="mufy-recovery-model-list"><div class="mufy-recovery-empty">正在读取模型状态…</div></div></div>
       <div id="mufy-recovery-material-editor" hidden><div id="mufy-recovery-material-editor-head"><strong id="mufy-recovery-material-editor-title">新增指令</strong><button id="mufy-recovery-material-editor-close" title="关闭">×</button></div><div id="mufy-recovery-material-editor-body"><label>标题<input id="mufy-recovery-material-title" maxlength="120" placeholder="例如：总结当前剧情"></label><label>内容<textarea id="mufy-recovery-material-content" maxlength="50000" placeholder="输入要填入聊天框的完整内容"></textarea></label></div><div id="mufy-recovery-material-editor-actions"><button id="mufy-recovery-material-editor-cancel">取消</button><button id="mufy-recovery-material-editor-save">保存</button></div></div>
       <div id="mufy-recovery-controls">
-        <div id="mufy-recovery-section-home"><div id="mufy-recovery-section-home-head"><strong>选择功能分区</strong><small>进入后可通过返回按钮切换到其他分区</small></div><div id="mufy-recovery-section-cards"><button class="mufy-recovery-section-card" data-section="roles"><strong>角色</strong><small>找回、状态、收藏未聊、作者与标签</small></button><button class="mufy-recovery-section-card" data-section="favorites"><strong>收藏</strong><small>网页角色、普通待聊、一键扣数与收藏夹</small></button><button class="mufy-recovery-section-card" data-section="chats"><strong>聊天记录</strong><small>内容搜索与完整导出</small></button><button class="mufy-recovery-section-card" data-section="beauty"><strong>美化</strong><small>摘录与整体界面美化</small></button><button class="mufy-recovery-section-card" data-section="masks"><strong>面具</strong><small>面具库、编辑、绑定与导入导出</small></button><button class="mufy-recovery-section-card" data-section="accounts"><strong>账号切换</strong><small>一次登录一个账号，快速退出并填入另一个账号邮箱</small></button><button class="mufy-recovery-section-card" data-section="materials" data-material-home-kind="prompt"><strong>指令库</strong><small>保存常用指令，点击填入聊天输入框</small></button><button class="mufy-recovery-section-card" data-section="materials" data-material-home-kind="extra"><strong>番外库</strong><small>保存番外模板或内容，点击快速填入</small></button><button id="mufy-recovery-model-entry" class="mufy-recovery-section-card" title="选择并监控模型状态"><strong>模型监控</strong><small>选择模型并查看可用性、响应时间和成功率</small></button><button id="mufy-recovery-update-entry" class="mufy-recovery-section-card" title="检查并安装测试版更新"><strong>检查更新</strong><small id="mufy-recovery-update-text">当前 ${esc(SCRIPT_VERSION)} · 点击检查</small></button></div></div>
+        <div id="mufy-recovery-section-home"><div id="mufy-recovery-section-home-head"><strong>选择功能分区</strong><small>进入后可通过返回按钮切换到其他分区</small></div><div id="mufy-recovery-section-cards"><button class="mufy-recovery-section-card" data-section="roles"><strong>角色</strong><small>找回、状态、收藏未聊、作者与标签</small></button><button class="mufy-recovery-section-card" data-section="favorites"><strong>收藏</strong><small>网页角色、普通待聊、一键扣数与收藏夹</small></button><button class="mufy-recovery-section-card" data-section="chats"><strong>聊天记录</strong><small>内容搜索与完整导出</small></button><button class="mufy-recovery-section-card" data-section="beauty"><strong>摘录/美化</strong><small>摘录牌与整体面板美化</small></button><button class="mufy-recovery-section-card" data-section="masks"><strong>面具</strong><small>面具库、编辑、绑定与导入导出</small></button><button class="mufy-recovery-section-card" data-section="accounts"><strong>账号切换</strong><small>一次登录一个账号，快速退出并填入另一个账号邮箱</small></button><button class="mufy-recovery-section-card" data-section="materials" data-material-home-kind="prompt"><strong>指令库</strong><small>保存常用指令，点击填入聊天输入框</small></button><button class="mufy-recovery-section-card" data-section="materials" data-material-home-kind="extra"><strong>番外库</strong><small>保存番外模板或内容，点击快速填入</small></button><button id="mufy-recovery-model-entry" class="mufy-recovery-section-card" title="选择并监控模型状态"><strong>模型监控</strong><small>选择模型并查看可用性、响应时间和成功率</small></button><button id="mufy-recovery-update-entry" class="mufy-recovery-section-card" title="检查并安装测试版更新"><strong>检查更新</strong><small id="mufy-recovery-update-text">当前 ${esc(SCRIPT_VERSION)} · 点击检查</small></button></div></div>
         <div id="mufy-recovery-section-nav" hidden><button id="mufy-recovery-section-back">← 返回</button><strong id="mufy-recovery-section-title"></strong></div>
         <div id="mufy-recovery-status"></div>
         <div id="mufy-recovery-favorite-task-controls" hidden><button id="mufy-recovery-favorite-task-main">中断收藏</button><button id="mufy-recovery-favorite-task-cancel">取消任务</button></div>
@@ -10130,7 +10130,7 @@ roleStateReady = true;
           <div id="mufy-recovery-chat-tabs"><button data-category="chatMatches">搜索结果 (0)</button></div>
           <div id="mufy-recovery-chat-tools"><button id="mufy-recovery-chat-search" title="根据聊天内容查找角色">搜索聊天记录</button><button id="mufy-recovery-export-chat" title="进入一段具体聊天后可完整导出当前会话">导出当前聊天</button></div>
         </div>
-        <div id="mufy-recovery-beauty-section" hidden><div class="mufy-recovery-section-note"><strong>摘录牌美化</strong><span>调整塔罗牌样式、字体、颜色、字号和对齐方式，并导出当前牌面。</span></div><button id="mufy-recovery-quote-entry" title="查看并美化角色摘录牌组">打开摘录牌组与美化设置</button></div>
+        <div id="mufy-recovery-beauty-section" hidden><div class="mufy-recovery-section-note"><strong>摘录/美化</strong><span>管理角色摘录牌并调整牌面样式；整个面板的视觉美化也归在这里。</span></div><button id="mufy-recovery-quote-entry" title="查看并美化角色摘录牌组">打开摘录牌组与美化设置</button></div>
         <div id="mufy-recovery-account-section" hidden><div class="mufy-recovery-section-note"><strong>账号快速切换</strong><span>一次只登录一个账号。脚本仅在本机保存邮箱与备注，不保存密码、Cookie 或登录令牌。</span></div><div id="mufy-recovery-account-current"></div><div id="mufy-recovery-account-tools"><button id="mufy-recovery-account-save">保存当前账号</button></div><div id="mufy-recovery-account-list"></div><small class="mufy-recovery-account-hint">点击“切换”后会退出当前登录、打开 Mufy 官方登录窗口并填入目标邮箱；密码仍由 Edge 自动填充或由你手动输入。</small></div>
         <div id="mufy-recovery-material-section" hidden><div id="mufy-recovery-material-tabs"><button data-material-kind="prompt">指令库</button><button data-material-kind="extra">番外库</button></div><div id="mufy-recovery-material-tools"><button id="mufy-recovery-material-add">新增指令</button><button id="mufy-recovery-material-import">导入 JSON</button><button id="mufy-recovery-material-export">导出 JSON</button><input id="mufy-recovery-material-file" type="file" accept=".json,application/json" hidden></div><div id="mufy-recovery-material-list"></div></div>
         <div id="mufy-recovery-mask-section" hidden>
