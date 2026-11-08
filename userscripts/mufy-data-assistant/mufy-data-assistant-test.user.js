@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.98
+// @version      3.0.0-dev.99
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,7 +21,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.98';
+    : '3.0.0-dev.99';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -4841,9 +4841,11 @@ roleStateReady = true;
   }
 
   function removeLocalMaskBinding(characterId) {
-    const before = state.maskBindings.length;
-    state.maskBindings = state.maskBindings.filter(row => String(row.characterId) !== String(characterId));
-    if (state.maskBindings.length !== before) persistMaskBindings();
+    const previous = state.maskBindings;
+    state.maskBindings = previous.filter(row => String(row.characterId) !== String(characterId));
+    if (state.maskBindings.length === previous.length || persistMaskBindings()) return true;
+    state.maskBindings = previous;
+    return false;
   }
 
   function currentRoleContext() {
@@ -5418,7 +5420,7 @@ roleStateReady = true;
     state.status = `正在取消角色“${character.name}”的自动面具……`;
     render();
     try {
-      removeLocalMaskBinding(character.characterId);
+      if (!removeLocalMaskBinding(character.characterId)) return;
       state.autoSwitchKey = '';
       state.status = `已取消角色“${character.name}”的${label}。`;
     } catch (error) {
@@ -5427,6 +5429,23 @@ roleStateReady = true;
       state.loading = false;
       render();
     }
+  }
+
+  function libraryMaskBindings(mask) {
+    return state.maskBindings.filter(binding => binding.libraryId
+      ? String(binding.libraryId) === String(mask.libraryId)
+      : maskMatchesBinding(mask, binding));
+  }
+
+  function unbindLibraryMask(mask) {
+    const bindings = libraryMaskBindings(mask);
+    if (!bindings.length) return;
+    const roles = bindings.map(binding => ({
+      characterId: binding.characterId,
+      name: binding.characterName || binding.characterId
+    }));
+    const character = roles.length === 1 ? roles[0] : chooseCharacter(roles);
+    if (character) unbindCharacterMask(character);
   }
 
   async function swapLibraryMask(libraryItem) {
@@ -9260,8 +9279,7 @@ roleStateReady = true;
       .find(row => String(row?.characterId || '') === context.characterId);
     return {
       ...context,
-      name: String(known?.name || document.querySelector('h1,h2')?.textContent?.trim() || '当前角色'),
-      avatarUrl: ''
+      name: String(known?.name || document.querySelector('h1,h2')?.textContent?.trim() || '当前角色')
     };
   }
 
@@ -9333,7 +9351,7 @@ roleStateReady = true;
       characterId: quoteDraftContext.characterId,
       sessionId: quoteDraftContext.sessionId,
       characterName: quoteDraftContext.name,
-      avatarUrl: quoteDraftContext.avatarUrl,
+      avatarUrl: state.quoteCards.find(card => String(card.characterId) === quoteDraftContext.characterId && card.avatarUrl)?.avatarUrl || '',
       text,
       anchor: String(quoteDraftContext.anchor || text.slice(0, 120)),
       savedAt: new Date().toISOString()
@@ -9341,7 +9359,7 @@ roleStateReady = true;
     state.quoteCards.unshift(row);
     state.quoteSelectedId = id;
     saveQuoteCards();
-    queueQuoteAvatar(row.characterId);
+    if (!row.avatarUrl) queueQuoteAvatar(row.characterId);
     panel.querySelector('#mufy-recovery-quote-editor-modal').hidden = true;
     quoteDraftContext = null;
     lastQuoteSelection = null;
@@ -9414,7 +9432,8 @@ roleStateReady = true;
   function renderQuoteLibraryModal() {
     const modal = panel?.querySelector('#mufy-recovery-quote-library-modal');
     if (!modal) return;
-    const list = modal.querySelector('#mufy-recovery-quote-list');
+    const scrollArea = modal.querySelector('#mufy-recovery-quote-list');
+    const list = modal.querySelector('#mufy-recovery-quote-decks');
     const groups = quoteCardGroups();
     const openGroup = groups.find(group => group.characterId === quoteOpenDeckId);
     if (!openGroup) quoteOpenDeckId = '';
@@ -9439,7 +9458,8 @@ roleStateReady = true;
     const styling = managing && quoteStyleOpen;
     const editing = managing && quoteInlineEditing;
     const viewing = hasCard && !managing;
-    list.hidden = hasCard;
+    scrollArea.hidden = hasCard;
+    modal.querySelector('#mufy-recovery-quote-tutorial').hidden = Boolean(quoteOpenDeckId);
     modal.querySelector('#mufy-recovery-quote-stage').hidden = !viewing;
     modal.querySelector('#mufy-recovery-quote-tools-toggle').hidden = !viewing;
     modal.querySelector('#mufy-recovery-quote-stage-close').hidden = !hasCard;
@@ -10192,6 +10212,9 @@ roleStateReady = true;
         const slotBadge = slots.length ? `<span class="mufy-recovery-site-slot" title="当前网站面具槽位">${esc(slots.join('、'))}</span>` : '';
         const boundNames = boundCharacterNames(row);
         const bindButton = `<button data-action="bind-mask" data-index="${index}">绑定自动面具</button>`;
+        const unbindButton = libraryMaskBindings(row).length
+          ? `<button data-action="unbind-library-mask" data-index="${index}">取消自动绑定</button>`
+          : '';
         return `<div class="mufy-recovery-row">
         <div class="mufy-recovery-info">
           <div class="mufy-recovery-row-title"><b>${index + 1}. ${esc(row.name)}</b><span class="mufy-recovery-mask-title-tools">${slotBadge}<button class="mufy-recovery-mask-copy" data-action="copy-mask" data-index="${index}" title="复制面具信息" aria-label="复制面具信息"><span aria-hidden="true">⧉</span></button></span></div>
@@ -10199,7 +10222,7 @@ roleStateReady = true;
           ${row.maskName ? `<div>名称：${esc(row.maskName)}</div>` : ''}
           ${boundNames ? `<div class="mufy-recovery-muted">已绑定角色：${esc(boundNames)}</div>` : ''}
           ${row.description ? `<details><summary>查看面具描述</summary><div class="mufy-recovery-detail">${esc(row.description)}</div></details>` : ''}
-          <div class="mufy-recovery-row-actions"><button data-action="edit-library-mask" data-index="${index}">编辑面具</button><button data-action="swap-mask" data-index="${index}">写入网站面具</button>${bindButton}<button data-action="remove-library" data-index="${index}">移出面具库</button></div>
+          <div class="mufy-recovery-row-actions"><button data-action="edit-library-mask" data-index="${index}">编辑面具</button><button data-action="swap-mask" data-index="${index}">写入网站面具</button>${bindButton}${unbindButton}<button data-action="remove-library" data-index="${index}">移出面具库</button></div>
         </div>
       </div>`;
       }
@@ -10481,6 +10504,12 @@ roleStateReady = true;
       #mufy-recovery-quote-style{display:grid;grid-template-columns:1fr 1fr;gap:7px}.mufy-quote-style-field{display:grid;gap:4px;color:#bbb;font-size:10px}.mufy-quote-style-field select,.mufy-quote-style-field input[type="range"]{box-sizing:border-box;width:100%;min-width:0;border:1px solid #555;border-radius:6px;background:#18181c;color:#fff;padding:5px;font:inherit}.mufy-quote-style-field input[type="color"]{box-sizing:border-box;width:100%;height:30px;border:1px solid #555;border-radius:6px;background:#18181c;padding:2px}.mufy-quote-style-check{grid-column:1/-1;display:flex;align-items:center;gap:6px;color:#ccc;font-size:11px}.mufy-quote-style-check input{accent-color:#786bd4}
       #mufy-recovery-quote-library-body{position:relative;display:block;flex:1;min-height:0;overflow:hidden;background:radial-gradient(circle at 50% 0,#39324e 0,#211f29 42%,#18181d 100%)}
       #mufy-recovery-quote-list{box-sizing:border-box;height:100%;overflow:auto;padding:14px 12px 38px;border:0;background:transparent}
+      #mufy-recovery-panel .mufy-recovery-tutorial { margin-bottom: 8px; color: var(--mufy-panel-text); }
+      #mufy-recovery-panel .mufy-recovery-tutorial[hidden] { display: none; }
+      #mufy-recovery-panel .mufy-recovery-tutorial > summary { cursor: pointer; padding: 6px 8px; border: 1px solid var(--mufy-panel-border); border-radius: 8px; background: var(--mufy-panel-surface); }
+      #mufy-recovery-panel .mufy-recovery-tutorial ol { padding-inline-start: 24px; margin-block: 8px; }
+      #mufy-recovery-panel .mufy-recovery-tutorial figure { margin: 0 0 10px; }
+      #mufy-recovery-panel .mufy-recovery-tutorial img { display: block; max-width: 100%; height: auto; margin-top: 4px; border-radius: 6px; }
       .mufy-quote-deck-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:20px 12px;padding:8px 4px 28px}
       .mufy-quote-stack{position:relative;min-width:0;height:190px;padding:0!important;border:0!important;background:transparent!important;overflow:visible;filter:drop-shadow(0 9px 10px #0008);transition:transform .2s,filter .2s}.mufy-quote-stack:hover{transform:translateY(-7px);filter:drop-shadow(0 12px 15px #8d73df66)}
       .mufy-quote-stack-layers,.mufy-quote-stack-layers:before,.mufy-quote-stack-layers:after{position:absolute;inset:8px 7px 7px;display:block;border:2px solid #8f7cc7;border-radius:11px;background:#302943;content:''}.mufy-quote-stack-layers{transform:rotate(-3.5deg) translate(-4px,1px)}.mufy-quote-stack-layers:before{inset:-3px;transform:rotate(6deg) translate(7px,-2px);background:#413657}.mufy-quote-stack-layers:after{inset:-2px;transform:rotate(2deg) translate(4px,-1px);background:#282136}
@@ -10837,7 +10866,17 @@ roleStateReady = true;
           <button id="mufy-recovery-quote-library-close" title="关闭" aria-label="关闭">×</button>
         </div>
         <div id="mufy-recovery-quote-library-body">
-          <div id="mufy-recovery-quote-list"></div>
+          <div id="mufy-recovery-quote-list">
+            <details id="mufy-recovery-quote-tutorial" class="mufy-recovery-tutorial">
+              <summary>查看图文教程</summary>
+              <ol>
+                <li><figure><figcaption>长按选中想摘录的内容</figcaption><img data-tutorial-src="https://cloudflare-imgbed-6na.pages.dev/file/1794171792532_%E5%B1%8F%E5%B9%95%E6%88%AA%E5%9B%BE_2026-11-09_042150.png" alt="长按选中想摘录的内容" loading="lazy"></figure></li>
+                <li><figure><figcaption>展开回复的操作菜单，点击「摘录」</figcaption><img data-tutorial-src="https://cloudflare-imgbed-6na.pages.dev/file/1794171916275_%E5%B1%8F%E5%B9%95%E6%88%AA%E5%9B%BE_2026-11-09_043534.png" alt="展开回复的操作菜单，点击「摘录」" loading="lazy"></figure></li>
+                <li><figure><figcaption>确认内容后点击「收藏到牌组」。想摘录整条回复，可以跳过选中文字。</figcaption><img data-tutorial-src="https://cloudflare-imgbed-6na.pages.dev/file/1794171949372_%E5%B1%8F%E5%B9%95%E6%88%AA%E5%9B%BE_2026-11-09_042217.png" alt="确认内容后点击「收藏到牌组」。想摘录整条回复，可以跳过选中文字。" loading="lazy"></figure></li>
+              </ol>
+            </details>
+            <div id="mufy-recovery-quote-decks"></div>
+          </div>
           <div id="mufy-recovery-quote-stage" hidden>
             <div id="mufy-recovery-quote-preview" role="button" tabindex="0"></div>
           </div>
@@ -10918,6 +10957,13 @@ roleStateReady = true;
           <input id="mufy-recovery-mask-search" placeholder="搜索面具名或面具 ID" hidden>
           <label id="mufy-recovery-auto-switch-label"><input id="mufy-recovery-auto-switch" type="checkbox"> 自动切换绑定面具</label>
           <div id="mufy-recovery-mask-actions"><button id="mufy-recovery-import-masks">导入面具</button><button id="mufy-recovery-export-masks">导出面具</button><button id="mufy-recovery-undo" class="mufy-recovery-tab-action" disabled>撤回上次操作</button><input id="mufy-recovery-mask-file" type="file" accept=".json,application/json" hidden></div>
+          <details class="mufy-recovery-tutorial">
+            <summary>查看图文教程</summary>
+            <ol>
+              <li><figure><figcaption>在 Mufy 网站编辑面具并保存</figcaption><img data-tutorial-src="https://cloudflare-imgbed-6na.pages.dev/file/1794171977017_%E5%B1%8F%E5%B9%95%E6%88%AA%E5%9B%BE_2026-11-09_044649.png" alt="在 Mufy 网站编辑面具并保存" loading="lazy"></figure></li>
+              <li><figure><figcaption>进入助手的面具分区，存入面具库后选择「绑定自动面具」</figcaption><img data-tutorial-src="https://cloudflare-imgbed-6na.pages.dev/file/1794172006639_%E5%B1%8F%E5%B9%95%E6%88%AA%E5%9B%BE_2026-11-09_045023.png" alt="进入助手的面具分区，存入面具库后选择「绑定自动面具」" loading="lazy"></figure></li>
+            </ol>
+          </details>
         </div>
       </div><div id="mufy-recovery-list"></div>
       <div id="mufy-recovery-site-selection-bar" hidden><span id="mufy-recovery-site-selection-count">已选 0 项</span><button id="mufy-recovery-favorite-selected-site">立即收藏 (0)</button></div>
@@ -10926,6 +10972,15 @@ roleStateReady = true;
     document.body.appendChild(panel);
     pageWindow.__mufyRecoveryPanelVersion = SCRIPT_VERSION;
     applyPanelTheme();
+    panel.querySelectorAll('.mufy-recovery-tutorial').forEach(tutorial => {
+      tutorial.addEventListener('toggle', () => {
+        if (!tutorial.open) return;
+        tutorial.querySelectorAll('img[data-tutorial-src]').forEach(img => {
+          img.src = img.dataset.tutorialSrc;
+          delete img.dataset.tutorialSrc;
+        });
+      });
+    });
 
     const resizeHandle = panel.querySelector('#mufy-recovery-resize-handle');
     const resizeHandleBottom = panel.querySelector('#mufy-recovery-resize-handle-bottom');
@@ -11510,6 +11565,7 @@ roleStateReady = true;
       if (button.dataset.action === 'swap-mask') swapLibraryMask(row);
       if (button.dataset.action === 'remove-library') removeLibraryMask(row);
       if (button.dataset.action === 'bind-mask') bindMaskToCharacter(row);
+      if (button.dataset.action === 'unbind-library-mask') unbindLibraryMask(row);
       if (button.dataset.action === 'bind-role-mask') bindRoleToMask(row);
       if (button.dataset.action === 'unbind-role-mask') unbindCharacterMask(row);
     };
