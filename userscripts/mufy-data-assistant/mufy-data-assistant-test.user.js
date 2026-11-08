@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.76
+// @version      3.0.0-dev.77
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -974,10 +974,10 @@
   }
 
   const PANEL_THEME_PRESETS = {
-    midnight: { background: '#1d1b27', accent: '#8f7be8', textColor: '#f2efff' },
-    mist: { background: '#18222c', accent: '#67a9d8', textColor: '#edf7ff' },
-    rose: { background: '#2a1c25', accent: '#d884a9', textColor: '#fff0f6' },
-    black: { background: '#101014', accent: '#b7b7c8', textColor: '#f5f5f7' }
+    midnight: { background: '#17151f', accent: '#9b87e8', textColor: '#f5f2ff' },
+    mist: { background: '#eaf4fb', accent: '#4f90bd', textColor: '#20323f' },
+    rose: { background: '#f8e8f0', accent: '#c95f91', textColor: '#3b2631' },
+    black: { background: '#111114', accent: '#b7b7c8', textColor: '#f5f5f7' }
   };
 
   function defaultPanelTheme() {
@@ -987,14 +987,17 @@
   function normalizePanelTheme(value = {}) {
     const base = defaultPanelTheme();
     const hex = (input, fallback) => /^#[0-9a-f]{6}$/i.test(String(input || '')) ? String(input) : fallback;
+    const migrated = value?.preset === 'rose' && String(value?.background || '').toLowerCase() === '#2a1c25'
+      ? { ...value, ...PANEL_THEME_PRESETS.rose }
+      : value;
     return {
-      preset: Object.prototype.hasOwnProperty.call(PANEL_THEME_PRESETS, value.preset) ? String(value.preset) : 'custom',
-      background: hex(value.background, base.background),
-      accent: hex(value.accent, base.accent),
-      textColor: hex(value.textColor, base.textColor),
-      opacity: Math.max(72, Math.min(100, Number(value.opacity) || base.opacity)),
-      fontSize: Math.max(11, Math.min(17, Number(value.fontSize) || base.fontSize)),
-      radius: Math.max(0, Math.min(28, Number.isFinite(Number(value.radius)) ? Number(value.radius) : base.radius))
+      preset: Object.prototype.hasOwnProperty.call(PANEL_THEME_PRESETS, migrated.preset) ? String(migrated.preset) : 'custom',
+      background: hex(migrated.background, base.background),
+      accent: hex(migrated.accent, base.accent),
+      textColor: hex(migrated.textColor, base.textColor),
+      opacity: Math.max(72, Math.min(100, Number(migrated.opacity) || base.opacity)),
+      fontSize: Math.max(11, Math.min(17, Number(migrated.fontSize) || base.fontSize)),
+      radius: Math.max(0, Math.min(28, Number.isFinite(Number(migrated.radius)) ? Number(migrated.radius) : base.radius))
     };
   }
 
@@ -1007,22 +1010,39 @@
     try { localStorage.setItem(PANEL_THEME_KEY, JSON.stringify(state.panelTheme)); } catch (_) {}
   }
 
-  function panelThemeRgba(hex, opacity) {
+  function panelThemeRgb(hex) {
     const value = String(hex || '').replace('#', '');
     const number = Number.parseInt(value, 16);
-    const red = number >> 16 & 255;
-    const green = number >> 8 & 255;
-    const blue = number & 255;
-    return `rgba(${red},${green},${blue},${Math.max(0.72, Math.min(1, Number(opacity) / 100))})`;
+    return { red: number >> 16 & 255, green: number >> 8 & 255, blue: number & 255 };
+  }
+
+  function panelThemeRgba(hex, opacity) {
+    const { red, green, blue } = panelThemeRgb(hex);
+    return `rgba(${red},${green},${blue},${Math.max(0, Math.min(1, Number(opacity)))})`;
   }
 
   function applyPanelTheme() {
     if (!panel) return;
     const theme = normalizePanelTheme(state.panelTheme);
     state.panelTheme = theme;
+    const backgroundRgb = panelThemeRgb(theme.background);
+    const luminance = (0.2126 * backgroundRgb.red + 0.7152 * backgroundRgb.green + 0.0722 * backgroundRgb.blue) / 255;
+    const light = luminance >= 0.58;
+    const layerStrength = (theme.opacity - 72) / 28;
+    const surfaceAlpha = light ? 0.24 + layerStrength * 0.34 : 0.035 + layerStrength * 0.08;
+    const strongAlpha = light ? 0.48 + layerStrength * 0.32 : 0.075 + layerStrength * 0.1;
+    const layerColor = light ? '#ffffff' : '#ffffff';
     panel.style.setProperty('--mufy-panel-accent', theme.accent);
     panel.style.setProperty('--mufy-panel-text', theme.textColor);
-    panel.style.background = panelThemeRgba(theme.background, theme.opacity);
+    panel.style.setProperty('--mufy-panel-bg', theme.background);
+    panel.style.setProperty('--mufy-panel-muted', panelThemeRgba(theme.textColor, 0.68));
+    panel.style.setProperty('--mufy-panel-surface', panelThemeRgba(layerColor, surfaceAlpha));
+    panel.style.setProperty('--mufy-panel-surface-strong', panelThemeRgba(layerColor, strongAlpha));
+    panel.style.setProperty('--mufy-panel-input', light ? 'rgba(255,255,255,.72)' : 'rgba(0,0,0,.28)');
+    panel.style.setProperty('--mufy-panel-border', panelThemeRgba(theme.textColor, light ? 0.14 : 0.16));
+    panel.style.setProperty('--mufy-panel-accent-soft', panelThemeRgba(theme.accent, light ? 0.2 : 0.26));
+    panel.dataset.panelTone = light ? 'light' : 'dark';
+    panel.style.background = theme.background;
     panel.style.color = theme.textColor;
     panel.style.fontSize = `${theme.fontSize}px`;
     panel.style.borderRadius = `${theme.radius}px`;
@@ -1038,7 +1058,7 @@
       if (control && document.activeElement !== control) control.value = String(value);
     });
     const summary = panel.querySelector('#mufy-recovery-panel-beauty-summary');
-    if (summary) summary.textContent = `透明度 ${theme.opacity}% · 字号 ${theme.fontSize}px · 圆角 ${theme.radius}px`;
+    if (summary) summary.textContent = `卡片层次 ${theme.opacity}% · 字号 ${theme.fontSize}px · 圆角 ${theme.radius}px`;
   }
 
   function contentPreview(value, maxLength = 260) {
@@ -9957,21 +9977,28 @@ roleStateReady = true;
       #mufy-recovery-quote-inline-editor{position:relative;z-index:2;box-sizing:border-box;flex:1;min-height:0;width:100%;resize:none;overflow-y:auto;border:1px dashed var(--quote-accent);border-radius:8px;background:#0000001f;color:var(--quote-color);padding:7px;font:inherit;line-height:inherit;text-align:inherit;outline:none}#mufy-recovery-quote-inline-editor:focus{box-shadow:0 0 0 2px color-mix(in srgb,var(--quote-accent) 35%,transparent)}
       #mufy-recovery-quote-stage-edit-actions{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin:8px 0}#mufy-recovery-quote-update{background:#62539a!important;border-color:#8878c5!important}#mufy-recovery-quote-style-entry{border-color:#907cc5!important;color:#e5dbff!important}#mufy-recovery-quote-card-actions{grid-template-columns:repeat(3,1fr);margin-top:8px}
       /* 3.0 premium visual layer */
-      #mufy-recovery-panel{background:linear-gradient(155deg,rgba(31,31,42,.97),rgba(18,18,25,.98) 62%,rgba(24,21,34,.98));border-color:#ffffff24;border-radius:18px;box-shadow:0 24px 70px #000b,inset 0 1px #ffffff14;backdrop-filter:blur(22px) saturate(1.2)}
+      #mufy-recovery-panel{background:var(--mufy-panel-bg,#17151f);border-color:var(--mufy-panel-border,#ffffff24);border-radius:18px;box-shadow:0 24px 70px #0008,inset 0 1px #ffffff14;backdrop-filter:blur(22px) saturate(1.08)}
       #mufy-recovery-head{min-height:38px;padding:10px 13px 8px;background:linear-gradient(90deg,#ffffff0d,#8f7bff12,#ffffff08);border-bottom:1px solid #ffffff12;border-radius:18px 18px 0 0}#mufy-recovery-title>span{font-size:14px;letter-spacing:.01em}.mufy-recovery-version{color:#d9c7ff}
       #mufy-recovery-head #mufy-recovery-log-entry,#mufy-recovery-head #mufy-recovery-history-entry{border-color:#ffffff24!important;border-radius:999px!important;background:#ffffff0a!important;color:#d9d6e7!important;box-shadow:inset 0 1px #ffffff12}
       #mufy-recovery-controls{gap:10px;padding:12px 13px;background:linear-gradient(180deg,#ffffff03,transparent)}
       #mufy-recovery-panel button{border-color:#ffffff20;border-radius:10px;background:linear-gradient(180deg,#ffffff12,#ffffff07);color:#eeedf6;box-shadow:inset 0 1px #ffffff12,0 3px 10px #0002;transition:transform .16s ease,border-color .16s ease,background .16s ease,box-shadow .16s ease}#mufy-recovery-panel button:hover{border-color:#a995ff77;background:linear-gradient(180deg,#a995ff25,#7c67d918);box-shadow:0 6px 18px #0004,0 0 0 1px #a995ff1f}#mufy-recovery-panel button:active{transform:translateY(1px) scale(.99)}
-      #mufy-recovery-panel button.active,#mufy-recovery-panel .mufy-recovery-section-card:first-child{background:color-mix(in srgb,var(--mufy-panel-accent,#8f7be8) 46%,#222)!important;border-color:color-mix(in srgb,var(--mufy-panel-accent,#8f7be8) 72%,transparent)!important}#mufy-recovery-panel #mufy-recovery-head{border-bottom-color:color-mix(in srgb,var(--mufy-panel-accent,#8f7be8) 24%,transparent)}
+      #mufy-recovery-panel button.active,#mufy-recovery-panel .mufy-recovery-section-card:first-child{background:var(--mufy-panel-accent-soft)!important;border-color:color-mix(in srgb,var(--mufy-panel-accent,#8f7be8) 72%,transparent)!important}#mufy-recovery-panel #mufy-recovery-head{border-bottom-color:color-mix(in srgb,var(--mufy-panel-accent,#8f7be8) 24%,transparent)}
       #mufy-recovery-panel #mufy-recovery-title>span,#mufy-recovery-panel #mufy-recovery-section-title,#mufy-recovery-panel .mufy-recovery-row>div>strong,#mufy-recovery-panel .mufy-recovery-section-note strong,#mufy-recovery-panel .mufy-beauty-launch strong{color:var(--mufy-panel-text,#f2efff)!important}
       #mufy-recovery-section-home{gap:13px;padding:6px 2px 10px}#mufy-recovery-section-home-head{padding:4px 5px 1px}#mufy-recovery-section-home-head strong{font-size:17px;letter-spacing:.02em}#mufy-recovery-section-home-head small{color:#8e8a9e}
-      #mufy-recovery-section-cards{gap:10px}.mufy-recovery-section-card{position:relative;min-height:86px!important;overflow:hidden;border-color:#ffffff18!important;border-radius:15px!important;background:linear-gradient(145deg,#ffffff0d,#ffffff05)!important;box-shadow:inset 0 1px #ffffff12,0 10px 24px #0003!important}.mufy-recovery-section-card:before{content:'';position:absolute;inset:0;background:radial-gradient(circle at 12% 0,#a58cff20,transparent 45%);pointer-events:none}.mufy-recovery-section-card:hover{transform:translateY(-2px);border-color:#a995ff66!important}.mufy-recovery-section-card strong{position:relative;font-size:14px}.mufy-recovery-section-card small{position:relative;color:#9d99aa}.mufy-recovery-section-card:first-child{background:linear-gradient(145deg,#5c4b8c66,#2d294250)!important;border-color:#9f8bea55!important}
+      #mufy-recovery-section-cards{gap:10px}.mufy-recovery-section-card{position:relative;min-height:86px!important;overflow:hidden;border-color:var(--mufy-panel-border)!important;border-radius:15px!important;background:var(--mufy-panel-surface)!important;box-shadow:inset 0 1px #ffffff12,0 10px 24px #0002!important}.mufy-recovery-section-card:before{content:'';position:absolute;inset:0;background:radial-gradient(circle at 12% 0,var(--mufy-panel-accent-soft),transparent 48%);pointer-events:none}.mufy-recovery-section-card:hover{transform:translateY(-2px);border-color:var(--mufy-panel-accent)!important}.mufy-recovery-section-card strong{position:relative;font-size:14px}.mufy-recovery-section-card small{position:relative;color:var(--mufy-panel-muted)}.mufy-recovery-section-card:first-child{background:var(--mufy-panel-accent-soft)!important;border-color:var(--mufy-panel-accent)!important}
       #mufy-recovery-update-entry.has-update{border-color:#61c99588!important;background:linear-gradient(145deg,#225a4166,#242c3250)!important;box-shadow:inset 0 1px #baffd022,0 0 22px #42c78322!important}#mufy-recovery-update-entry.has-update strong{color:#bfffd8}#mufy-recovery-update-entry.has-update small{color:#8de8b2}
       #mufy-recovery-section-nav{padding:1px 0 9px;border-color:#ffffff12}#mufy-recovery-section-back{border-radius:999px!important;background:#ffffff09!important}#mufy-recovery-section-title{font-size:16px;letter-spacing:.04em}
       .mufy-recovery-section-note{padding:12px 13px;border-color:#a995ff2e;border-radius:14px;background:linear-gradient(135deg,#8d73df18,#ffffff06);box-shadow:inset 0 1px #ffffff0d}.mufy-recovery-section-note strong{color:#f1edff;font-size:13px}.mufy-recovery-section-note span{color:#9d98ad}
-      #mufy-recovery-panel input:not([type="checkbox"]):not([type="range"]):not([type="color"]),#mufy-recovery-panel select,#mufy-recovery-panel textarea{border-color:#ffffff20!important;border-radius:11px!important;background:#0e0e15b8!important;color:#f4f2fb!important;box-shadow:inset 0 1px 4px #0006!important;outline:none}#mufy-recovery-panel input:focus,#mufy-recovery-panel select:focus,#mufy-recovery-panel textarea:focus{border-color:#9f8bea88!important;box-shadow:0 0 0 3px #8d73df1e,inset 0 1px 4px #0006!important}
+      #mufy-recovery-panel input:not([type="checkbox"]):not([type="range"]):not([type="color"]),#mufy-recovery-panel select,#mufy-recovery-panel textarea{border-color:var(--mufy-panel-border)!important;border-radius:11px!important;background:var(--mufy-panel-input)!important;color:var(--mufy-panel-text)!important;box-shadow:inset 0 1px 4px #0002!important;outline:none}#mufy-recovery-panel input:focus,#mufy-recovery-panel select:focus,#mufy-recovery-panel textarea:focus{border-color:var(--mufy-panel-accent)!important;box-shadow:0 0 0 3px var(--mufy-panel-accent-soft)!important}
       #mufy-recovery-status{border-radius:11px;color:#c6bfdc}#mufy-recovery-list{border-color:#ffffff12}.mufy-recovery-row{margin:5px 0;padding:10px 9px;border:1px solid #ffffff0d;border-radius:13px;background:#ffffff05}.mufy-recovery-row:hover{border-color:#a995ff28;background:#ffffff08}.mufy-recovery-row img{border-radius:12px;box-shadow:0 5px 13px #0007}
       #mufy-recovery-model-modal,#mufy-recovery-log-modal,#mufy-recovery-export-modal,#mufy-recovery-chat-search-modal{border-color:#ffffff24;border-radius:16px;background:linear-gradient(155deg,#292936f5,#17171ff8);box-shadow:0 22px 60px #000c}.mufy-model-monitor-row{border-color:#ffffff14;border-radius:12px;background:#ffffff07}.mufy-model-monitor-row:has(input:checked){border-color:#9f8bea55;background:#8d73df18}
+      /* Selected theme owns every panel surface; no legacy purple/black mixing. */
+      #mufy-recovery-panel #mufy-recovery-head,#mufy-recovery-panel .mufy-recovery-section-note,#mufy-recovery-panel .mufy-recovery-section-card,#mufy-recovery-panel .mufy-beauty-launch,#mufy-recovery-panel .mufy-account-card,#mufy-recovery-panel .mufy-material-card,#mufy-recovery-panel .mufy-recovery-row,#mufy-recovery-panel .mufy-model-monitor-row{background:var(--mufy-panel-surface)!important;border-color:var(--mufy-panel-border)!important;color:var(--mufy-panel-text)!important}
+      #mufy-recovery-panel #mufy-recovery-head,#mufy-recovery-panel #mufy-recovery-panel-beauty-head,#mufy-recovery-panel .mufy-quote-modal-head,#mufy-recovery-panel #mufy-recovery-material-editor-head,#mufy-recovery-panel #mufy-recovery-model-head{background:var(--mufy-panel-surface-strong)!important;border-color:var(--mufy-panel-border)!important}
+      #mufy-recovery-panel #mufy-recovery-panel-beauty-modal,#mufy-recovery-panel #mufy-recovery-model-modal,#mufy-recovery-panel #mufy-recovery-log-modal,#mufy-recovery-panel #mufy-recovery-export-modal,#mufy-recovery-panel #mufy-recovery-chat-search-modal,#mufy-recovery-panel #mufy-recovery-material-editor,#mufy-recovery-panel #mufy-recovery-quote-editor-modal,#mufy-recovery-panel #mufy-recovery-quote-library-modal,#mufy-recovery-panel #mufy-recovery-quote-style-modal{background:var(--mufy-panel-bg)!important;border-color:var(--mufy-panel-border)!important;color:var(--mufy-panel-text)!important}
+      #mufy-recovery-panel button{color:var(--mufy-panel-text)}#mufy-recovery-panel button.active,#mufy-recovery-panel .mufy-recovery-section-card:first-child{background:var(--mufy-panel-accent-soft)!important;border-color:var(--mufy-panel-accent)!important}
+      #mufy-recovery-panel small,#mufy-recovery-panel .mufy-recovery-muted,#mufy-recovery-panel .mufy-recovery-section-card small,#mufy-recovery-panel .mufy-recovery-section-note span,#mufy-recovery-panel .mufy-beauty-launch small,#mufy-recovery-panel-beauty-fields label{color:var(--mufy-panel-muted)!important}
+      #mufy-recovery-panel[data-panel-tone="light"]{box-shadow:0 24px 60px #4b2b3b2b,inset 0 1px #fff}#mufy-recovery-panel[data-panel-tone="light"] button{box-shadow:inset 0 1px #fff8,0 3px 10px #56324512}#mufy-recovery-panel[data-panel-tone="light"] #mufy-recovery-title,#mufy-recovery-panel[data-panel-tone="light"] strong{color:var(--mufy-panel-text)}
       #mufy-recovery-panel ::-webkit-scrollbar{width:7px;height:7px}#mufy-recovery-panel ::-webkit-scrollbar-track{background:transparent}#mufy-recovery-panel ::-webkit-scrollbar-thumb{border:2px solid transparent;border-radius:999px;background:#82769c;background-clip:padding-box}#mufy-recovery-panel ::-webkit-scrollbar-thumb:hover{background:#a594cb;background-clip:padding-box}
       @media (max-width:520px){
         #mufy-recovery-panel{right:8px;bottom:58px;width:calc(100vw - 16px);max-width:calc(100vw - 16px)}
@@ -10175,7 +10202,7 @@ roleStateReady = true;
           <label class="mufy-quote-style-field">对齐<select data-quote-style="align"><option value="left">左对齐</option><option value="center">居中</option><option value="right">右对齐</option></select></label><label class="mufy-quote-style-check"><input data-quote-style="showRole" type="checkbox">显示角色名称</label>
         </div></div></div>
       </div>
-      <div id="mufy-recovery-panel-beauty-modal" hidden><div id="mufy-recovery-panel-beauty-head"><span><strong>面板美化</strong><small id="mufy-recovery-panel-beauty-summary">调整整个助手面板</small></span><button id="mufy-recovery-panel-beauty-close" title="关闭">×</button></div><div id="mufy-recovery-panel-beauty-fields"><label>主题预设<select data-panel-theme="preset"><option value="midnight">深夜紫</option><option value="mist">雾蓝</option><option value="rose">柔雾玫瑰</option><option value="black">纯黑</option><option value="custom">自定义</option></select></label><label>面板背景<input data-panel-theme="background" type="color"></label><label>强调色<input data-panel-theme="accent" type="color"></label><label>文字色<input data-panel-theme="textColor" type="color"></label><label>背景透明度<input data-panel-theme="opacity" type="range" min="72" max="100" step="1"></label><label>整体字号<input data-panel-theme="fontSize" type="range" min="11" max="17" step="1"></label><label>面板圆角<input data-panel-theme="radius" type="range" min="0" max="28" step="1"></label></div><div id="mufy-recovery-panel-beauty-actions"><button id="mufy-recovery-panel-beauty-reset">恢复默认</button><button id="mufy-recovery-panel-beauty-done">完成</button></div></div>
+      <div id="mufy-recovery-panel-beauty-modal" hidden><div id="mufy-recovery-panel-beauty-head"><span><strong>面板美化</strong><small id="mufy-recovery-panel-beauty-summary">调整整个助手面板</small></span><button id="mufy-recovery-panel-beauty-close" title="关闭">×</button></div><div id="mufy-recovery-panel-beauty-fields"><label>主题预设<select data-panel-theme="preset"><option value="midnight">深夜</option><option value="mist">浅雾蓝</option><option value="rose">浅雾粉</option><option value="black">纯黑</option><option value="custom">自定义</option></select></label><label>面板背景<input data-panel-theme="background" type="color"></label><label>强调色<input data-panel-theme="accent" type="color"></label><label>文字色<input data-panel-theme="textColor" type="color"></label><label>卡片层次<input data-panel-theme="opacity" type="range" min="72" max="100" step="1"></label><label>整体字号<input data-panel-theme="fontSize" type="range" min="11" max="17" step="1"></label><label>面板圆角<input data-panel-theme="radius" type="range" min="0" max="28" step="1"></label></div><div id="mufy-recovery-panel-beauty-actions"><button id="mufy-recovery-panel-beauty-reset">恢复默认</button><button id="mufy-recovery-panel-beauty-done">完成</button></div></div>
       <div id="mufy-recovery-model-modal" hidden><div id="mufy-recovery-model-head"><span><strong>模型可用性监控</strong><small id="mufy-recovery-model-summary">每 5 分钟检测一次</small></span><button id="mufy-recovery-model-close" title="关闭">×</button></div><div id="mufy-recovery-model-tools"><input id="mufy-recovery-model-search" placeholder="搜索模型名称"><button id="mufy-recovery-model-refresh">立即检测</button><label id="mufy-recovery-model-notify-label"><input id="mufy-recovery-model-notify" type="checkbox"><span id="mufy-recovery-model-notify-text">异常通知（可选）</span><small>仅在已选模型由正常变为拥堵或中断时提醒</small></label></div><div id="mufy-recovery-model-list"><div class="mufy-recovery-empty">正在读取模型状态…</div></div></div>
       <div id="mufy-recovery-material-editor" hidden><div id="mufy-recovery-material-editor-head"><strong id="mufy-recovery-material-editor-title">新增指令</strong><button id="mufy-recovery-material-editor-close" title="关闭">×</button></div><div id="mufy-recovery-material-editor-body"><label>标题<input id="mufy-recovery-material-title" maxlength="120" placeholder="例如：总结当前剧情"></label><label>内容<textarea id="mufy-recovery-material-content" maxlength="50000" placeholder="输入要填入聊天框的完整内容"></textarea></label></div><div id="mufy-recovery-material-editor-actions"><button id="mufy-recovery-material-editor-cancel">取消</button><button id="mufy-recovery-material-editor-save">保存</button></div></div>
       <div id="mufy-recovery-controls">
