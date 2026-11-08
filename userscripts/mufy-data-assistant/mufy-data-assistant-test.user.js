@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.99
+// @version      3.0.0-dev.100
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,7 +21,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.99';
+    : '3.0.0-dev.100';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -9432,8 +9432,7 @@ roleStateReady = true;
   function renderQuoteLibraryModal() {
     const modal = panel?.querySelector('#mufy-recovery-quote-library-modal');
     if (!modal) return;
-    const scrollArea = modal.querySelector('#mufy-recovery-quote-list');
-    const list = modal.querySelector('#mufy-recovery-quote-decks');
+    const list = modal.querySelector('#mufy-recovery-quote-list');
     const groups = quoteCardGroups();
     const openGroup = groups.find(group => group.characterId === quoteOpenDeckId);
     if (!openGroup) quoteOpenDeckId = '';
@@ -9458,8 +9457,7 @@ roleStateReady = true;
     const styling = managing && quoteStyleOpen;
     const editing = managing && quoteInlineEditing;
     const viewing = hasCard && !managing;
-    scrollArea.hidden = hasCard;
-    modal.querySelector('#mufy-recovery-quote-tutorial').hidden = Boolean(quoteOpenDeckId);
+    list.hidden = hasCard;
     modal.querySelector('#mufy-recovery-quote-stage').hidden = !viewing;
     modal.querySelector('#mufy-recovery-quote-tools-toggle').hidden = !viewing;
     modal.querySelector('#mufy-recovery-quote-stage-close').hidden = !hasCard;
@@ -10217,12 +10215,12 @@ roleStateReady = true;
           : '';
         return `<div class="mufy-recovery-row">
         <div class="mufy-recovery-info">
-          <div class="mufy-recovery-row-title"><b>${index + 1}. ${esc(row.name)}</b><span class="mufy-recovery-mask-title-tools">${slotBadge}<button class="mufy-recovery-mask-copy" data-action="copy-mask" data-index="${index}" title="复制面具信息" aria-label="复制面具信息"><span aria-hidden="true">⧉</span></button></span></div>
+          <div class="mufy-recovery-row-title"><b>${index + 1}. ${esc(row.name)}</b><span class="mufy-recovery-mask-title-tools">${slotBadge}<button class="mufy-recovery-mask-copy" data-action="copy-mask" data-index="${index}" title="复制面具信息" aria-label="复制面具信息"><span aria-hidden="true">⧉</span></button><button type="button" class="mufy-recovery-mask-remove" data-action="remove-library" data-index="${index}" title="移出面具库" aria-label="移出面具库"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5"/></svg></button></span></div>
           <div class="mufy-recovery-muted">来源面具 ID：${esc(row.sourceMaskId || '未知')} · 保存于 ${esc(row.storedAt || '未知时间')}</div>
           ${row.maskName ? `<div>名称：${esc(row.maskName)}</div>` : ''}
           ${boundNames ? `<div class="mufy-recovery-muted">已绑定角色：${esc(boundNames)}</div>` : ''}
           ${row.description ? `<details><summary>查看面具描述</summary><div class="mufy-recovery-detail">${esc(row.description)}</div></details>` : ''}
-          <div class="mufy-recovery-row-actions"><button data-action="edit-library-mask" data-index="${index}">编辑面具</button><button data-action="swap-mask" data-index="${index}">写入网站面具</button>${bindButton}${unbindButton}<button data-action="remove-library" data-index="${index}">移出面具库</button></div>
+          <div class="mufy-recovery-row-actions"><button data-action="edit-library-mask" data-index="${index}">编辑面具</button><button data-action="swap-mask" data-index="${index}">写入网站面具</button>${bindButton}${unbindButton}</div>
         </div>
       </div>`;
       }
@@ -10438,6 +10436,9 @@ roleStateReady = true;
       .mufy-recovery-mask-title-tools{margin-left:auto;display:inline-flex;align-items:center;gap:4px;flex:none}
       .mufy-recovery-mask-copy{flex:none;width:25px!important;height:25px!important;padding:0!important;display:inline-flex!important;align-items:center;justify-content:center;border:0!important;border-radius:6px!important;background:transparent!important;color:#bdbdc7!important;font:700 18px/1 system-ui!important}
       .mufy-recovery-mask-copy:hover,.mufy-recovery-mask-copy:active{background:#ffffff14!important;color:#fff!important}
+      #mufy-recovery-panel .mufy-recovery-mask-remove { flex: none; display: inline-grid; place-items: center; width: 28px; height: 28px; padding: 0; color: #b42338; border-color: transparent; background: transparent; box-shadow: none; }
+      #mufy-recovery-panel[data-panel-tone="dark"] .mufy-recovery-mask-remove { color: #ff8694; }
+      #mufy-recovery-panel .mufy-recovery-mask-remove:hover { background: color-mix(in srgb, currentColor 12%, transparent); border-color: currentColor; }
       .mufy-recovery-role-tools{margin-left:auto;display:flex;align-items:center;gap:2px;flex:none}
       .mufy-recovery-archive-button{padding:3px 6px!important;font-size:11px!important;color:#c5c0ef!important}
       .mufy-recovery-archives{display:grid;gap:4px;margin-top:7px;padding:7px;border-left:2px solid #786bd4;background:#19191e;color:#999}
@@ -10820,14 +10821,31 @@ roleStateReady = true;
 <li><strong>普通角色一键扣数：</strong>进入“收藏”→“普通待聊”，可以修改默认发送内容并启动“一键扣数”。脚本会逐个打开角色、发送一次消息，并等待回复生成结束且 URL 出现 sessionId 后再进入下一个；任务可以停止、继续或取消。</li>
 <li><strong>完整导出当前聊天：</strong>进入一段已有 sessionId 的具体聊天，再到“聊天记录”点击“导出当前聊天”。脚本会直接分页读取服务器记录，按消息 ID 去重，并用服务器 total 与分页末尾双重校验；最终下载一个 ZIP，内含适合手机浏览器阅读的 HTML 和纯文字 TXT，不包含 JSON。再次点击可停止导出。</li>
 <li><strong>根据聊天内容找角色：</strong>进入“聊天记录”点击“搜索聊天记录”，可选择搜索所有角色或指定单个角色。单角色允许搜索 1 个字，所有角色至少需要 2 个字。结果会标记关键词；点击“打开并定位”后进入原会话，自动向上加载并尝试滚动到对应消息。</li>
-<li><strong>角色回复摘录：</strong>在角色回复里选中文字，展开该消息的省略号操作栏并点击“摘录”；不选文字时会把整条回复放进编辑框。摘录按角色组成牌组，进入“摘录/美化”选择“打开摘录”即可查看、编辑或导出；牌面样式从具体摘录牌内的“牌面样式”进入。</li>
+<li><strong>角色回复摘录：</strong>在角色回复里选中文字，展开该消息的省略号操作栏并点击“摘录”；不选文字时会把整条回复放进编辑框。摘录按角色组成牌组，进入“摘录/美化”选择“打开摘录”即可查看、编辑或导出；牌面样式从具体摘录牌内的“牌面样式”进入。
+<details class="mufy-recovery-tutorial">
+<summary>查看图文教程</summary>
+<ol>
+<li><figure><figcaption>长按选中想摘录的内容</figcaption><img data-tutorial-src="https://cloudflare-imgbed-6na.pages.dev/file/1794171792532_%E5%B1%8F%E5%B9%95%E6%88%AA%E5%9B%BE_2026-11-09_042150.png" alt="长按选中想摘录的内容" loading="lazy"></figure></li>
+<li><figure><figcaption>展开回复的操作菜单，点击「摘录」</figcaption><img data-tutorial-src="https://cloudflare-imgbed-6na.pages.dev/file/1794171916275_%E5%B1%8F%E5%B9%95%E6%88%AA%E5%9B%BE_2026-11-09_043534.png" alt="展开回复的操作菜单，点击「摘录」" loading="lazy"></figure></li>
+<li><figure><figcaption>确认内容后点击「收藏到牌组」。想摘录整条回复，可以跳过选中文字。</figcaption><img data-tutorial-src="https://cloudflare-imgbed-6na.pages.dev/file/1794171949372_%E5%B1%8F%E5%B9%95%E6%88%AA%E5%9B%BE_2026-11-09_042217.png" alt="确认内容后点击「收藏到牌组」。想摘录整条回复，可以跳过选中文字。" loading="lazy"></figure></li>
+</ol>
+</details>
+</li>
 <li><strong>面板美化：</strong>进入“摘录/美化”选择“打开美化”，可独立调整整个助手面板的主题、背景色、强调色、文字色、透明度、字号和圆角，不会修改摘录牌样式。</li>
 <li><strong>账号快速切换：</strong>每个账号可自行选择“官方表单”或“接口直登”。官方表单模式不保存密码：脚本只填邮箱，密码由 Edge 或本人交给 Mufy 官方表单；当前脚本不记录或导出密码，也不会把它另行发送到 Mufy 之外的地址，因此不产生“本地保存密码”这项额外风险，但不代表任何软件都能承诺绝对零风险。接口直登只有在用户主动输入并保存后才会知道密码；密码只保存在使用者自己的浏览器里，脚本作者不会收到，并将 <code>email</code> 和 <code>password</code> 直接 POST 到 Mufy 官方 <code>/api/users/login</code>。请勿安装来源不明或被篡改的插件或脚本，防止密码泄露。“编辑”可在上下两个输入框修改邮箱和密码；改用表单、删除快捷账号或点击“清除已存”都会从篡改猴独立存储中真正删除对应密码并给出提示。</li>
 <li><strong>模型可用性监控：</strong>在功能首页底部点击“模型监控”，勾选需要监控的模型。脚本每 5 分钟读取一次网站模型状态；悬浮按钮上方用绿、黄、红、灰色圆点分别表示流畅、拥堵、中断和暂时未知。点击状态点可查看响应时长、成功率和最后检测时间。</li>
 <li><strong>导出分享链接：</strong>点击“导出角色”，再选择“仅分享链接 TXT”。角色 JSON/CSV 也会附带已保存的分享链接；独立 TXT 会导出当前账号缓存中的全部分享链接，包括当前角色列表里已经找不到但本地仍有记录的角色。</li>
 <li><strong>收藏未聊转为链接收藏：</strong>进入“角色”→“收藏未聊”，点击“检测未记录角色”。分享链接记录按账号隔离，本账号已有记录的角色会直接跳过；其余角色严格一次处理一个：先保存分享链接，再取消原收藏，从分享链接进入并重新收藏。任务可以中断、继续或彻底取消。</li>
 <li><strong>中断收藏：</strong>收藏任务运行时可点击“中断收藏”，选择保留剩余队列或彻底取消。脚本开关、浏览器关闭等原因留下的未完成任务不会自行恢复，必须手动选择“继续收藏”，也可以直接“取消任务”。</li>
-<li><strong>面具保存：</strong>先直接在 Mufy 网站编写或保存面具。完成后打开脚本面板，点击顶部“面具”加载网站当前面具，然后点击“全部存入面具库”保存到本地；相同面具会自动去重。</li>
+<li><strong>面具保存：</strong>先直接在 Mufy 网站编写或保存面具。完成后打开脚本面板，点击顶部“面具”加载网站当前面具，然后点击“全部存入面具库”保存到本地；相同面具会自动去重。
+<details class="mufy-recovery-tutorial">
+<summary>查看图文教程</summary>
+<ol>
+<li><figure><figcaption>在 Mufy 网站编辑面具并保存</figcaption><img data-tutorial-src="https://cloudflare-imgbed-6na.pages.dev/file/1794171977017_%E5%B1%8F%E5%B9%95%E6%88%AA%E5%9B%BE_2026-11-09_044649.png" alt="在 Mufy 网站编辑面具并保存" loading="lazy"></figure></li>
+<li><figure><figcaption>进入助手的面具分区，存入面具库后选择「绑定自动面具」</figcaption><img data-tutorial-src="https://cloudflare-imgbed-6na.pages.dev/file/1794172006639_%E5%B1%8F%E5%B9%95%E6%88%AA%E5%9B%BE_2026-11-09_045023.png" alt="进入助手的面具分区，存入面具库后选择「绑定自动面具」" loading="lazy"></figure></li>
+</ol>
+</details>
+</li>
 <li><strong>编辑和复制面具：</strong>“面具”和“面具库”列表都可以点击“编辑面具”，在大编辑板中一次修改全部字段。面具卡片右上角的 ⧉ 会复制完整信息；编辑板每个字段旁边的 ⧉ 只复制该项当前内容，包括尚未保存的修改。从网站面具进入时，“另存”会新增本地副本，“替换本地原面具”会更新对应副本；从面具库进入时，“保存修改”会直接更新当前面具并保留角色绑定，“另存”则新增一份。</li>
 <li><strong>绑定面具：</strong>切到“面具库”，在需要使用的面具上点击“绑定角色”，选择角色即可。</li>
 <li><strong>账号分区：</strong>面具库和角色绑定仍保存在当前浏览器本地，但会按 Mufy 账号分别保存。同一浏览器切换账号后会自动换到该账号自己的库；旧版公共库只迁移给升级时第一个识别到的账号。面板显示“未识别账号”时，请先打开任意角色聊天页让网站发出登录请求。</li>
@@ -10866,17 +10884,7 @@ roleStateReady = true;
           <button id="mufy-recovery-quote-library-close" title="关闭" aria-label="关闭">×</button>
         </div>
         <div id="mufy-recovery-quote-library-body">
-          <div id="mufy-recovery-quote-list">
-            <details id="mufy-recovery-quote-tutorial" class="mufy-recovery-tutorial">
-              <summary>查看图文教程</summary>
-              <ol>
-                <li><figure><figcaption>长按选中想摘录的内容</figcaption><img data-tutorial-src="https://cloudflare-imgbed-6na.pages.dev/file/1794171792532_%E5%B1%8F%E5%B9%95%E6%88%AA%E5%9B%BE_2026-11-09_042150.png" alt="长按选中想摘录的内容" loading="lazy"></figure></li>
-                <li><figure><figcaption>展开回复的操作菜单，点击「摘录」</figcaption><img data-tutorial-src="https://cloudflare-imgbed-6na.pages.dev/file/1794171916275_%E5%B1%8F%E5%B9%95%E6%88%AA%E5%9B%BE_2026-11-09_043534.png" alt="展开回复的操作菜单，点击「摘录」" loading="lazy"></figure></li>
-                <li><figure><figcaption>确认内容后点击「收藏到牌组」。想摘录整条回复，可以跳过选中文字。</figcaption><img data-tutorial-src="https://cloudflare-imgbed-6na.pages.dev/file/1794171949372_%E5%B1%8F%E5%B9%95%E6%88%AA%E5%9B%BE_2026-11-09_042217.png" alt="确认内容后点击「收藏到牌组」。想摘录整条回复，可以跳过选中文字。" loading="lazy"></figure></li>
-              </ol>
-            </details>
-            <div id="mufy-recovery-quote-decks"></div>
-          </div>
+          <div id="mufy-recovery-quote-list"></div>
           <div id="mufy-recovery-quote-stage" hidden>
             <div id="mufy-recovery-quote-preview" role="button" tabindex="0"></div>
           </div>
@@ -10957,13 +10965,6 @@ roleStateReady = true;
           <input id="mufy-recovery-mask-search" placeholder="搜索面具名或面具 ID" hidden>
           <label id="mufy-recovery-auto-switch-label"><input id="mufy-recovery-auto-switch" type="checkbox"> 自动切换绑定面具</label>
           <div id="mufy-recovery-mask-actions"><button id="mufy-recovery-import-masks">导入面具</button><button id="mufy-recovery-export-masks">导出面具</button><button id="mufy-recovery-undo" class="mufy-recovery-tab-action" disabled>撤回上次操作</button><input id="mufy-recovery-mask-file" type="file" accept=".json,application/json" hidden></div>
-          <details class="mufy-recovery-tutorial">
-            <summary>查看图文教程</summary>
-            <ol>
-              <li><figure><figcaption>在 Mufy 网站编辑面具并保存</figcaption><img data-tutorial-src="https://cloudflare-imgbed-6na.pages.dev/file/1794171977017_%E5%B1%8F%E5%B9%95%E6%88%AA%E5%9B%BE_2026-11-09_044649.png" alt="在 Mufy 网站编辑面具并保存" loading="lazy"></figure></li>
-              <li><figure><figcaption>进入助手的面具分区，存入面具库后选择「绑定自动面具」</figcaption><img data-tutorial-src="https://cloudflare-imgbed-6na.pages.dev/file/1794172006639_%E5%B1%8F%E5%B9%95%E6%88%AA%E5%9B%BE_2026-11-09_045023.png" alt="进入助手的面具分区，存入面具库后选择「绑定自动面具」" loading="lazy"></figure></li>
-            </ol>
-          </details>
         </div>
       </div><div id="mufy-recovery-list"></div>
       <div id="mufy-recovery-site-selection-bar" hidden><span id="mufy-recovery-site-selection-count">已选 0 项</span><button id="mufy-recovery-favorite-selected-site">立即收藏 (0)</button></div>
