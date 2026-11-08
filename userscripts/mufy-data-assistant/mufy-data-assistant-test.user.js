@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.96
+// @version      3.0.0-dev.97
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,7 +21,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.96';
+    : '3.0.0-dev.97';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -69,6 +69,7 @@
   const ACCOUNT_SWITCH_CURRENT_ID_KEY = 'mufy-recovery-account-switch-current-id-v1';
   const ACCOUNT_SWITCH_PASSWORD_PREFIX = 'mufy-recovery-account-password-v1:';
   const CONTENT_LIBRARY_RECORD_PREFIX = 'content-library:';
+  const SHARED_CONTENT_LIBRARY_KEY = 'mufy-recovery-shared-materials-v1';
   const MODEL_MONITOR_SELECTION_KEY = 'mufy-role-links-only-model-monitor-selection-v1';
   const MODEL_MONITOR_SNAPSHOT_KEY = 'mufy-role-links-only-model-monitor-snapshot-v1';
   const MODEL_MONITOR_NOTIFY_KEY = 'mufy-role-links-only-model-monitor-notify-v1';
@@ -97,8 +98,7 @@
   let maskStorageGeneration = 0;
   let roleHistoryWriteQueue = Promise.resolve();
   let roleHistoryGeneration = 0;
-  let contentStorageMode = 'localStorage';
-  let contentStorageGeneration = 0;
+  let contentStorageMode = 'initializing';
   let contentStorageWriteQueue = Promise.resolve();
   let liveHistoryPendingKey = '';
   let liveHistorySavedKey = '';
@@ -712,9 +712,6 @@
     state.quoteCards = loadQuoteCards();
     state.quoteStyle = loadQuoteStyle();
     state.quoteSelectedId = '';
-    state.promptLibrary = loadMaterialLibrary(PROMPT_LIBRARY_KEY, 'prompt');
-    state.extraLibrary = loadMaterialLibrary(EXTRA_LIBRARY_KEY, 'extra');
-    initializeContentStorageForAccount(nextScope);
     state.modelMonitorSelectedIds = loadModelMonitorSelection();
     state.modelMonitorRows = [];
     state.modelMonitorLastChecked = '';
@@ -1323,7 +1320,7 @@
 
   function loadMaterialLibrary(key, kind) {
     try {
-      const rows = JSON.parse(loadAndMigrateScopedValue(key) || '[]');
+      const rows = JSON.parse(localStorage.getItem(key) || '[]');
       return Array.isArray(rows) ? rows.filter(row => row && typeof row === 'object').map(row => normalizeMaterialItem(row, kind)).filter(row => row.content) : [];
     } catch (_) { return []; }
   }
@@ -1331,8 +1328,7 @@
   function saveMaterialLibraries() {
     if (contentStorageMode === 'indexedDB') return queueContentStoragePersist('指令与番外库');
     try {
-      localStorage.setItem(accountStorageKey(PROMPT_LIBRARY_KEY), JSON.stringify(state.promptLibrary));
-      localStorage.setItem(accountStorageKey(EXTRA_LIBRARY_KEY), JSON.stringify(state.extraLibrary));
+      localStorage.setItem(SHARED_CONTENT_LIBRARY_KEY, JSON.stringify(contentDataSnapshot()));
       return true;
     } catch (error) {
       state.status = '素材库保存失败，可能是浏览器本地空间不足。';
@@ -1348,6 +1344,12 @@
   function renderMaterialSection() {
     const list = panel?.querySelector('#mufy-recovery-material-list');
     if (!list) return;
+    const loading = contentStorageMode === 'initializing';
+    panel.querySelectorAll('#mufy-recovery-material-tools button').forEach(button => { button.disabled = loading; });
+    if (loading) {
+      list.textContent = '正在载入共享素材库…';
+      return;
+    }
     panel.querySelectorAll('[data-material-kind]').forEach(button => button.classList.toggle('active', button.dataset.materialKind === state.materialKind));
     const rows = activeMaterialRows();
     const label = state.materialKind === 'extra' ? '番外' : '指令';
@@ -1711,8 +1713,8 @@
     quoteStyle: loadQuoteStyle(),
     quoteSelectedId: '',
     panelTheme: loadPanelTheme(),
-    promptLibrary: loadMaterialLibrary(PROMPT_LIBRARY_KEY, 'prompt'),
-    extraLibrary: loadMaterialLibrary(EXTRA_LIBRARY_KEY, 'extra'),
+    promptLibrary: [],
+    extraLibrary: [],
     materialKind: 'prompt',
     materialEditingId: '',
     accountSwitchProfiles: loadAccountSwitchProfiles(),
@@ -1809,7 +1811,7 @@ roleStateReady = true;
   // 初始化阶段先只清理内存；待 IndexedDB 就绪后再写入，避免已满的 localStorage 再次报错。
   cleanOrphanedMaskBindings(false);
   initializeMaskStorageForAccount(maskAccountScope);
-  initializeContentStorageForAccount(maskAccountScope);
+  initializeSharedContentStorage();
   if (maskAccountScope) initializeRoleHistoryForAccount(maskAccountScope);
   initializeShareFavoriteJobStorage();
 
@@ -3044,61 +3046,87 @@ roleStateReady = true;
     return verified;
   }
 
-  function removeLegacyContentStorage(scope) {
-    [PROMPT_LIBRARY_KEY, EXTRA_LIBRARY_KEY].forEach(key => {
-      try { localStorage.removeItem(accountStorageKey(key, scope)); } catch (_) {}
-    });
+  function mergeMaterialSnapshots(snapshots) {
+    const normalized = snapshots.map(normalizeContentDataSnapshot);
+    const merge = key => {
+      const rows = [];
+      const seen = new Set();
+      const ids = new Set();
+      for (const row of normalized.flatMap(snapshot => snapshot[key])) {
+        const signature = JSON.stringify([row.title, row.content]);
+        if (seen.has(signature)) continue;
+        seen.add(signature);
+        const item = ids.has(row.id) ? normalizeMaterialItem({ ...row, id: '' }) : row;
+        ids.add(item.id);
+        rows.push(item);
+      }
+      return rows;
+    };
+    return { promptLibrary: merge('promptLibrary'), extraLibrary: merge('extraLibrary') };
   }
 
-  function applyContentDataSnapshot(snapshot) {
+  function loadLegacyMaterialSnapshot() {
+    const readAll = (key, kind) => {
+      const keys = [key];
+      try {
+        for (let index = 0; index < localStorage.length; index += 1) {
+          const candidate = localStorage.key(index);
+          if (candidate?.startsWith(`${key}:account:`)) keys.push(candidate);
+        }
+      } catch (_) {}
+      return keys.flatMap(item => loadMaterialLibrary(item, kind));
+    };
+    return {
+      promptLibrary: readAll(PROMPT_LIBRARY_KEY, 'prompt'),
+      extraLibrary: readAll(EXTRA_LIBRARY_KEY, 'extra')
+    };
+  }
+
+  async function initializeSharedContentStorage() {
+    let fallback = null;
+    try { fallback = JSON.parse(localStorage.getItem(SHARED_CONTENT_LIBRARY_KEY) || 'null'); } catch (_) {}
+    let snapshot = fallback;
+    try {
+      const database = await openMaskDatabase();
+      const sharedKey = `${CONTENT_LIBRARY_RECORD_PREFIX}${SHARED_CONTENT_LIBRARY_KEY}`;
+      const record = await readMaskDatabaseRecord(database, sharedKey);
+      if (record?.current && !fallback) {
+        snapshot = record.current;
+      } else {
+        const sources = [fallback];
+        if (record?.current) {
+          sources.push(record.current);
+        } else {
+          sources.push(loadLegacyMaterialSnapshot());
+          const transaction = database.transaction(MASK_DATABASE_STORE, 'readonly');
+          const request = transaction.objectStore(MASK_DATABASE_STORE).getAll();
+          const [records] = await Promise.all([requestResult(request), transactionDone(transaction)]);
+          sources.push(...records.filter(row => row.accountKey?.startsWith(CONTENT_LIBRARY_RECORD_PREFIX)).map(row => row.current));
+        }
+        snapshot = mergeMaterialSnapshots(sources);
+        await writeContentDatabaseSnapshot(database, SHARED_CONTENT_LIBRARY_KEY, snapshot);
+        if (fallback) {
+          try { localStorage.removeItem(SHARED_CONTENT_LIBRARY_KEY); } catch (_) {}
+        }
+      }
+      contentStorageMode = 'indexedDB';
+    } catch (error) {
+      snapshot = snapshot || mergeMaterialSnapshots([loadLegacyMaterialSnapshot()]);
+      contentStorageMode = 'localStorage';
+      appendRunLog('warn', '共享素材库暂时使用本地存储', error);
+    }
     const normalized = normalizeContentDataSnapshot(snapshot);
     state.promptLibrary = normalized.promptLibrary;
     state.extraLibrary = normalized.extraLibrary;
-  }
-
-  async function initializeContentStorageForAccount(scope = maskAccountScope) {
-    const generation = ++contentStorageGeneration;
-    if (!scope) { contentStorageMode = 'localStorage'; return; }
-    contentStorageMode = 'initializing';
-    try {
-      const database = await openMaskDatabase();
-      await testMaskDatabase(database);
-      if (generation !== contentStorageGeneration || scope !== maskAccountScope) return;
-      const accountKey = `${CONTENT_LIBRARY_RECORD_PREFIX}${scope}`;
-      const record = await readMaskDatabaseRecord(database, accountKey);
-      if (record?.current) {
-        applyContentDataSnapshot(record.current);
-        contentStorageMode = 'indexedDB';
-        removeLegacyContentStorage(scope);
-        appendRunLog('info', `已从 IndexedDB 载入指令库和番外库。`, { prompts: state.promptLibrary.length, extras: state.extraLibrary.length });
-      } else {
-        const snapshot = contentDataSnapshot();
-        await writeContentDatabaseSnapshot(database, scope, snapshot);
-        if (generation !== contentStorageGeneration || scope !== maskAccountScope) return;
-        contentStorageMode = 'indexedDB';
-        removeLegacyContentStorage(scope);
-        appendRunLog('info', `已将指令库和番外库迁移到 IndexedDB。`, { prompts: snapshot.promptLibrary.length, extras: snapshot.extraLibrary.length });
-      }
-      renderMaterialSection();
-      render();
-    } catch (error) {
-      if (generation !== contentStorageGeneration || scope !== maskAccountScope) return;
-      contentStorageMode = 'localStorage';
-      appendRunLog('error', '指令与番外库 IndexedDB 初始化失败，继续使用 localStorage', error);
-      state.status = `IndexedDB 初始化失败，指令和番外暂时继续保存在 localStorage：${explainFailure(error)}`;
-      render();
-    }
+    renderMaterialSection();
+    render();
   }
 
   function queueContentStoragePersist(reason) {
-    const scope = maskAccountScope;
-    if (!scope || contentStorageMode !== 'indexedDB') return false;
     const snapshot = contentDataSnapshot();
     contentStorageWriteQueue = contentStorageWriteQueue.catch(() => {}).then(async () => {
-      if (scope !== maskAccountScope || contentStorageMode !== 'indexedDB') return;
       const database = await openMaskDatabase();
-      await writeContentDatabaseSnapshot(database, scope, snapshot);
-      appendRunLog('info', `${reason}已写入 IndexedDB`);
+      await writeContentDatabaseSnapshot(database, SHARED_CONTENT_LIBRARY_KEY, snapshot);
     }).catch(error => {
       appendRunLog('error', `${reason}写入 IndexedDB 失败`, error);
       state.status = `${reason}保存失败：${explainFailure(error)}`;
