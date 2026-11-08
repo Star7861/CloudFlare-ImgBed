@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.87
+// @version      3.0.0-dev.88
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -18,7 +18,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.87';
+    : '3.0.0-dev.88';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -9599,7 +9599,6 @@ roleStateReady = true;
     const roleSection = panel.querySelector('#mufy-recovery-role-section');
     const favoriteSection = panel.querySelector('#mufy-recovery-favorite-section');
     const chatSection = panel.querySelector('#mufy-recovery-chat-section');
-    const beautySection = panel.querySelector('#mufy-recovery-beauty-section');
     const accountSection = panel.querySelector('#mufy-recovery-account-section');
     const materialSection = panel.querySelector('#mufy-recovery-material-section');
     const maskSection = panel.querySelector('#mufy-recovery-mask-section');
@@ -9607,7 +9606,7 @@ roleStateReady = true;
     const sectionNav = panel.querySelector('#mufy-recovery-section-nav');
     const sectionTitle = panel.querySelector('#mufy-recovery-section-title');
     const isRoleHistoryView = state.section === 'roles' && state.active === 'roleHistory';
-    const sectionNames = { roles: '角色', favorites: '收藏', chats: '聊天记录', beauty: '摘录/美化', accounts: '账号切换', materials: '素材库', masks: '面具' };
+    const sectionNames = { roles: '角色', favorites: '收藏', chats: '聊天记录', accounts: '账号切换', materials: '素材库', masks: '面具' };
     if (sectionHome) sectionHome.hidden = state.section !== 'home';
     if (sectionNav) sectionNav.hidden = state.section === 'home';
     panel.querySelector('#mufy-recovery-brand').hidden = state.section !== 'home';
@@ -9620,7 +9619,7 @@ roleStateReady = true;
     const controls = panel.querySelector('#mufy-recovery-controls');
     if (controls) {
       controls.classList.toggle('is-section-home', state.section === 'home');
-      controls.classList.toggle('is-standalone-section', ['beauty', 'accounts', 'materials'].includes(state.section));
+      controls.classList.toggle('is-standalone-section', ['accounts', 'materials'].includes(state.section));
     }
     const statusBox = panel.querySelector('#mufy-recovery-status');
     if (statusBox) statusBox.hidden = state.section === 'home' || isRoleHistoryView;
@@ -9628,12 +9627,11 @@ roleStateReady = true;
     if (roleSection) roleSection.hidden = state.section !== 'roles' || isRoleHistoryView;
     if (favoriteSection) favoriteSection.hidden = state.section !== 'favorites';
     if (chatSection) chatSection.hidden = state.section !== 'chats';
-    if (beautySection) beautySection.hidden = state.section !== 'beauty';
     if (accountSection) accountSection.hidden = state.section !== 'accounts';
     if (materialSection) materialSection.hidden = state.section !== 'materials';
     if (maskSection) maskSection.hidden = state.section !== 'masks';
     const resultList = panel.querySelector('#mufy-recovery-list');
-    if (resultList) resultList.hidden = ['home', 'beauty', 'accounts', 'materials'].includes(state.section);
+    if (resultList) resultList.hidden = ['home', 'accounts', 'materials'].includes(state.section);
     if (state.section === 'materials') renderMaterialSection();
     if (state.section === 'accounts') renderAccountSection();
     const roleFilterRow = panel.querySelector('#mufy-recovery-role-filter-row');
@@ -9678,7 +9676,6 @@ roleStateReady = true;
     const groups = state.active === 'authors' || state.active === 'siteAuthors' ? authorGroups(statusSource, query) : [];
     panel.querySelector('#mufy-recovery-count').textContent = state.section === 'home'
       ? '选择功能'
-      : state.section === 'beauty' ? '摘录/美化'
         : state.section === 'accounts' ? `${state.accountSwitchProfiles.length} 个账号`
         : state.section === 'materials' ? `${activeMaterialRows().length} 条${state.materialKind === 'extra' ? '番外' : '指令'}`
           : state.active === 'authors' || state.active === 'siteAuthors'
@@ -9848,7 +9845,6 @@ roleStateReady = true;
       #mufy-recovery-head button{background:none;border:0;color:#bbb;font-size:20px;cursor:pointer}
       #mufy-recovery-head #mufy-recovery-model-entry,#mufy-recovery-head #mufy-recovery-log-entry,#mufy-recovery-head #mufy-recovery-history-entry{flex:none;padding:4px 7px!important;border:1px solid #666!important;border-radius:6px!important;background:#3a3a44!important;color:#ddd!important;font:600 10px/1.2 system-ui!important;white-space:nowrap}
       #mufy-recovery-export-chat:disabled{opacity:.45;cursor:not-allowed!important}
-      #mufy-recovery-quote-entry{margin-left:6px;border-color:#766bb1!important;background:#443c67!important;color:#eeeaff!important}
       #mufy-recovery-head #mufy-recovery-model-entry{margin-left:6px}
       #mufy-recovery-log-entry{margin-left:0}
       #mufy-recovery-history-entry{margin-left:0;margin-right:0}
@@ -10002,8 +9998,7 @@ roleStateReady = true;
       #mufy-recovery-mask-tabs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
       #mufy-recovery-tabs button.active,#mufy-recovery-favorite-tabs button.active,#mufy-recovery-mask-tabs button.active{background:#786bd4;border-color:#8f84dd;color:#fff}
       #mufy-recovery-tabs .mufy-recovery-tab-action,#mufy-recovery-mask-tabs .mufy-recovery-tab-action{background:#453d69;border-color:#8578c8;color:#f4efff}
-      #mufy-recovery-role-section,#mufy-recovery-favorite-section,#mufy-recovery-chat-section,#mufy-recovery-beauty-section,#mufy-recovery-account-section,#mufy-recovery-material-section,#mufy-recovery-mask-section{display:flex;flex-direction:column;gap:8px}
-      #mufy-recovery-beauty-launchers{display:grid;grid-template-columns:1fr 1fr;gap:10px}.mufy-beauty-launch{min-height:112px!important;display:flex!important;flex-direction:column;align-items:flex-start!important;justify-content:center!important;gap:7px;padding:15px!important;text-align:left!important;background:linear-gradient(145deg,#40375c,#252431)!important}.mufy-beauty-launch strong{font-size:15px;color:#fff}.mufy-beauty-launch small{color:#b7b1c5;font-size:10px;line-height:1.55;font-weight:400}
+      #mufy-recovery-role-section,#mufy-recovery-favorite-section,#mufy-recovery-chat-section,#mufy-recovery-account-section,#mufy-recovery-material-section,#mufy-recovery-mask-section{display:flex;flex-direction:column;gap:8px}
       #mufy-recovery-account-current{display:grid;gap:3px;padding:12px;border:1px solid #766bb155;border-radius:12px;background:linear-gradient(145deg,#4c407055,#24232d)}#mufy-recovery-account-current strong{font-size:11px;color:#aaa3c6}#mufy-recovery-account-current span{font-size:15px;color:#f5f2ff;font-weight:700}#mufy-recovery-account-current small{color:#aaa;overflow-wrap:anywhere}#mufy-recovery-account-tools{display:grid;grid-template-columns:1fr;gap:6px}#mufy-recovery-account-save{background:#6654a4!important;border-color:#927fd3!important;font-weight:700}#mufy-recovery-account-list{display:grid;align-content:start;gap:7px;overflow:auto;padding-bottom:12px}.mufy-account-card{display:flex;align-items:center;justify-content:space-between;gap:9px;padding:10px 11px;border:1px solid #494653;border-radius:11px;background:#272630}.mufy-account-card.is-current{border-color:#68ba8a88;box-shadow:inset 3px 0 #59b17f}.mufy-account-card>div{display:grid;min-width:0;gap:3px}.mufy-account-card strong{color:#f0edff}.mufy-account-card small{color:#aaa;overflow-wrap:anywhere}.mufy-account-card em{width:max-content;padding:2px 6px;border-radius:9px;background:#24553a;color:#a8e7bd;font-size:9px;font-style:normal}.mufy-account-card>span{display:flex;flex:none;gap:4px;flex-wrap:wrap;justify-content:flex-end}.mufy-account-card button{padding:4px 7px!important;font-size:10px!important}.mufy-recovery-account-hint{display:block;color:#8f8a9c;line-height:1.55}
       #mufy-recovery-material-tabs{display:grid;grid-template-columns:1fr 1fr;gap:6px}#mufy-recovery-material-tabs button.active{background:#786bd4;border-color:#8f84dd;color:#fff}#mufy-recovery-material-tools{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}#mufy-recovery-material-add{background:#5e4f91!important;border-color:#8373bb!important;font-weight:700}
       #mufy-recovery-material-list{display:grid;align-content:start;gap:7px;overflow:auto;padding-bottom:20px}.mufy-material-card{display:flex;align-items:flex-start;justify-content:space-between;gap:9px;padding:10px 11px;border:1px solid #4c485d;border-radius:10px;background:#272630;cursor:pointer}.mufy-material-card:hover{border-color:#8c7bd1;background:#302d40}.mufy-material-card>div{min-width:0;display:grid;gap:4px}.mufy-material-card strong{color:#f0edff}.mufy-material-card small{display:-webkit-box;overflow:hidden;color:#aaa;font-size:10px;line-height:1.5;-webkit-line-clamp:4;-webkit-box-orient:vertical;white-space:pre-wrap;overflow-wrap:anywhere}.mufy-material-card>span{display:flex;flex:none;gap:5px}.mufy-material-card>span button{padding:4px 7px!important;font-size:10px!important}
@@ -10128,7 +10123,7 @@ roleStateReady = true;
       #mufy-recovery-controls{gap:10px;padding:12px 13px;background:linear-gradient(180deg,#ffffff03,transparent)}
       #mufy-recovery-panel button{border-color:var(--mufy-panel-border);border-radius:10px;background:var(--mufy-panel-surface);color:#eeedf6;box-shadow:0 1px 3px #0001;transition:transform .16s ease,border-color .16s ease,background .16s ease,box-shadow .16s ease}#mufy-recovery-panel button:hover{border-color:var(--mufy-panel-accent);background:var(--mufy-panel-accent-soft)}#mufy-recovery-panel button:active{transform:translateY(1px) scale(.99)}
       #mufy-recovery-panel button.active,#mufy-recovery-panel .mufy-recovery-section-card:first-child{background:var(--mufy-panel-accent-soft)!important;border-color:color-mix(in srgb,var(--mufy-panel-accent,#8f7be8) 72%,transparent)!important}#mufy-recovery-panel #mufy-recovery-head{border-bottom-color:color-mix(in srgb,var(--mufy-panel-accent,#8f7be8) 24%,transparent)}
-      #mufy-recovery-panel #mufy-recovery-title>span,#mufy-recovery-panel #mufy-recovery-section-title,#mufy-recovery-panel .mufy-recovery-row>div>strong,#mufy-recovery-panel .mufy-recovery-section-note strong,#mufy-recovery-panel .mufy-beauty-launch strong{color:var(--mufy-panel-text,#f2efff)!important}
+      #mufy-recovery-panel #mufy-recovery-title>span,#mufy-recovery-panel #mufy-recovery-section-title,#mufy-recovery-panel .mufy-recovery-row>div>strong,#mufy-recovery-panel .mufy-recovery-section-note strong{color:var(--mufy-panel-text,#f2efff)!important}
       #mufy-recovery-section-home{gap:13px;padding:6px 2px 10px}#mufy-recovery-section-home-head{padding:4px 5px 1px}#mufy-recovery-section-home-head strong{font-size:17px;letter-spacing:.02em}#mufy-recovery-section-home-head small{color:#8e8a9e}
       #mufy-recovery-section-cards{gap:10px}.mufy-recovery-section-card{position:relative;min-height:86px!important;overflow:hidden;border-color:var(--mufy-panel-border)!important;border-radius:15px!important;background:var(--mufy-panel-surface)!important;box-shadow:inset 0 1px #ffffff12,0 10px 24px #0002!important}.mufy-recovery-section-card:before{content:'';position:absolute;inset:0;background:radial-gradient(circle at 12% 0,var(--mufy-panel-accent-soft),transparent 48%);pointer-events:none}.mufy-recovery-section-card:hover{transform:translateY(-2px);border-color:var(--mufy-panel-accent)!important}.mufy-recovery-section-card strong{position:relative;font-size:14px}.mufy-recovery-section-card small{position:relative;color:var(--mufy-panel-muted)}.mufy-recovery-section-card:first-child{background:var(--mufy-panel-accent-soft)!important;border-color:var(--mufy-panel-accent)!important}
       #mufy-recovery-update-entry.has-update{border-color:#61c99588!important;background:linear-gradient(145deg,#225a4166,#242c3250)!important;box-shadow:inset 0 1px #baffd022,0 0 22px #42c78322!important}#mufy-recovery-update-entry.has-update strong{color:#bfffd8}#mufy-recovery-update-entry.has-update small{color:#8de8b2}
@@ -10138,11 +10133,11 @@ roleStateReady = true;
       #mufy-recovery-status{border-radius:11px;color:#c6bfdc}#mufy-recovery-list{border-color:#ffffff12}.mufy-recovery-row{margin:5px 0;padding:10px 9px;border:1px solid #ffffff0d;border-radius:13px;background:#ffffff05}.mufy-recovery-row:hover{border-color:#a995ff28;background:#ffffff08}.mufy-recovery-row img{border-radius:12px;box-shadow:0 5px 13px #0007}
       #mufy-recovery-model-modal,#mufy-recovery-log-modal,#mufy-recovery-export-modal{border-color:#ffffff24;border-radius:16px;background:linear-gradient(155deg,#292936f5,#17171ff8);box-shadow:0 22px 60px #000c}.mufy-model-monitor-row{border-color:#ffffff14;border-radius:12px;background:#ffffff07}.mufy-model-monitor-row:has(input:checked){border-color:#9f8bea55;background:#8d73df18}
       /* Selected theme owns every panel surface; no legacy purple/black mixing. */
-      #mufy-recovery-panel #mufy-recovery-head,#mufy-recovery-panel .mufy-recovery-section-note,#mufy-recovery-panel .mufy-recovery-section-card,#mufy-recovery-panel .mufy-beauty-launch,#mufy-recovery-panel .mufy-account-card,#mufy-recovery-panel .mufy-material-card,#mufy-recovery-panel .mufy-recovery-row,#mufy-recovery-panel .mufy-model-monitor-row{background:var(--mufy-panel-surface)!important;border-color:var(--mufy-panel-border)!important;color:var(--mufy-panel-text)!important}
+      #mufy-recovery-panel #mufy-recovery-head,#mufy-recovery-panel .mufy-recovery-section-note,#mufy-recovery-panel .mufy-recovery-section-card,#mufy-recovery-panel .mufy-account-card,#mufy-recovery-panel .mufy-material-card,#mufy-recovery-panel .mufy-recovery-row,#mufy-recovery-panel .mufy-model-monitor-row{background:var(--mufy-panel-surface)!important;border-color:var(--mufy-panel-border)!important;color:var(--mufy-panel-text)!important}
       #mufy-recovery-panel #mufy-recovery-head,#mufy-recovery-panel #mufy-recovery-panel-beauty-head,#mufy-recovery-panel .mufy-quote-modal-head,#mufy-recovery-panel #mufy-recovery-material-editor-head,#mufy-recovery-panel #mufy-recovery-model-head{background:var(--mufy-panel-surface-strong)!important;border-color:var(--mufy-panel-border)!important}
       #mufy-recovery-panel #mufy-recovery-panel-beauty-modal,#mufy-recovery-panel #mufy-recovery-model-modal,#mufy-recovery-panel #mufy-recovery-log-modal,#mufy-recovery-panel #mufy-recovery-export-modal,#mufy-recovery-panel #mufy-recovery-material-editor,#mufy-recovery-panel #mufy-recovery-quote-editor-modal,#mufy-recovery-panel #mufy-recovery-quote-library-modal,#mufy-recovery-panel #mufy-recovery-quote-style-modal{background:var(--mufy-panel-bg)!important;border-color:var(--mufy-panel-border)!important;color:var(--mufy-panel-text)!important}
       #mufy-recovery-panel button{color:var(--mufy-panel-text)}#mufy-recovery-panel button.active,#mufy-recovery-panel .mufy-recovery-section-card:first-child{background:var(--mufy-panel-accent-soft)!important;border-color:var(--mufy-panel-accent)!important}
-      #mufy-recovery-panel small,#mufy-recovery-panel .mufy-recovery-muted,#mufy-recovery-panel .mufy-recovery-section-card small,#mufy-recovery-panel .mufy-recovery-section-note span,#mufy-recovery-panel .mufy-beauty-launch small,#mufy-recovery-panel-beauty-fields label{color:var(--mufy-panel-muted)!important}
+      #mufy-recovery-panel small,#mufy-recovery-panel .mufy-recovery-muted,#mufy-recovery-panel .mufy-recovery-section-card small,#mufy-recovery-panel .mufy-recovery-section-note span,#mufy-recovery-panel-beauty-fields label{color:var(--mufy-panel-muted)!important}
       #mufy-recovery-panel[data-panel-tone="light"]{box-shadow:0 24px 60px #26313a24,inset 0 1px #fff}#mufy-recovery-panel[data-panel-tone="light"] button{box-shadow:inset 0 1px #fff8,0 3px 10px #26313a10}#mufy-recovery-panel[data-panel-tone="light"] #mufy-recovery-title,#mufy-recovery-panel[data-panel-tone="light"] strong{color:var(--mufy-panel-text)}
       #mufy-recovery-panel #mufy-recovery-log-entry,#mufy-recovery-panel #mufy-recovery-history-entry,#mufy-recovery-panel #mufy-recovery-section-back{background:var(--mufy-panel-surface)!important;border-color:var(--mufy-panel-border)!important;color:var(--mufy-panel-text)!important}
       #mufy-recovery-panel #mufy-recovery-status,#mufy-recovery-panel #mufy-recovery-role-read-options,#mufy-recovery-panel #mufy-recovery-auto-switch-label,#mufy-recovery-panel .mufy-recovery-auto-delay{color:var(--mufy-panel-muted)!important}
@@ -10200,13 +10195,9 @@ roleStateReady = true;
       #mufy-recovery-panel #mufy-recovery-tabs{display:flex;gap:4px;overflow-x:auto;padding:0 0 3px;border-bottom:1px solid var(--mufy-panel-border)}
       #mufy-recovery-panel #mufy-recovery-tabs button{flex:none;white-space:nowrap;background:none!important;border:0!important;border-bottom:2px solid transparent!important;border-radius:0;box-shadow:none}
       #mufy-recovery-panel #mufy-recovery-tabs button.active{border-bottom-color:var(--mufy-panel-accent)!important;color:var(--mufy-panel-text)!important}
-      #mufy-recovery-role-section #mufy-recovery-role-actions{display:flex;flex-wrap:wrap;align-items:start}
-      #mufy-recovery-role-actions>button{flex:1;min-width:max-content}
-      #mufy-recovery-role-more{min-width:54px}
-      #mufy-recovery-role-more>summary{cursor:pointer;padding:6px 9px;border:1px solid var(--mufy-panel-border);border-radius:9px}
-      #mufy-recovery-role-more[open]{flex:1 0 100%}
-      #mufy-recovery-role-more[open]>summary{width:max-content;margin-left:auto}
-      #mufy-recovery-role-more>div{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:8px 0 0}
+      #mufy-recovery-role-section #mufy-recovery-role-actions{grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto}
+      #mufy-recovery-role-more{min-width:58px;white-space:nowrap}
+      #mufy-recovery-role-more-options{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
       #mufy-recovery-site-manage{align-self:flex-end;padding:5px 12px}
       #mufy-recovery-site-manage[aria-pressed="true"]{border-color:var(--mufy-panel-accent);background:var(--mufy-panel-accent-soft)}
       #mufy-recovery-site-selection-bar{display:flex;align-items:center;justify-content:space-between;gap:10px;flex:none;padding:8px 12px 16px;border-top:1px solid var(--mufy-panel-border);background:var(--mufy-panel-surface)}
@@ -10233,7 +10224,6 @@ roleStateReady = true;
         #mufy-recovery-panel{right:8px;bottom:58px;width:calc(100vw - 16px);max-width:calc(100vw - 16px)}
         #mufy-recovery-role-actions button,#mufy-recovery-mask-actions button{font-size:11px;padding:6px 5px}
         #mufy-recovery-section-cards{grid-template-columns:1fr 1fr;gap:6px}.mufy-recovery-section-card{min-height:68px!important;padding:9px 10px!important}
-        #mufy-recovery-beauty-launchers{grid-template-columns:1fr}.mufy-beauty-launch{min-height:88px!important}
         #mufy-recovery-panel-beauty-fields{grid-template-columns:1fr;gap:8px;padding:11px}
         #mufy-recovery-tabs{grid-template-columns:repeat(2,minmax(0,1fr));gap:5px}#mufy-recovery-favorite-tabs{grid-template-columns:repeat(3,minmax(0,1fr))}
         #mufy-recovery-mask-tabs{grid-template-columns:repeat(3,minmax(0,1fr));gap:5px}
@@ -10459,7 +10449,7 @@ roleStateReady = true;
       <div id="mufy-recovery-model-modal" hidden><div id="mufy-recovery-model-head"><span><strong>模型可用性监控</strong><small id="mufy-recovery-model-summary">每 5 分钟检测一次</small></span><button id="mufy-recovery-model-close" title="关闭">×</button></div><div id="mufy-recovery-model-tools"><input id="mufy-recovery-model-search" placeholder="搜索模型名称"><button id="mufy-recovery-model-refresh">立即检测</button><label id="mufy-recovery-model-notify-label"><input id="mufy-recovery-model-notify" type="checkbox"><span id="mufy-recovery-model-notify-text">异常通知（可选）</span><small>仅在已选模型由正常变为拥堵或中断时提醒</small></label></div><div id="mufy-recovery-model-list"><div class="mufy-recovery-empty">正在读取模型状态…</div></div></div>
       <div id="mufy-recovery-material-editor" hidden><div id="mufy-recovery-material-editor-head"><strong id="mufy-recovery-material-editor-title">新增指令</strong><button id="mufy-recovery-material-editor-close" title="关闭">×</button></div><div id="mufy-recovery-material-editor-body"><label>标题<input id="mufy-recovery-material-title" maxlength="120" placeholder="例如：总结当前剧情"></label><label>内容<textarea id="mufy-recovery-material-content" maxlength="50000" placeholder="输入要填入聊天框的完整内容"></textarea></label></div><div id="mufy-recovery-material-editor-actions"><button id="mufy-recovery-material-editor-cancel">取消</button><button id="mufy-recovery-material-editor-save">保存</button></div></div>
       <div id="mufy-recovery-controls">
-        <div id="mufy-recovery-section-home"><div id="mufy-recovery-section-home-head"><strong>选择功能分区</strong><small>进入后可通过返回按钮切换到其他分区</small></div><div id="mufy-recovery-section-cards"><button class="mufy-recovery-section-card" data-section="roles"><strong>角色</strong><small>找回、状态、收藏未聊、作者与标签</small></button><button class="mufy-recovery-section-card" data-section="favorites"><strong>收藏</strong><small>网页角色、普通待聊、一键扣数与收藏夹</small></button><button class="mufy-recovery-section-card" data-section="chats"><strong>聊天记录</strong><small>内容搜索与完整导出</small></button><button class="mufy-recovery-section-card" data-section="beauty"><strong>摘录/美化</strong><small>摘录牌与整体面板美化</small></button><button class="mufy-recovery-section-card" data-section="masks"><strong>面具</strong><small>面具库、编辑、绑定与导入导出</small></button><button class="mufy-recovery-section-card" data-section="accounts"><strong>账号切换</strong><small>一次登录一个账号，快速退出并填入另一个账号邮箱</small></button><button class="mufy-recovery-section-card" data-section="materials" data-material-home-kind="prompt"><strong>指令库</strong><small>保存常用指令，点击填入聊天输入框</small></button><button class="mufy-recovery-section-card" data-section="materials" data-material-home-kind="extra"><strong>番外库</strong><small>保存番外模板或内容，点击快速填入</small></button><button id="mufy-recovery-model-entry" class="mufy-recovery-section-card" title="选择并监控模型状态"><strong>模型监控</strong><small>选择模型并查看可用性、响应时间和成功率</small></button><button id="mufy-recovery-update-entry" class="mufy-recovery-section-card" title="检查并安装测试版更新"><strong>检查更新</strong><small id="mufy-recovery-update-text">当前 ${esc(SCRIPT_VERSION)} · 点击检查</small></button></div></div>
+        <div id="mufy-recovery-section-home"><div id="mufy-recovery-section-home-head"><strong>选择功能分区</strong><small>进入后可通过返回按钮切换到其他分区</small></div><div id="mufy-recovery-section-cards"><button class="mufy-recovery-section-card" data-section="roles"><strong>角色</strong><small>找回、状态、收藏未聊、作者与标签</small></button><button class="mufy-recovery-section-card" data-section="favorites"><strong>收藏</strong><small>网页角色、普通待聊、一键扣数与收藏夹</small></button><button class="mufy-recovery-section-card" data-section="chats"><strong>聊天记录</strong><small>内容搜索与完整导出</small></button><button class="mufy-recovery-section-card" id="mufy-recovery-quote-entry"><strong>摘录</strong><small>查看摘录牌、调整牌面与导出</small></button><button class="mufy-recovery-section-card" data-section="masks"><strong>面具</strong><small>面具库、编辑、绑定与导入导出</small></button><button class="mufy-recovery-section-card" data-section="accounts"><strong>账号切换</strong><small>一次登录一个账号，快速退出并填入另一个账号邮箱</small></button><button class="mufy-recovery-section-card" data-section="materials"><strong>素材库</strong><small>指令库与番外库，点击快速填入</small></button><button class="mufy-recovery-section-card" id="mufy-recovery-panel-beauty-entry"><strong>美化</strong><small>设置面板主题、字号和圆角</small></button><button id="mufy-recovery-model-entry" class="mufy-recovery-section-card" title="选择并监控模型状态"><strong>模型监控</strong><small>选择模型并查看可用性、响应时间和成功率</small></button><button id="mufy-recovery-update-entry" class="mufy-recovery-section-card" title="检查并安装测试版更新"><strong>检查更新</strong><small id="mufy-recovery-update-text">当前 ${esc(SCRIPT_VERSION)} · 点击检查</small></button></div></div>
         <div id="mufy-recovery-status"></div>
         <div id="mufy-recovery-favorite-task-controls" hidden><button id="mufy-recovery-favorite-task-main">中断收藏</button><button id="mufy-recovery-favorite-task-cancel">取消任务</button></div>
         <div id="mufy-recovery-export-modal" hidden><div class="mufy-recovery-export-head"><strong>选择导出格式</strong><button id="mufy-recovery-export-close" title="关闭">×</button></div><label id="mufy-recovery-export-binding-option" class="mufy-recovery-export-binding-option" hidden><input id="mufy-recovery-export-bindings" type="checkbox" checked><span>同时导出角色的面具绑定信息</span></label><div id="mufy-recovery-export-binding-hint" class="mufy-recovery-export-binding-hint" hidden>绑定信息只支持 JSON；导入时会再询问是否恢复。</div><div class="mufy-recovery-export-options"><button data-export-format="csv">导出 CSV</button><button data-export-format="json">导出 JSON</button><button id="mufy-recovery-export-share-links" data-export-format="share-links">仅分享链接 TXT</button></div></div>
@@ -10469,7 +10459,8 @@ roleStateReady = true;
         <div id="mufy-recovery-role-section">
           <div id="mufy-recovery-role-filter-row"><input id="mufy-recovery-role-search" placeholder="搜索角色名、作者、ID或标签"><select id="mufy-recovery-status-filter" aria-label="按角色状态筛选"></select></div>
           <div id="mufy-recovery-tabs"><button class="active" data-category="allRoles">全部角色 (0)</button><button data-category="chatted">聊过的 (0)</button><button data-category="chattedNotFavorite">聊过未收藏 (0)</button><button data-category="favoriteOnly">收藏未聊 (0)</button><button data-category="authors">作者合集 (0)</button></div>
-          <div id="mufy-recovery-role-actions"><button id="mufy-recovery-run">找回角色链接</button><button id="mufy-recovery-refresh-status" title="更新最近一次链接读取到的角色状态和作者名称">更新状态</button><details id="mufy-recovery-role-more"><summary>更多</summary><div><div id="mufy-recovery-role-read-options"><span>读取方式</span><select id="mufy-recovery-role-read-mode" aria-label="角色读取方式"><option value="full">完整读取</option><option value="latest">查找最新几页</option></select><label>页数 <input id="mufy-recovery-role-latest-pages" type="number" min="1" max="500" value="2" aria-label="读取页数"></label><span>每页 20 个</span></div><button id="mufy-recovery-export-roles" class="mufy-recovery-tab-action">导出角色</button></div></details></div>
+          <div id="mufy-recovery-role-actions"><button id="mufy-recovery-run">找回角色链接</button><button id="mufy-recovery-refresh-status" title="更新最近一次链接读取到的角色状态和作者名称">更新状态</button><button id="mufy-recovery-role-more" aria-expanded="false" aria-controls="mufy-recovery-role-more-options">▸ 更多</button></div>
+          <div id="mufy-recovery-role-more-options" hidden><div id="mufy-recovery-role-read-options"><span>读取方式</span><select id="mufy-recovery-role-read-mode" aria-label="角色读取方式"><option value="full">完整读取</option><option value="latest">查找最新几页</option></select><label>页数 <input id="mufy-recovery-role-latest-pages" type="number" min="1" max="500" value="2" aria-label="读取页数"></label><span>每页 20 个</span></div><button id="mufy-recovery-export-roles" class="mufy-recovery-tab-action">导出角色</button></div>
           <button id="mufy-recovery-favorite-visible" hidden>收藏当前列表</button><div id="mufy-recovery-share-recovery-controls" hidden><button id="mufy-recovery-share-recovery-one">检测全部收藏未聊</button><button id="mufy-recovery-share-recovery-cancel" hidden>取消任务</button></div>
         </div>
         <div id="mufy-recovery-favorite-section" hidden>
@@ -10489,7 +10480,6 @@ roleStateReady = true;
           </form>
           <div id="mufy-recovery-chat-result-count" class="mufy-recovery-muted">搜索结果 · 0</div>
         </div>
-        <div id="mufy-recovery-beauty-section" hidden><div class="mufy-recovery-section-note"><strong>摘录 / 面板美化</strong><span>两个功能相互独立：摘录管理角色卡片，面板美化调整整个助手界面。</span></div><div id="mufy-recovery-beauty-launchers"><button id="mufy-recovery-quote-entry" class="mufy-beauty-launch"><strong>打开摘录</strong><small>查看、编辑和导出角色摘录牌；牌面样式从摘录内部进入</small></button><button id="mufy-recovery-panel-beauty-entry" class="mufy-beauty-launch"><strong>打开美化</strong><small>调整整个助手面板的主题、颜色、透明度、字号和圆角</small></button></div></div>
         <div id="mufy-recovery-account-section" hidden><div class="mufy-recovery-section-note"><strong>账号快速切换</strong><span>一次只登录一个账号。脚本仅在本机保存邮箱与备注，不保存密码、Cookie 或登录令牌。</span></div><div id="mufy-recovery-account-current"></div><div id="mufy-recovery-account-tools"><button id="mufy-recovery-account-save">保存当前账号</button></div><div id="mufy-recovery-account-list"></div><small class="mufy-recovery-account-hint">点击“切换”后会退出当前登录、打开 Mufy 官方登录窗口并填入目标邮箱；密码仍由 Edge 自动填充或由你手动输入。</small></div>
         <div id="mufy-recovery-material-section" hidden><div id="mufy-recovery-material-tabs"><button data-material-kind="prompt">指令库</button><button data-material-kind="extra">番外库</button></div><div id="mufy-recovery-material-tools"><button id="mufy-recovery-material-add">新增指令</button><button id="mufy-recovery-material-import">导入 JSON</button><button id="mufy-recovery-material-export">导出 JSON</button><input id="mufy-recovery-material-file" type="file" accept=".json,application/json" hidden></div><div id="mufy-recovery-material-list"></div></div>
         <div id="mufy-recovery-mask-section" hidden>
@@ -10587,6 +10577,13 @@ roleStateReady = true;
       panel.style.display = opening ? 'flex' : 'none';
     };
     panel.querySelector('#mufy-recovery-close').onclick = () => { panel.style.display = 'none'; };
+    const roleMore = panel.querySelector('#mufy-recovery-role-more');
+    const roleMoreOptions = panel.querySelector('#mufy-recovery-role-more-options');
+    roleMore.onclick = () => {
+      roleMoreOptions.hidden = !roleMoreOptions.hidden;
+      roleMore.setAttribute('aria-expanded', String(!roleMoreOptions.hidden));
+      roleMore.textContent = roleMoreOptions.hidden ? '▸ 更多' : '▾ 更多';
+    };
     panel.querySelector('#mufy-recovery-export-chat').onclick = exportCurrentChat;
     panel.querySelector('#mufy-recovery-quote-entry').onclick = openQuoteLibraryModal;
     const panelBeautyModal = panel.querySelector('#mufy-recovery-panel-beauty-modal');
@@ -10948,17 +10945,13 @@ roleStateReady = true;
     panel.querySelectorAll('[data-section]').forEach(button => {
       button.onclick = () => {
         const nextSection = button.dataset.section;
-        state.section = ['roles', 'favorites', 'chats', 'beauty', 'accounts', 'materials', 'masks'].includes(nextSection) ? nextSection : 'roles';
+        state.section = ['roles', 'favorites', 'chats', 'accounts', 'materials', 'masks'].includes(nextSection) ? nextSection : 'roles';
         if (state.section === 'roles' && !['allRoles', 'chatted', 'chattedNotFavorite', 'favoriteOnly', 'roleHistory', 'authors'].includes(state.active)) state.active = 'allRoles';
         if (state.section === 'favorites' && !['manualFavoriteChats', 'siteSearch', 'siteAuthors'].includes(state.active)) state.active = 'manualFavoriteChats';
         if (state.section === 'chats' && state.active !== 'chatMatches') state.active = 'chatMatches';
         if (state.section === 'chats') refreshChatSearchDialogRoles();
-        if (state.section === 'beauty') state.active = 'beauty';
         if (state.section === 'accounts') state.active = 'accounts';
-        if (state.section === 'materials') {
-          state.active = 'materials';
-          state.materialKind = button.dataset.materialHomeKind === 'extra' ? 'extra' : 'prompt';
-        }
+        if (state.section === 'materials') state.active = 'materials';
         if (state.section === 'masks' && state.active !== 'masks' && state.active !== 'library') state.active = 'masks';
         render();
         if (state.section === 'masks' && state.active === 'masks') loadCurrentSiteMasks();
