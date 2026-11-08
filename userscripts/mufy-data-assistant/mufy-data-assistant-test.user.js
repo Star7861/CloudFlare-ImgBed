@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.72
+// @version      3.0.0-dev.73
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const SCRIPT_VERSION = '3.0.0-dev.72';
+  const SCRIPT_VERSION = '3.0.0-dev.73';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -55,15 +55,11 @@
   const CHAT_JUMP_KEY = 'mufy-role-links-only-chat-jump-v1';
   const QUOTE_CARD_KEY = 'mufy-role-links-only-quote-cards-v1';
   const QUOTE_STYLE_KEY = 'mufy-role-links-only-quote-style-v1';
-  const REGEX_RULES_KEY = 'mufy-role-links-only-regex-rules-v1';
-  const REGEX_OUTPUT_REQUIREMENTS_KEY = 'mufy-role-links-only-regex-output-requirements-v1';
-  const REGEX_RICH_RENDER_LIMIT_KEY = 'mufy-role-links-only-regex-rich-render-limit-v1';
   const PROMPT_LIBRARY_KEY = 'mufy-role-links-only-prompt-library-v1';
   const EXTRA_LIBRARY_KEY = 'mufy-role-links-only-extra-library-v1';
   const ACCOUNT_SWITCH_PROFILES_KEY = 'mufy-recovery-account-switch-profiles-v1';
   const ACCOUNT_SWITCH_PENDING_KEY = 'mufy-recovery-account-switch-pending-v1';
   const ACCOUNT_SWITCH_CURRENT_ID_KEY = 'mufy-recovery-account-switch-current-id-v1';
-  const REGEX_FEATURE_ENABLED = false;
   const CONTENT_LIBRARY_RECORD_PREFIX = 'content-library:';
   const MODEL_MONITOR_SELECTION_KEY = 'mufy-role-links-only-model-monitor-selection-v1';
   const MODEL_MONITOR_SNAPSHOT_KEY = 'mufy-role-links-only-model-monitor-snapshot-v1';
@@ -96,8 +92,6 @@
   let contentStorageMode = 'localStorage';
   let contentStorageGeneration = 0;
   let contentStorageWriteQueue = Promise.resolve();
-  let regexSandboxStoragePersistTimer = null;
-  const regexSandboxSiblingRefreshTimers = new Map();
   let liveHistoryPendingKey = '';
   let liveHistorySavedKey = '';
   let manualAutoChatProcessing = false;
@@ -403,29 +397,6 @@
     }, 500);
   }
 
-  function clearWebsiteAuthStorage() {
-    for (const storage of [pageWindow.localStorage, pageWindow.sessionStorage]) {
-      try {
-        const keys = Array.from({ length: storage.length }, (_, index) => String(storage.key(index) || ''));
-        for (const key of keys) {
-          if (key.startsWith('mufy-')) continue;
-          const value = String(storage.getItem(key) || '');
-          if (/(^|[-_:])(token|authorization|access.?token|refresh.?token|jwt|auth)([-_:]|$)/i.test(key)
-            || /"(?:accessToken|access_token|refreshToken|refresh_token|authorization|jwt)"\s*:/i.test(value)) storage.removeItem(key);
-        }
-      } catch (_) {}
-    }
-    try {
-      for (const part of String(document.cookie || '').split(';')) {
-        const name = part.split('=')[0]?.trim();
-        if (!name || !/(token|auth|session|jwt|login)/i.test(name)) continue;
-        document.cookie = `${name}=; Max-Age=0; path=/`;
-        document.cookie = `${name}=; Max-Age=0; path=/; domain=.mufy.ai`;
-      }
-    } catch (_) {}
-    authorization = '';
-  }
-
   function savePendingAccountSwitch(value) {
     try { sessionStorage.setItem(ACCOUNT_SWITCH_PENDING_KEY, JSON.stringify(value)); } catch (_) {}
   }
@@ -433,7 +404,6 @@
   function finishAccountLogout(pending) {
     const next = { ...pending, phase: 'login', logoutRequestedAt: Date.now() };
     savePendingAccountSwitch(next);
-    clearWebsiteAuthStorage();
     pageWindow.location.assign('/');
   }
 
@@ -559,17 +529,9 @@
     state.quoteCards = loadQuoteCards();
     state.quoteStyle = loadQuoteStyle();
     state.quoteSelectedId = '';
-    state.regexRules = loadRegexRules();
-    state.regexOutputRequirements = loadRegexOutputRequirements();
-    state.regexSandboxStorage = {};
-    state.regexRichRenderLimit = loadRegexRichRenderLimit();
     state.promptLibrary = loadMaterialLibrary(PROMPT_LIBRARY_KEY, 'prompt');
     state.extraLibrary = loadMaterialLibrary(EXTRA_LIBRARY_KEY, 'extra');
     initializeContentStorageForAccount(nextScope);
-    rawDialogRows.clear();
-    rawDialogRichCache.clear();
-    rawRegexHydratedPages.clear();
-    setTimeout(() => refreshRegexOnPage(), 0);
     state.modelMonitorSelectedIds = loadModelMonitorSelection();
     state.modelMonitorRows = [];
     state.modelMonitorLastChecked = '';
@@ -763,61 +725,6 @@
   const pendingSiteCaptureRows = [];
   let siteCaptureRenderTimer = 0;
   let siteCapturePageKey = '';
-  const rawDialogRows = new Map();
-  const rawDialogRichCache = new Map();
-  const rawRegexHydratedPages = new Map();
-  let rawRegexHydrating = false;
-  let rawDialogRenderTimer = 0;
-
-  function scheduleRawRichRegexRender() {
-    if (!REGEX_FEATURE_ENABLED) return;
-    if (!roleStateReady) return;
-    clearTimeout(rawDialogRenderTimer);
-    rawDialogRenderTimer = setTimeout(() => {
-      applyRawRichRegexToPage();
-      if (panel && state.section === 'regex') renderRegexSection();
-    }, 80);
-  }
-
-  function captureRawDialogPayload(requestUrl, payload) {
-    if (!REGEX_FEATURE_ENABLED) return;
-    try {
-      const url = new URL(String(requestUrl || ''), location.href);
-      if (!/\/api\/dialogs\/query$/i.test(url.pathname)) return;
-      const data = payload?.code === 200 && payload?.data ? payload.data : (payload?.data || payload);
-      const rows = dialogRowsFromPage(data).filter(row => row && typeof row === 'object');
-      for (const row of rows) {
-        const id = String(row.dialogsId || row.dialogId || row.id || '');
-        if (!id) continue;
-        rawDialogRows.delete(id);
-        rawDialogRows.set(id, row);
-        rawDialogRichCache.delete(id);
-      }
-      while (rawDialogRows.size > 2500) {
-        const oldestId = rawDialogRows.keys().next().value;
-        rawDialogRows.delete(oldestId);
-        rawDialogRichCache.delete(oldestId);
-      }
-      if (rows.length) scheduleRawRichRegexRender();
-    } catch (_) {}
-  }
-
-  function captureRawDialogResponse(requestUrl, response) {
-    try {
-      const url = new URL(String(requestUrl || ''), location.href);
-      if (!/\/api\/dialogs\/query$/i.test(url.pathname) || !response?.clone) return;
-      response.clone().json().then(body => captureRawDialogPayload(requestUrl, body)).catch(() => {});
-    } catch (_) {}
-  }
-
-  function captureRawDialogXhr(requestUrl, xhr) {
-    try {
-      const url = new URL(String(requestUrl || ''), location.href);
-      if (!/\/api\/dialogs\/query$/i.test(url.pathname)) return;
-      const body = xhr.responseType === 'json' ? xhr.response : JSON.parse(String(xhr.responseText || ''));
-      captureRawDialogPayload(requestUrl, body);
-    } catch (_) {}
-  }
 
   function installAuthCapture() {
     const XHR = pageWindow.XMLHttpRequest;
@@ -836,7 +743,6 @@
             tryCaptureSiteCharacterXhr(this.__mufyRecoveryUrl, this, this.__mufyRecoveryPageScope);
             recordChatApiObservation(this.__mufyRecoveryUrl, this, this.__mufyRecoveryMethod, this.__mufyRecoveryBody);
             captureChatModelConfigXhr(this.__mufyRecoveryUrl, this);
-            captureRawDialogXhr(this.__mufyRecoveryUrl, this);
           });
         }
         return originalOpen.call(this, method, url, ...rest);
@@ -868,7 +774,6 @@
             tryCaptureSiteCharacterResponse(requestUrl, response, pageScope);
             recordChatApiObservation(requestUrl, response, init?.method || input?.method || 'GET', init?.body || '');
             captureChatModelConfigResponse(requestUrl, response);
-            captureRawDialogResponse(requestUrl, response);
             return response;
           });
         } catch (_) {
@@ -1067,706 +972,9 @@
     try { localStorage.setItem(accountStorageKey(QUOTE_STYLE_KEY), JSON.stringify(state.quoteStyle)); } catch (_) {}
   }
 
-  function normalizeRegexRule(row = {}) {
-    return {
-      id: String(row.id || pageWindow.crypto?.randomUUID?.() || `regex-${Date.now()}-${Math.random().toString(36).slice(2)}`),
-      name: String(row.name || '未命名规则').trim() || '未命名规则',
-      pattern: String(row.pattern || ''),
-      replacement: String(row.replacement || ''),
-      flags: String(row.flags || 'g').replace(/[^dgimsuvy]/g, ''),
-      enabled: row.enabled !== false,
-      targetSymbol: String(row.targetSymbol || ''),
-      mode: Number.isFinite(Number(row.mode)) ? Number(row.mode) : 0,
-      visibility: row.visibility !== false,
-      sourceFormat: String(row.sourceFormat || '')
-    };
-  }
-
-  function loadRegexRules() {
-    try {
-      const rows = JSON.parse(loadAndMigrateScopedValue(REGEX_RULES_KEY) || '[]');
-      return Array.isArray(rows) ? rows.filter(row => row && typeof row === 'object').map(normalizeRegexRule) : [];
-    } catch (_) { return []; }
-  }
-
-  function loadRegexOutputRequirements() {
-    const requirements = {};
-    try {
-      const saved = JSON.parse(loadAndMigrateScopedValue(REGEX_OUTPUT_REQUIREMENTS_KEY) || '{}');
-      if (saved && typeof saved === 'object' && !Array.isArray(saved)) {
-        Object.entries(saved).forEach(([id, value]) => { if (String(value || '')) requirements[String(id)] = String(value); });
-      }
-      const legacyRows = JSON.parse(loadAndMigrateScopedValue(REGEX_RULES_KEY) || '[]');
-      if (Array.isArray(legacyRows)) legacyRows.forEach(row => {
-        const id = String(row?.id || '');
-        const value = String(row?.outputRequirement || row?.outputRequirements || row?.outputRequest || row?.output_requirement || row?.prompt || row?.instruction || '');
-        if (id && value && !requirements[id]) requirements[id] = value;
-      });
-    } catch (_) {}
-    return requirements;
-  }
-
-  function regexOutputRequirement(ruleOrId) {
-    const id = typeof ruleOrId === 'object' ? ruleOrId?.id : ruleOrId;
-    return String(state.regexOutputRequirements?.[String(id || '')] || '');
-  }
-
-  function saveRegexOutputRequirements() {
-    if (contentStorageMode === 'indexedDB') return queueContentStoragePersist('正则输出要求');
-    try {
-      localStorage.setItem(accountStorageKey(REGEX_OUTPUT_REQUIREMENTS_KEY), JSON.stringify(state.regexOutputRequirements || {}));
-      return true;
-    } catch (error) {
-      appendRunLog('error', '正则输出要求保存失败', error);
-      state.status = '输出要求未能保存，可能是浏览器本地空间不足。';
-      return false;
-    }
-  }
-
-  function loadRegexRichRenderLimit() {
-    try { return Math.max(1, Math.min(10, Number(loadAndMigrateScopedValue(REGEX_RICH_RENDER_LIMIT_KEY)) || 3)); }
-    catch (_) { return 3; }
-  }
-
-  function saveRegexRichRenderLimit(value) {
-    const limit = Math.max(1, Math.min(10, Number(value) || 3));
-    state.regexRichRenderLimit = limit;
-    if (contentStorageMode === 'indexedDB') queueContentStoragePersist('HTML 渲染数量设置');
-    else try { localStorage.setItem(accountStorageKey(REGEX_RICH_RENDER_LIMIT_KEY), String(limit)); } catch (_) {}
-    return limit;
-  }
-
-  function saveRegexRules() {
-    if (contentStorageMode === 'indexedDB') return queueContentStoragePersist('正则规则');
-    try {
-      localStorage.setItem(accountStorageKey(REGEX_RULES_KEY), JSON.stringify(state.regexRules));
-      saveRegexOutputRequirements();
-      return true;
-    } catch (error) {
-      appendRunLog('error', '正则规则保存失败', error);
-      state.status = '正则规则未能保存，可能是浏览器本地空间不足。';
-      return false;
-    }
-  }
-
-  function compiledRegexRule(rule) {
-    if (!rule?.pattern) return { regex: null, error: '查找表达式为空' };
-    try { return { regex: new RegExp(rule.pattern, rule.flags), error: '' }; }
-    catch (error) { return { regex: null, error: String(error?.message || error) }; }
-  }
-
-  function isRichHtmlRegexRule(rule) {
-    const replacement = String(rule?.replacement || '');
-    return replacement.length > 20000
-      || /```html\b/i.test(replacement)
-      || /<!doctype\s+html|<html\b|<script\b|<style\b/i.test(replacement);
-  }
-
-  function regexRulePreview(value, maxLength = 180) {
+  function contentPreview(value, maxLength = 260) {
     const text = String(value ?? '').replace(/\s+/g, ' ').trim();
     return text.length > maxLength ? `${text.slice(0, maxLength)}…` : text;
-  }
-
-  function applyRegexRulesToText(text) {
-    let output = String(text ?? '');
-    for (const rule of state.regexRules) {
-      if (!rule.enabled || isRichHtmlRegexRule(rule)) continue;
-      const compiled = compiledRegexRule(rule);
-      if (!compiled.regex) continue;
-      try {
-        const next = output.replace(compiled.regex, rule.replacement);
-        if (next.length > Math.max(20000, output.length * 8 + 2000)) continue;
-        output = next;
-      } catch (_) {}
-    }
-    return output;
-  }
-
-  function richRegexHtmlListForSource(source, rule) {
-    if (!source || !rule?.pattern || !rule?.replacement) return [];
-    let matcher;
-    let single;
-    try {
-      const baseFlags = String(rule.flags || '').replace(/y/g, '');
-      matcher = new RegExp(rule.pattern, baseFlags.includes('g') ? baseFlags : `${baseFlags}g`);
-      single = new RegExp(rule.pattern, baseFlags.replace(/g/g, ''));
-    } catch (_) { return []; }
-    const htmls = [];
-    for (const match of String(source).matchAll(matcher)) {
-      let rendered = match[0].replace(single, rule.replacement);
-      rendered = rendered.replace(/^\s*```html\s*/i, '').replace(/\s*```\s*$/i, '').trim();
-      const documentStart = rendered.search(/<!doctype\s+html|<html\b/i);
-      const documentEnd = rendered.toLowerCase().lastIndexOf('</html>');
-      if (documentStart >= 0 && documentEnd >= documentStart) rendered = rendered.slice(documentStart, documentEnd + 7);
-      if (/<html\b|<!doctype\s+html/i.test(rendered)) htmls.push(rendered);
-      if (htmls.length >= 10) break;
-    }
-    return htmls;
-  }
-
-  function richRegexHtmlForSource(source, rule) {
-    return richRegexHtmlListForSource(source, rule)[0] || '';
-  }
-
-  function richRegexHtmlForElement(element, rule) {
-    if (!element) return '';
-    for (const source of [String(element.textContent || ''), String(element.innerHTML || '')]) {
-      const html = richRegexHtmlForSource(source, rule);
-      if (html) return html;
-    }
-    return '';
-  }
-
-  function richRegexHtmlListForElement(element, rule) {
-    if (!element) return [];
-    for (const source of [String(element.textContent || ''), String(element.innerHTML || '')]) {
-      const htmls = richRegexHtmlListForSource(source, rule);
-      if (htmls.length) return htmls;
-    }
-    return [];
-  }
-
-  function richRegexPhoneTextsForSource(source, rule) {
-    if (!source || !rule?.pattern) return [];
-    let matcher;
-    try {
-      const baseFlags = String(rule.flags || '').replace(/y/g, '');
-      matcher = new RegExp(rule.pattern, baseFlags.includes('g') ? baseFlags : `${baseFlags}g`);
-    } catch (_) { return []; }
-    return [...String(source).matchAll(matcher)].slice(0, 10).map(match => {
-      const holder = document.createElement('div');
-      holder.innerHTML = match[0].replace(/<br\s*\/?>/gi, '\n');
-      return String(holder.textContent || '').replace(/\s+/g, '');
-    }).filter(text => text.length >= 6);
-  }
-
-  function sandboxRichRegexHtml(html, ruleId = '') {
-    const persistent = state.regexSandboxStorage?.[String(ruleId || '')] || { localStorage: {}, indexedDB: {} };
-    const initial = JSON.stringify(persistent).replace(/</g, '\\u003c').replace(/<\/script/gi, '<\\/script');
-    const safeRuleId = JSON.stringify(String(ruleId || '')).replace(/</g, '\\u003c');
-    const storageShim = `<script>(()=>{const ruleId=${safeRuleId};const root=${initial};root.localStorage=root.localStorage&&typeof root.localStorage==='object'?root.localStorage:{};root.indexedDB=root.indexedDB&&typeof root.indexedDB==='object'?root.indexedDB:{};let persistTimer=0;const clone=v=>v==null?v:JSON.parse(JSON.stringify(v));const persist=()=>{clearTimeout(persistTimer);persistTimer=setTimeout(()=>parent.postMessage({type:'mufy-regex-sandbox-storage',ruleId,data:root},'*'),80)};window.__mufySafeStorage={get length(){return Object.keys(root.localStorage).length},key:i=>Object.keys(root.localStorage)[i]??null,getItem:k=>Object.prototype.hasOwnProperty.call(root.localStorage,String(k))?String(root.localStorage[String(k)]):null,setItem:(k,v)=>{root.localStorage[String(k)]=String(v);persist()},removeItem:k=>{delete root.localStorage[String(k)];persist()},clear:()=>{root.localStorage={};persist()}};const names=stores=>({get length(){return Object.keys(stores).length},contains:n=>Object.prototype.hasOwnProperty.call(stores,String(n)),item:i=>Object.keys(stores)[i]??null,[Symbol.iterator]:function*(){yield*Object.keys(stores)}});const finish=(target,ok,value,error)=>setTimeout(()=>{target.result=value;target.error=error||null;const fn=ok?target.onsuccess:target.onerror;if(typeof fn==='function')fn({target})},0);const makeDb=(name,entry)=>({name,version:entry.version,objectStoreNames:names(entry.stores),createObjectStore(storeName,options={}){const key=String(storeName);if(!entry.stores[key])entry.stores[key]={keyPath:String(options.keyPath||'id'),records:{}};persist();return makeStore(entry.stores[key],null)},transaction(storeName){const key=String(Array.isArray(storeName)?storeName[0]:storeName);const tx={error:null,oncomplete:null,onerror:null,onabort:null,objectStore(){if(!entry.stores[key])throw new Error('NotFoundError');return makeStore(entry.stores[key],tx)}};return tx},close(){}});const complete=tx=>setTimeout(()=>{if(typeof tx?.oncomplete==='function')tx.oncomplete({target:tx})},0);const makeStore=(store,tx)=>({keyPath:store.keyPath,put(value){const req={result:null,error:null,onsuccess:null,onerror:null};try{const item=clone(value);const key=String(item?.[store.keyPath]);if(!key||key==='undefined')throw new Error('DataError');store.records[key]=item;persist();finish(req,true,key);complete(tx)}catch(error){finish(req,false,null,error);if(tx){tx.error=error;setTimeout(()=>tx.onerror?.({target:tx}),0)}}return req},get(key){const req={result:null,error:null,onsuccess:null,onerror:null};finish(req,true,clone(store.records[String(key)]));complete(tx);return req},delete(key){const req={result:null,error:null,onsuccess:null,onerror:null};delete store.records[String(key)];persist();finish(req,true,undefined);complete(tx);return req},clear(){const req={result:null,error:null,onsuccess:null,onerror:null};store.records={};persist();finish(req,true,undefined);complete(tx);return req}});window.__mufySafeIndexedDB={open(name,version=1){const req={result:null,error:null,onupgradeneeded:null,onsuccess:null,onerror:null};setTimeout(()=>{const key=String(name);let entry=root.indexedDB[key];const oldVersion=Number(entry?.version||0);if(!entry)entry=root.indexedDB[key]={version:Number(version)||1,stores:{}};if(Number(version)>Number(entry.version||0))entry.version=Number(version);const db=makeDb(key,entry);req.result=db;if(oldVersion<entry.version&&typeof req.onupgradeneeded==='function')req.onupgradeneeded({target:req,oldVersion,newVersion:entry.version});if(oldVersion<entry.version)persist();setTimeout(()=>req.onsuccess?.({target:req}),0)},0);return req},deleteDatabase(name){const req={result:null,error:null,onsuccess:null,onerror:null};delete root.indexedDB[String(name)];persist();finish(req,true,undefined);return req}};})();<\/script>`;
-    const transparentShim = '<style id="mufy-transparent-host">html,body{margin:0!important;background:transparent!important;background-color:transparent!important}body{overflow-x:hidden!important}</style>';
-    let safeHtml = String(html || '').replace(/(?:window\.)?localStorage\b/g, 'window.__mufySafeStorage').replace(/(?:window\.)?indexedDB\b/g, 'window.__mufySafeIndexedDB');
-    if (/<head(?:\s[^>]*)?>/i.test(safeHtml)) safeHtml = safeHtml.replace(/<head(\s[^>]*)?>/i, match => `${match}<base target="_blank">${transparentShim}${storageShim}`);
-    else safeHtml = `${transparentShim}${storageShim}${safeHtml}`;
-    return safeHtml;
-  }
-
-  function handleRegexSandboxStorageMessage(event) {
-    if (!REGEX_FEATURE_ENABLED) return;
-    const data = event?.data;
-    if (!data || data.type !== 'mufy-regex-sandbox-storage' || !data.ruleId || !data.data || typeof data.data !== 'object') return;
-    const frame = [...document.querySelectorAll('iframe.mufy-rich-regex-frame, #mufy-recovery-regex-html-preview')].find(item => item.contentWindow === event.source);
-    if (!frame || String(frame.dataset.mufyRegexRuleId || '') !== String(data.ruleId)) return;
-    if (Number(frame.dataset.mufyStorageSyncReloadUntil || 0) > Date.now()) return;
-    if (!state.regexRules.some(rule => rule.id === String(data.ruleId))) return;
-    if (sameMaskDataSnapshot(state.regexSandboxStorage?.[String(data.ruleId)] || {}, data.data)) return;
-    state.regexSandboxStorage[String(data.ruleId)] = cloneValue(data.data);
-    clearTimeout(regexSandboxStoragePersistTimer);
-    regexSandboxStoragePersistTimer = setTimeout(() => queueContentStoragePersist('正则关联数据'), 250);
-    clearTimeout(regexSandboxSiblingRefreshTimers.get(String(data.ruleId)));
-    regexSandboxSiblingRefreshTimers.set(String(data.ruleId), setTimeout(() => {
-      const frames = [...document.querySelectorAll('iframe.mufy-rich-regex-frame, #mufy-recovery-regex-html-preview')]
-        .filter(item => item !== frame && String(item.dataset.mufyRegexRuleId || '') === String(data.ruleId) && typeof item.__mufyRegexOriginalHtml === 'string');
-      frames.forEach(item => {
-        item.dataset.mufyStorageSyncReloadUntil = String(Date.now() + 1800);
-        item.srcdoc = sandboxRichRegexHtml(item.__mufyRegexOriginalHtml, String(data.ruleId));
-      });
-      regexSandboxSiblingRefreshTimers.delete(String(data.ruleId));
-    }, 320));
-  }
-
-  function reloadRegexSandboxFrames() {
-    document.querySelectorAll('iframe.mufy-rich-regex-frame, #mufy-recovery-regex-html-preview').forEach(frame => {
-      const ruleId = String(frame.dataset.mufyRegexRuleId || '');
-      if (ruleId && typeof frame.__mufyRegexOriginalHtml === 'string') {
-        frame.dataset.mufyStorageSyncReloadUntil = String(Date.now() + 1800);
-        frame.srcdoc = sandboxRichRegexHtml(frame.__mufyRegexOriginalHtml, ruleId);
-      }
-    });
-  }
-
-  const richRegexState = new WeakMap();
-
-  function restoreRichRegexElement(element) {
-    const previous = richRegexState.get(element);
-    if (!previous) return;
-    if (previous.source === 'raw-inline' && typeof previous.originalHtml === 'string') {
-      element.innerHTML = previous.originalHtml;
-      element.style.display = previous.display;
-      richRegexState.delete(element);
-      return;
-    }
-    previous.wrapper?.remove?.();
-    element.style.display = previous.display;
-    richRegexState.delete(element);
-  }
-
-  function normalizedTextMap(element) {
-    const chars = [];
-    const points = [];
-    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
-    let node;
-    while ((node = walker.nextNode())) {
-      if (node.parentElement?.closest?.('.mufy-rich-regex-inline-wrap')) continue;
-      const text = String(node.nodeValue || '');
-      for (let offset = 0; offset < text.length; offset += 1) {
-        if (/\s/.test(text[offset])) continue;
-        chars.push(text[offset]);
-        points.push({ node, offset });
-      }
-    }
-    return { text: chars.join(''), points };
-  }
-
-  function locatePhoneTextRange(haystack, needle, fromIndex = 0) {
-    const exact = haystack.indexOf(needle, fromIndex);
-    if (exact >= 0) return { start: exact, end: exact + needle.length };
-    const anchorSize = Math.min(42, Math.max(14, Math.floor(needle.length / 5)));
-    const first = needle.slice(0, anchorSize);
-    const last = needle.slice(-anchorSize);
-    const start = haystack.indexOf(first, fromIndex);
-    if (start < 0) return null;
-    const lastStart = haystack.indexOf(last, start + first.length);
-    if (lastStart < 0) return null;
-    return { start, end: lastStart + last.length };
-  }
-
-  function mountRawInlineRegexElement(element, selected, sourceKey, htmlSignature) {
-    const phoneTexts = Array.isArray(selected.phoneTexts) ? selected.phoneTexts : [];
-    const htmls = Array.isArray(selected.htmls) ? selected.htmls : [];
-    if (!phoneTexts.length || phoneTexts.length !== htmls.length) return false;
-    const mapped = normalizedTextMap(element);
-    const locations = [];
-    let cursor = 0;
-    for (const phoneText of phoneTexts) {
-      const location = locatePhoneTextRange(mapped.text, phoneText, cursor);
-      if (!location) return false;
-      locations.push(location);
-      cursor = location.end;
-    }
-    const originalHtml = element.innerHTML;
-    const wrappers = [];
-    for (let index = locations.length - 1; index >= 0; index -= 1) {
-      const location = locations[index];
-      const start = mapped.points[location.start];
-      const end = mapped.points[location.end - 1];
-      if (!start || !end || !start.node.isConnected || !end.node.isConnected) return false;
-      const range = document.createRange();
-      range.setStart(start.node, start.offset);
-      range.setEnd(end.node, end.offset + 1);
-      range.deleteContents();
-      const wrapper = document.createElement('span');
-      wrapper.className = 'mufy-rich-regex-inline-wrap';
-      wrapper.dataset.mufyDialogId = sourceKey;
-      const iframe = document.createElement('iframe');
-      iframe.className = 'mufy-rich-regex-frame';
-      iframe.dataset.mufyRegexRuleId = selected.rule.id;
-      iframe.title = `${selected.rule.name || 'HTML 正则'}渲染结果${htmls.length > 1 ? ` ${index + 1}` : ''}`;
-      iframe.setAttribute('sandbox', 'allow-scripts allow-forms allow-modals allow-popups allow-downloads');
-      iframe.setAttribute('referrerpolicy', 'no-referrer');
-      iframe.__mufyRegexOriginalHtml = htmls[index];
-      iframe.srcdoc = sandboxRichRegexHtml(htmls[index], selected.rule.id);
-      wrapper.appendChild(iframe);
-      range.insertNode(wrapper);
-      wrappers.unshift(wrapper);
-    }
-    richRegexState.set(element, { ruleId: selected.rule.id, htmlSignature, wrapper: wrappers[0], wrappers, display: element.style.display, source: 'raw-inline', sourceKey, originalHtml });
-    return true;
-  }
-
-  function mountRichRegexElement(element, selected, source = 'dom', sourceKey = '') {
-    const htmls = Array.isArray(selected.htmls) && selected.htmls.length ? selected.htmls : [selected.html].filter(Boolean);
-    if (!htmls.length) return;
-    const htmlSignature = htmls.map(html => `${html.length}:${html.slice(0, 60)}:${html.slice(-60)}`).join('|');
-    const previous = richRegexState.get(element);
-    const sameSource = previous?.source === source || (source === 'raw' && previous?.source === 'raw-inline');
-    if (previous?.ruleId === selected.rule.id && previous.htmlSignature === htmlSignature && sameSource && previous.sourceKey === sourceKey && previous.wrapper?.isConnected) return;
-    if (previous) restoreRichRegexElement(element);
-    if (source === 'raw' && mountRawInlineRegexElement(element, selected, sourceKey, htmlSignature)) return;
-    const wrapper = document.createElement('div');
-    wrapper.className = 'mufy-rich-regex-frame-wrap';
-    wrapper.dataset.mufyRichRegex = selected.rule.id;
-    if (sourceKey) wrapper.dataset.mufyDialogId = sourceKey;
-    htmls.forEach((html, index) => {
-      const iframe = document.createElement('iframe');
-      iframe.className = 'mufy-rich-regex-frame';
-      iframe.dataset.mufyRegexRuleId = selected.rule.id;
-      iframe.title = `${selected.rule.name || 'HTML 正则'}渲染结果${htmls.length > 1 ? ` ${index + 1}` : ''}`;
-      iframe.setAttribute('sandbox', 'allow-scripts allow-forms allow-modals allow-popups allow-downloads');
-      iframe.setAttribute('referrerpolicy', 'no-referrer');
-      iframe.__mufyRegexOriginalHtml = html;
-      iframe.srcdoc = sandboxRichRegexHtml(html, selected.rule.id);
-      wrapper.appendChild(iframe);
-    });
-    const display = element.style.display;
-    element.after(wrapper);
-    if (source === 'dom') element.style.display = 'none';
-    richRegexState.set(element, { ruleId: selected.rule.id, htmlSignature, wrapper, display, source, sourceKey });
-  }
-
-  function applyRichRegexToElement(element) {
-    if (!element || element.closest?.('#mufy-recovery-panel')) return;
-    const recentFloors = recentChatFloorElements();
-    if (!recentFloors.has(element)) {
-      restoreRichRegexElement(element);
-      return;
-    }
-    let selected = null;
-    for (const rule of state.regexRules) {
-      if (!rule.enabled || !isRichHtmlRegexRule(rule)) continue;
-      const htmls = richRegexHtmlListForElement(element, rule);
-      if (htmls.length) { selected = { rule, htmls }; break; }
-    }
-    const previous = richRegexState.get(element);
-    if (!selected) {
-      if (previous?.source === 'raw' || previous?.source === 'raw-inline') return;
-      restoreRichRegexElement(element);
-      return;
-    }
-    if (previous?.source === 'raw') return;
-    mountRichRegexElement(element, selected, 'dom');
-  }
-
-  function applyRichRegexInRoot(root = document) {
-    if (!REGEX_FEATURE_ENABLED) return;
-    if (!root) return;
-    const markdownRoots = [];
-    if (root.matches?.('.react-markdown')) markdownRoots.push(root);
-    root.querySelectorAll?.('.react-markdown').forEach(item => markdownRoots.push(item));
-    if (root.closest?.('.react-markdown')) markdownRoots.push(root.closest('.react-markdown'));
-    [...new Set(markdownRoots)].forEach(applyRichRegexToElement);
-    trimRichRegexFrames();
-    const insidePanel = root.nodeType === 1 && (root.matches?.('#mufy-recovery-panel') || root.closest?.('#mufy-recovery-panel'));
-    if (rawDialogRows.size && !insidePanel) scheduleRawRichRegexRender();
-  }
-
-  function trimRichRegexFrames() {
-    const recentFloors = recentChatFloorElements();
-    [...document.querySelectorAll('.react-markdown')]
-      .filter(element => !element.closest('#mufy-recovery-panel') && richRegexState.get(element)?.wrapper?.isConnected && !recentFloors.has(element))
-      .forEach(restoreRichRegexElement);
-  }
-
-  function recentChatFloorElements() {
-    const limit = Math.max(1, Number(state.regexRichRenderLimit) || 3);
-    const floors = [...document.querySelectorAll('.react-markdown')].filter(element => !element.closest('#mufy-recovery-panel'));
-    return new Set(floors.slice(-limit));
-  }
-
-  function rawRichRegexMatch(row) {
-    const rowId = String(row?.dialogsId || row?.dialogId || row?.id || '');
-    const signature = state.regexRules.filter(rule => rule.enabled && isRichHtmlRegexRule(rule))
-      .map(rule => `${rule.id}:${rule.pattern}:${rule.flags}:${rule.replacement.length}:${rule.replacement.slice(0, 40)}:${rule.replacement.slice(-40)}`).join('|');
-    const cached = rowId ? rawDialogRichCache.get(rowId) : null;
-    if (cached?.signature === signature) return cached.match;
-    const source = dialogSearchText(row);
-    if (!source) {
-      if (rowId) rawDialogRichCache.set(rowId, { signature, match: null });
-      return null;
-    }
-    for (const rule of state.regexRules) {
-      if (!rule.enabled || !isRichHtmlRegexRule(rule)) continue;
-      const htmls = richRegexHtmlListForSource(source, rule);
-      if (!htmls.length) continue;
-      const phoneTexts = richRegexPhoneTextsForSource(source, rule);
-      let visibleSource = source;
-      try { visibleSource = source.replace(new RegExp(rule.pattern, rule.flags), ' '); } catch (_) {}
-      const holder = document.createElement('div');
-      holder.innerHTML = visibleSource.replace(/<br\s*\/?>/gi, '\n');
-      holder.querySelectorAll('script,style').forEach(node => node.remove());
-      const visibleText = String(holder.textContent || '').replace(/\s+/g, '');
-      const result = { rule, htmls, phoneTexts, visibleText };
-      if (rowId) rawDialogRichCache.set(rowId, { signature, match: result });
-      return result;
-    }
-    if (rowId) rawDialogRichCache.set(rowId, { signature, match: null });
-    return null;
-  }
-
-  function isAssistantDialogRow(row) {
-    const role = String(row?.role || '').trim().toLowerCase();
-    return !role || role === 'assistant';
-  }
-
-  function rawRegexFingerprintParts(text) {
-    const value = String(text || '');
-    if (value.length < 10) return [];
-    const size = Math.min(34, Math.max(12, Math.floor(value.length / 6)));
-    const positions = [0, Math.floor(value.length / 3), Math.floor(value.length * 2 / 3), Math.max(0, value.length - size)];
-    return [...new Set(positions.map(position => value.slice(position, position + size)).filter(part => part.length >= 10))];
-  }
-
-  function elementCarriesDialogId(element, dialogId) {
-    let node = element;
-    for (let depth = 0; node && depth < 9; depth += 1, node = node.parentElement) {
-      if ([...(node.attributes || [])].some(attribute => String(attribute.value || '').includes(dialogId))) return true;
-    }
-    return false;
-  }
-
-  function applyRawRichRegexToPage() {
-    if (!REGEX_FEATURE_ENABLED) return;
-    if (!roleStateReady || !state?.regexRules?.some(rule => rule.enabled && isRichHtmlRegexRule(rule))) return;
-    const context = currentRoleContext();
-    if (!context.sessionId) return;
-    const candidates = [...document.querySelectorAll('.react-markdown')].filter(element => !element.closest('#mufy-recovery-panel'));
-    if (!candidates.length) return;
-    const used = new Set();
-    const rows = [...rawDialogRows.values()]
-      .filter(row => !row.sessionId || String(row.sessionId) === String(context.sessionId))
-      .filter(isAssistantDialogRow)
-      .sort((a, b) => String(a.createdTime || a.updatedTime || '').localeCompare(String(b.createdTime || b.updatedTime || '')))
-      .slice(-Math.max(1, Number(state.regexRichRenderLimit) || 3))
-      .map(row => ({ row, match: rawRichRegexMatch(row) }))
-      .filter(item => item.match)
-      .sort((a, b) => String(a.row.createdTime || a.row.updatedTime || '').localeCompare(String(b.row.createdTime || b.row.updatedTime || '')));
-    for (const item of rows) {
-      const dialogId = String(item.row.dialogsId || item.row.dialogId || item.row.id || '');
-      const fingerprints = rawRegexFingerprintParts(item.match.visibleText);
-      let best = null;
-      let bestScore = 0;
-      for (const element of candidates) {
-        if (used.has(element)) continue;
-        let score = dialogId && elementCarriesDialogId(element, dialogId) ? 100 : 0;
-        const visible = String(element.textContent || '').replace(/\s+/g, '');
-        score += fingerprints.reduce((total, part) => total + (visible.includes(part) ? 1 : 0), 0);
-        if (score > bestScore) { best = element; bestScore = score; }
-      }
-      if (!best || bestScore < 1) continue;
-      used.add(best);
-      mountRichRegexElement(best, item.match, 'raw', dialogId);
-    }
-    for (const element of candidates) {
-      const previous = richRegexState.get(element);
-      if ((previous?.source === 'raw' || previous?.source === 'raw-inline') && !used.has(element)) restoreRichRegexElement(element);
-    }
-    trimRichRegexFrames();
-  }
-
-  const regexTextState = new WeakMap();
-  let regexApplying = false;
-
-  function applyRegexToTextNode(node) {
-    if (!REGEX_FEATURE_ENABLED) return;
-    if (!node || node.nodeType !== Node.TEXT_NODE || !node.parentElement?.closest?.('.react-markdown')) return;
-    if (node.parentElement.closest('#mufy-recovery-panel,script,style,textarea,input,[contenteditable="true"]')) return;
-    const current = String(node.nodeValue || '');
-    const previous = regexTextState.get(node);
-    const original = previous && current === previous.applied ? previous.original : current;
-    const applied = applyRegexRulesToText(original);
-    regexTextState.set(node, { original, applied });
-    if (current !== applied) node.nodeValue = applied;
-  }
-
-  function applyRegexInRoot(root = document) {
-    if (!REGEX_FEATURE_ENABLED) return;
-    if (regexApplying || !root) return;
-    regexApplying = true;
-    try {
-      if (root.nodeType === Node.TEXT_NODE) {
-        applyRegexToTextNode(root);
-        return;
-      }
-      const markdownRoots = [];
-      if (root.matches?.('.react-markdown')) markdownRoots.push(root);
-      root.querySelectorAll?.('.react-markdown').forEach(item => markdownRoots.push(item));
-      if (root.closest?.('.react-markdown')) markdownRoots.push(root.closest('.react-markdown'));
-      [...new Set(markdownRoots)].forEach(markdown => {
-        const walker = document.createTreeWalker(markdown, NodeFilter.SHOW_TEXT);
-        let node;
-        while ((node = walker.nextNode())) applyRegexToTextNode(node);
-      });
-    } finally {
-      regexApplying = false;
-    }
-  }
-
-  function refreshRegexOnPage() {
-    if (!REGEX_FEATURE_ENABLED) return;
-    applyRegexInRoot(document);
-    applyRichRegexInRoot(document);
-    hydrateRecentRawDialogsForRegex();
-    renderRegexSection();
-  }
-
-  function renderRegexSection() {
-    const list = panel?.querySelector('#mufy-recovery-regex-list');
-    if (!list) return;
-    list.innerHTML = state.regexRules.map((rule, index) => {
-      const error = compiledRegexRule(rule).error;
-      const richHtml = isRichHtmlRegexRule(rule);
-      const patternPreview = regexRulePreview(rule.pattern, 120);
-      const replacementPreview = regexRulePreview(rule.replacement || '（删除匹配内容）', 180);
-      const outputRequirement = regexOutputRequirement(rule);
-      const outputPreview = regexRulePreview(outputRequirement, 180);
-      return `<div class="mufy-regex-rule ${rule.enabled ? 'is-enabled' : ''}" ${rule.enabled && outputRequirement ? `data-regex-card-insert="${esc(rule.id)}" title="点击空白处将输出要求写入聊天输入框"` : ''}><label><input type="checkbox" data-regex-toggle="${esc(rule.id)}" ${rule.enabled ? 'checked' : ''}><span><b>${esc(rule.name)}</b><small>/${esc(patternPreview)}/${esc(rule.flags)} → ${esc(replacementPreview)}</small>${richHtml ? `<em class="mufy-regex-html-status">HTML 交互规则 · 已捕获 ${rawDialogRows.size} 条接口原文 · 匹配后挂回聊天</em>` : ''}${outputRequirement ? `<small class="mufy-regex-output-requirement">输出要求：${esc(outputPreview)}</small>` : ''}${error ? `<em>${esc(error)}</em>` : ''}</span></label><span class="mufy-regex-rule-actions">${rule.enabled && outputRequirement ? `<button data-regex-insert="${esc(rule.id)}">写入要求</button>` : ''}<button data-regex-requirement="${esc(rule.id)}">${outputRequirement ? '改要求' : '加要求'}</button><button data-regex-edit="${esc(rule.id)}">编辑</button><button data-regex-delete="${esc(rule.id)}">删除</button><button data-regex-up="${esc(rule.id)}" ${index === 0 ? 'disabled' : ''}>上移</button></span></div>`;
-    }).join('') || '<div class="mufy-recovery-empty">还没有正则规则。点击“新增规则”创建第一条。</div>';
-    const sample = panel.querySelector('#mufy-recovery-regex-test-input');
-    const output = panel.querySelector('#mufy-recovery-regex-test-output');
-    const preview = panel.querySelector('#mufy-recovery-regex-html-preview');
-    const limitInput = panel.querySelector('#mufy-recovery-regex-rich-limit');
-    if (limitInput && document.activeElement !== limitInput) limitInput.value = String(state.regexRichRenderLimit);
-    if (sample && output && preview) {
-      let richPreview = null;
-      for (const rule of state.regexRules) {
-        if (!rule.enabled || !isRichHtmlRegexRule(rule)) continue;
-        const html = richRegexHtmlForSource(sample.value, rule);
-        if (html) { richPreview = { rule, html }; break; }
-      }
-      if (richPreview) {
-        output.value = `已匹配 HTML 交互规则“${richPreview.rule.name}”，请在下方预览操作。`;
-        const signature = `${richPreview.rule.id}:${sample.value.length}:${sample.value.slice(0, 80)}:${sample.value.slice(-80)}`;
-        if (preview.dataset.signature !== signature) {
-          preview.dataset.mufyRegexRuleId = richPreview.rule.id;
-          preview.__mufyRegexOriginalHtml = richPreview.html;
-          preview.srcdoc = sandboxRichRegexHtml(richPreview.html, richPreview.rule.id);
-          preview.dataset.signature = signature;
-        }
-        preview.hidden = false;
-      } else {
-        output.value = applyRegexRulesToText(sample.value);
-        preview.hidden = true;
-        preview.removeAttribute('srcdoc');
-        delete preview.dataset.signature;
-      }
-    }
-  }
-
-  function editRegexRule(existingId = '') {
-    const existing = state.regexRules.find(row => row.id === existingId);
-    const name = pageWindow.prompt('规则名称', existing?.name || '新规则');
-    if (name == null) return;
-    const pattern = pageWindow.prompt('查找表达式（不需要输入两侧的 /）', existing?.pattern || '');
-    if (pattern == null) return;
-    const preserveRichReplacement = Boolean(existing && isRichHtmlRegexRule(existing));
-    const replacement = preserveRichReplacement
-      ? existing.replacement
-      : pageWindow.prompt('替换内容；可以使用 $1、$2 等捕获组。留空表示删除匹配内容。', existing?.replacement || '');
-    if (replacement == null) return;
-    const flags = pageWindow.prompt('flags，例如 g、gi、gim', existing?.flags || 'g');
-    if (flags == null) return;
-    const next = normalizeRegexRule({ ...existing, id: existing?.id, name, pattern, replacement, flags, enabled: existing?.enabled !== false });
-    const error = compiledRegexRule(next).error;
-    if (error) {
-      pageWindow.alert(`正则表达式无效：${error}`);
-      return;
-    }
-    if (existing) state.regexRules = state.regexRules.map(row => row.id === existing.id ? next : row);
-    else state.regexRules.push(next);
-    saveRegexRules();
-    refreshRegexOnPage();
-  }
-
-  function editRegexOutputRequirement(ruleId) {
-    const rule = state.regexRules.find(row => row.id === String(ruleId || ''));
-    if (!rule) return;
-    const outputRequirement = pageWindow.prompt('输出要求：点击“写入要求”时会填入聊天输入框；留空可清除。', regexOutputRequirement(rule));
-    if (outputRequirement == null) return;
-    if (String(outputRequirement)) state.regexOutputRequirements[rule.id] = String(outputRequirement);
-    else delete state.regexOutputRequirements[rule.id];
-    if (!saveRegexOutputRequirements()) return;
-    state.status = String(outputRequirement) ? `已保存“${rule.name}”的输出要求，正则匹配与 HTML 替换内容完全独立。` : `已清除“${rule.name}”的输出要求。`;
-    showRecoveryNotice(state.status);
-    renderRegexSection();
-    render();
-  }
-
-  function parseImportedRegexRows(value) {
-    const rows = Array.isArray(value) ? value
-      : Array.isArray(value?.rules) ? value.rules
-        : Array.isArray(value?.regexRules) ? value.regexRules
-          : Array.isArray(value?.regex) ? value.regex
-            : Array.isArray(value?.data) ? value.data
-              : value && typeof value === 'object' && (value.pattern || value.findRegex || value.regex || value.regexPattern) ? [value] : [];
-    return rows.map(item => {
-      const source = item && typeof item === 'object' ? item : {};
-      let pattern = String(source.pattern ?? source.findRegex ?? source.regex ?? source.regexPattern ?? source.find ?? '');
-      let flags = String(source.flags ?? source.regexFlags ?? 'g');
-      const slashMatch = pattern.match(/^\/(.*)\/([dgimsuvy]*)$/s);
-      if (slashMatch) { pattern = slashMatch[1]; flags = slashMatch[2] || flags; }
-      const rule = normalizeRegexRule({
-        id: source.id,
-        name: source.name ?? source.ruleName ?? source.scriptName ?? source.title ?? '导入规则',
-        pattern,
-        flags,
-        replacement: source.replacement ?? source.replaceString ?? source.replace ?? '',
-        enabled: source.enabled !== false && source.disabled !== true,
-        targetSymbol: source.targetSymbol ?? '',
-        mode: source.mode ?? 0,
-        visibility: source.visibility !== false,
-        sourceFormat: source.regexPattern != null || source.ruleName != null ? 'mufy-website' : source.sourceFormat
-      });
-      rule.importedOutputRequirement = String(source.outputRequirement ?? source.outputRequirements ?? source.outputRequest ?? source.output_requirement ?? source.prompt ?? source.instruction ?? source.output ?? '');
-      return rule;
-    }).filter(rule => rule.pattern && !compiledRegexRule(rule).error);
-  }
-
-  async function importRegexRules(file) {
-    if (!file) return;
-    try {
-      const parsed = JSON.parse(await file.text());
-      const imported = parseImportedRegexRows(parsed);
-      if (!imported.length) throw new Error('文件中没有找到可识别的正则规则');
-      const replace = pageWindow.confirm(`读取到 ${imported.length} 条规则。\n\n确定：替换当前规则\n取消：与当前规则合并`);
-      if (replace) state.regexOutputRequirements = {};
-      imported.forEach(rule => {
-        if (rule.importedOutputRequirement) state.regexOutputRequirements[rule.id] = rule.importedOutputRequirement;
-        delete rule.importedOutputRequirement;
-      });
-      state.regexRules = replace ? imported : [...state.regexRules, ...imported];
-      saveRegexRules();
-      refreshRegexOnPage();
-      const richCount = imported.filter(isRichHtmlRegexRule).length;
-      state.status = `已导入 ${imported.length} 条正则规则。${richCount ? `其中 ${richCount} 条为 HTML 交互规则，将在匹配的聊天消息中隔离渲染。` : ''}`;
-      showRecoveryNotice(`正则导入完成：${imported.length} 条${richCount ? `，其中 HTML 规则 ${richCount} 条` : ''}。`);
-      render();
-    } catch (error) {
-      state.status = `正则导入失败：${explainFailure(error)}`;
-      showRecoveryNotice(state.status, 'error', 7000);
-      appendRunLog('error', '正则导入失败', error);
-      render();
-    }
-  }
-
-  function exportRegexRules() {
-    const includeRequirements = pageWindow.confirm('是否同时导出输出要求？\n\n确定：导出规则代码和输出要求，适合本脚本备份\n取消：只导出官方兼容的正则代码');
-    const date = new Date().toISOString().slice(0, 10);
-    if (includeRequirements) {
-      const rules = state.regexRules.map(rule => ({ ...rule, outputRequirement: regexOutputRequirement(rule) }));
-      download(`mufy-regex-rules-with-requirements-${date}.json`, JSON.stringify({ version: 1, rules }, null, 2), 'application/json;charset=utf-8');
-      showRecoveryNotice(`已导出 ${rules.length} 条正则及输出要求。`);
-      return;
-    }
-    const officialRules = state.regexRules.map(rule => ({
-      ruleName: rule.name,
-      regexPattern: `/${rule.pattern}/${rule.flags}`,
-      replaceString: rule.replacement,
-      targetSymbol: rule.targetSymbol || '',
-      mode: Number(rule.mode) || 0,
-      enabled: rule.enabled !== false,
-      visibility: rule.visibility !== false
-    }));
-    download(`mufy-regex-rules-official-${date}.json`, JSON.stringify(officialRules, null, 2), 'application/json;charset=utf-8');
-    showRecoveryNotice(`已导出 ${officialRules.length} 条官方兼容正则代码，不含输出要求和图片数据。`);
-  }
-
-  function insertRegexOutputRequirement(ruleId) {
-    const rule = state.regexRules.find(row => row.id === String(ruleId || ''));
-    const outputRequirement = regexOutputRequirement(rule);
-    if (!rule?.enabled || !outputRequirement) return;
-    const composer = findManualChatComposer();
-    if (!composer.textarea || composer.textarea.disabled || composer.textarea.readOnly) {
-      state.status = '当前页面没有可用的聊天输入框，请先进入角色聊天页面。';
-      showRecoveryNotice(state.status, 'error', 6000);
-      render();
-      return;
-    }
-    setManualChatTextareaValue(composer.textarea, outputRequirement);
-    composer.textarea.focus();
-    state.status = `已将“${rule.name}”的输出要求写入聊天输入框，尚未发送。`;
-    showRecoveryNotice(state.status);
-    render();
   }
 
   function normalizeMaterialItem(row = {}, kind = 'prompt') {
@@ -1810,7 +1018,7 @@
     const label = state.materialKind === 'extra' ? '番外' : '指令';
     const add = panel.querySelector('#mufy-recovery-material-add');
     if (add) add.textContent = `新增${label}`;
-    list.innerHTML = rows.map(row => `<article class="mufy-material-card" data-material-fill="${esc(row.id)}" title="点击填入聊天输入框"><div><strong>${esc(row.title)}</strong><small>${esc(regexRulePreview(row.content, 260))}</small></div><span><button data-material-edit="${esc(row.id)}">编辑</button><button data-material-delete="${esc(row.id)}">删除</button></span></article>`).join('') || `<div class="mufy-recovery-empty">还没有${label}。点击“新增${label}”保存常用内容。</div>`;
+    list.innerHTML = rows.map(row => `<article class="mufy-material-card" data-material-fill="${esc(row.id)}" title="点击填入聊天输入框"><div><strong>${esc(row.title)}</strong><small>${esc(contentPreview(row.content, 260))}</small></div><span><button data-material-edit="${esc(row.id)}">编辑</button><button data-material-delete="${esc(row.id)}">删除</button></span></article>`).join('') || `<div class="mufy-recovery-empty">还没有${label}。点击“新增${label}”保存常用内容。</div>`;
   }
 
   function renderAccountSection() {
@@ -2062,10 +1270,6 @@
     quoteCards: loadQuoteCards(),
     quoteStyle: loadQuoteStyle(),
     quoteSelectedId: '',
-    regexRules: loadRegexRules(),
-    regexOutputRequirements: loadRegexOutputRequirements(),
-    regexSandboxStorage: {},
-    regexRichRenderLimit: loadRegexRichRenderLimit(),
     promptLibrary: loadMaterialLibrary(PROMPT_LIBRARY_KEY, 'prompt'),
     extraLibrary: loadMaterialLibrary(EXTRA_LIBRARY_KEY, 'extra'),
     materialKind: 'prompt',
@@ -3370,10 +2574,6 @@ roleStateReady = true;
 
   function contentDataSnapshot() {
     return {
-      regexRules: cloneValue(state.regexRules || []),
-      regexOutputRequirements: cloneValue(state.regexOutputRequirements || {}),
-      regexSandboxStorage: cloneValue(state.regexSandboxStorage || {}),
-      regexRichRenderLimit: Math.max(1, Math.min(10, Number(state.regexRichRenderLimit) || 3)),
       promptLibrary: cloneValue(state.promptLibrary || []),
       extraLibrary: cloneValue(state.extraLibrary || [])
     };
@@ -3381,14 +2581,7 @@ roleStateReady = true;
 
   function normalizeContentDataSnapshot(value) {
     const source = value && typeof value === 'object' ? value : {};
-    const regexRules = Array.isArray(source.regexRules) ? source.regexRules.map(normalizeRegexRule) : [];
-    const requirements = source.regexOutputRequirements && typeof source.regexOutputRequirements === 'object' && !Array.isArray(source.regexOutputRequirements)
-      ? Object.fromEntries(Object.entries(source.regexOutputRequirements).map(([id, text]) => [String(id), String(text || '')]).filter(([, text]) => text)) : {};
     return {
-      regexRules,
-      regexOutputRequirements: requirements,
-      regexSandboxStorage: source.regexSandboxStorage && typeof source.regexSandboxStorage === 'object' && !Array.isArray(source.regexSandboxStorage) ? cloneValue(source.regexSandboxStorage) : {},
-      regexRichRenderLimit: Math.max(1, Math.min(10, Number(source.regexRichRenderLimit) || 3)),
       promptLibrary: Array.isArray(source.promptLibrary) ? source.promptLibrary.map(row => normalizeMaterialItem(row, 'prompt')).filter(row => row.content) : [],
       extraLibrary: Array.isArray(source.extraLibrary) ? source.extraLibrary.map(row => normalizeMaterialItem(row, 'extra')).filter(row => row.content) : []
     };
@@ -3396,29 +2589,27 @@ roleStateReady = true;
 
   async function writeContentDatabaseSnapshot(database, scope, snapshot) {
     const accountKey = `${CONTENT_LIBRARY_RECORD_PREFIX}${scope}`;
+    const existing = await readMaskDatabaseRecord(database, accountKey);
+    const merged = { ...(existing?.current && typeof existing.current === 'object' ? existing.current : {}), ...cloneValue(snapshot) };
     const transaction = database.transaction(MASK_DATABASE_STORE, 'readwrite');
     const done = transactionDone(transaction);
-    transaction.objectStore(MASK_DATABASE_STORE).put({ accountKey, schemaVersion: 1, current: cloneValue(snapshot), updatedAt: new Date().toISOString() });
+    transaction.objectStore(MASK_DATABASE_STORE).put({ accountKey, schemaVersion: 1, current: merged, updatedAt: new Date().toISOString() });
     await done;
     const verified = await readMaskDatabaseRecord(database, accountKey);
     if (!verified?.current || JSON.stringify(normalizeContentDataSnapshot(verified.current)) !== JSON.stringify(normalizeContentDataSnapshot(snapshot))) {
-      throw new Error('正则与素材库写入 IndexedDB 后回读校验失败');
+      throw new Error('指令与番外库写入 IndexedDB 后回读校验失败');
     }
     return verified;
   }
 
   function removeLegacyContentStorage(scope) {
-    [REGEX_RULES_KEY, REGEX_OUTPUT_REQUIREMENTS_KEY, REGEX_RICH_RENDER_LIMIT_KEY, PROMPT_LIBRARY_KEY, EXTRA_LIBRARY_KEY].forEach(key => {
+    [PROMPT_LIBRARY_KEY, EXTRA_LIBRARY_KEY].forEach(key => {
       try { localStorage.removeItem(accountStorageKey(key, scope)); } catch (_) {}
     });
   }
 
   function applyContentDataSnapshot(snapshot) {
     const normalized = normalizeContentDataSnapshot(snapshot);
-    state.regexRules = normalized.regexRules;
-    state.regexOutputRequirements = normalized.regexOutputRequirements;
-    state.regexSandboxStorage = normalized.regexSandboxStorage;
-    state.regexRichRenderLimit = normalized.regexRichRenderLimit;
     state.promptLibrary = normalized.promptLibrary;
     state.extraLibrary = normalized.extraLibrary;
   }
@@ -3437,24 +2628,22 @@ roleStateReady = true;
         applyContentDataSnapshot(record.current);
         contentStorageMode = 'indexedDB';
         removeLegacyContentStorage(scope);
-        reloadRegexSandboxFrames();
-        appendRunLog('info', `已从 IndexedDB 载入正则、指令库和番外库。`, { rules: state.regexRules.length, prompts: state.promptLibrary.length, extras: state.extraLibrary.length });
+        appendRunLog('info', `已从 IndexedDB 载入指令库和番外库。`, { prompts: state.promptLibrary.length, extras: state.extraLibrary.length });
       } else {
         const snapshot = contentDataSnapshot();
         await writeContentDatabaseSnapshot(database, scope, snapshot);
         if (generation !== contentStorageGeneration || scope !== maskAccountScope) return;
         contentStorageMode = 'indexedDB';
         removeLegacyContentStorage(scope);
-        appendRunLog('info', `已将正则、指令库和番外库迁移到 IndexedDB。`, { rules: snapshot.regexRules.length, prompts: snapshot.promptLibrary.length, extras: snapshot.extraLibrary.length });
+        appendRunLog('info', `已将指令库和番外库迁移到 IndexedDB。`, { prompts: snapshot.promptLibrary.length, extras: snapshot.extraLibrary.length });
       }
-      refreshRegexOnPage();
       renderMaterialSection();
       render();
     } catch (error) {
       if (generation !== contentStorageGeneration || scope !== maskAccountScope) return;
       contentStorageMode = 'localStorage';
-      appendRunLog('error', '正则与素材库 IndexedDB 初始化失败，继续使用 localStorage', error);
-      state.status = `IndexedDB 初始化失败，正则、指令和番外暂时继续保存在 localStorage：${explainFailure(error)}`;
+      appendRunLog('error', '指令与番外库 IndexedDB 初始化失败，继续使用 localStorage', error);
+      state.status = `IndexedDB 初始化失败，指令和番外暂时继续保存在 localStorage：${explainFailure(error)}`;
       render();
     }
   }
@@ -8566,36 +7755,6 @@ roleStateReady = true;
     return body.data;
   }
 
-  async function hydrateRecentRawDialogsForRegex() {
-    if (!REGEX_FEATURE_ENABLED) return;
-    if (rawRegexHydrating || !state.regexRules.some(rule => rule.enabled && isRichHtmlRegexRule(rule))) return;
-    const context = currentRoleContext();
-    if (!context.sessionId || !context.characterId) return;
-    rawRegexHydrating = true;
-    const sessionKey = String(context.sessionId);
-    if (!rawRegexHydratedPages.has(sessionKey)) rawRegexHydratedPages.set(sessionKey, new Set());
-    const loadedPages = rawRegexHydratedPages.get(sessionKey);
-    try {
-      for (let pageNum = 1; pageNum <= 8; pageNum += 1) {
-        if (!loadedPages.has(pageNum)) {
-          const data = await requestDialogPage(context, pageNum, 16);
-          loadedPages.add(pageNum);
-          captureRawDialogPayload('/api/dialogs/query', { code: 200, data });
-          const pageRows = dialogRowsFromPage(data);
-          if (!pageRows.length || data?.hasNext === false || data?.hasMore === false) break;
-        }
-        const matchCount = [...rawDialogRows.values()].filter(row => (!row.sessionId || String(row.sessionId) === sessionKey) && rawRichRegexMatch(row)).length;
-        if (pageNum >= 2 && matchCount >= Math.max(1, Number(state.regexRichRenderLimit) || 3)) break;
-        await wait(70);
-      }
-    } catch (error) {
-      appendRunLog('warn', '读取近期聊天原文用于 HTML 正则失败', error);
-    } finally {
-      rawRegexHydrating = false;
-      scheduleRawRichRegexRender();
-    }
-  }
-
   async function readCompleteDialogHistory(context, pageSize) {
     const collected = [];
     const ids = new Set();
@@ -9673,30 +8832,21 @@ roleStateReady = true;
 
   function installMessageQuoteButtons() {
     injectMessageQuoteButtons();
-    applyRegexInRoot(document);
-    applyRichRegexInRoot(document);
-    hydrateRecentRawDialogsForRegex();
     messageQuoteObserver?.disconnect();
     messageQuoteObserver = new MutationObserver(mutations => {
       for (const mutation of mutations) {
-        if (mutation.type === 'characterData') {
-          applyRegexToTextNode(mutation.target);
-          applyRichRegexInRoot(mutation.target.parentElement);
-        }
         const targetBox = mutation.target?.closest?.('[id="mufy_message_actions_box"]');
         if (targetBox) injectMessageQuoteButtons(targetBox);
         for (const node of mutation.addedNodes) {
-          if (node.nodeType === Node.TEXT_NODE) { applyRegexToTextNode(node); continue; }
+          if (node.nodeType === Node.TEXT_NODE) continue;
           if (node.nodeType !== 1) continue;
           const addedBox = node.matches?.('[id="mufy_message_actions_box"]') ? node : node.closest?.('[id="mufy_message_actions_box"]');
           if (addedBox) injectMessageQuoteButtons(addedBox);
           else if (node.querySelector?.('[id="mufy_message_actions_box"]')) injectMessageQuoteButtons(node);
-          applyRegexInRoot(node);
-          applyRichRegexInRoot(node);
         }
       }
     });
-    messageQuoteObserver.observe(document.body, { childList: true, characterData: true, subtree: true });
+    messageQuoteObserver.observe(document.body, { childList: true, subtree: true });
   }
 
   function quoteCardGroups() {
@@ -10234,7 +9384,6 @@ roleStateReady = true;
     const chatSection = panel.querySelector('#mufy-recovery-chat-section');
     const beautySection = panel.querySelector('#mufy-recovery-beauty-section');
     const accountSection = panel.querySelector('#mufy-recovery-account-section');
-    const regexSection = panel.querySelector('#mufy-recovery-regex-section');
     const materialSection = panel.querySelector('#mufy-recovery-material-section');
     const maskSection = panel.querySelector('#mufy-recovery-mask-section');
     const sectionHome = panel.querySelector('#mufy-recovery-section-home');
@@ -10259,7 +9408,6 @@ roleStateReady = true;
     if (chatSection) chatSection.hidden = state.section !== 'chats';
     if (beautySection) beautySection.hidden = state.section !== 'beauty';
     if (accountSection) accountSection.hidden = state.section !== 'accounts';
-    if (regexSection) regexSection.hidden = true;
     if (materialSection) materialSection.hidden = state.section !== 'materials';
     if (maskSection) maskSection.hidden = state.section !== 'masks';
     const resultList = panel.querySelector('#mufy-recovery-list');
@@ -10421,7 +9569,6 @@ roleStateReady = true;
     if (isMaskView && !maskStorageReady) {
       panel.querySelectorAll('#mufy-recovery-list button:not([data-action="copy-mask"])').forEach(button => { button.disabled = true; });
     }
-    if (state.section === 'regex') renderRegexSection();
   }
 
   function mount() {
@@ -10632,17 +9779,12 @@ roleStateReady = true;
       #mufy-recovery-mask-tabs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
       #mufy-recovery-tabs button.active,#mufy-recovery-favorite-tabs button.active,#mufy-recovery-chat-tabs button.active,#mufy-recovery-mask-tabs button.active{background:#786bd4;border-color:#8f84dd;color:#fff}
       #mufy-recovery-tabs .mufy-recovery-tab-action,#mufy-recovery-mask-tabs .mufy-recovery-tab-action{background:#453d69;border-color:#8578c8;color:#f4efff}
-      #mufy-recovery-role-section,#mufy-recovery-favorite-section,#mufy-recovery-chat-section,#mufy-recovery-beauty-section,#mufy-recovery-account-section,#mufy-recovery-regex-section,#mufy-recovery-material-section,#mufy-recovery-mask-section{display:flex;flex-direction:column;gap:8px}
+      #mufy-recovery-role-section,#mufy-recovery-favorite-section,#mufy-recovery-chat-section,#mufy-recovery-beauty-section,#mufy-recovery-account-section,#mufy-recovery-material-section,#mufy-recovery-mask-section{display:flex;flex-direction:column;gap:8px}
       #mufy-recovery-account-current{display:grid;gap:3px;padding:12px;border:1px solid #766bb155;border-radius:12px;background:linear-gradient(145deg,#4c407055,#24232d)}#mufy-recovery-account-current strong{font-size:11px;color:#aaa3c6}#mufy-recovery-account-current span{font-size:15px;color:#f5f2ff;font-weight:700}#mufy-recovery-account-current small{color:#aaa;overflow-wrap:anywhere}#mufy-recovery-account-tools{display:grid;grid-template-columns:1fr;gap:6px}#mufy-recovery-account-save{background:#6654a4!important;border-color:#927fd3!important;font-weight:700}#mufy-recovery-account-list{display:grid;align-content:start;gap:7px;overflow:auto;padding-bottom:12px}.mufy-account-card{display:flex;align-items:center;justify-content:space-between;gap:9px;padding:10px 11px;border:1px solid #494653;border-radius:11px;background:#272630}.mufy-account-card.is-current{border-color:#68ba8a88;box-shadow:inset 3px 0 #59b17f}.mufy-account-card>div{display:grid;min-width:0;gap:3px}.mufy-account-card strong{color:#f0edff}.mufy-account-card small{color:#aaa;overflow-wrap:anywhere}.mufy-account-card em{width:max-content;padding:2px 6px;border-radius:9px;background:#24553a;color:#a8e7bd;font-size:9px;font-style:normal}.mufy-account-card>span{display:flex;flex:none;gap:4px;flex-wrap:wrap;justify-content:flex-end}.mufy-account-card button{padding:4px 7px!important;font-size:10px!important}.mufy-recovery-account-hint{display:block;color:#8f8a9c;line-height:1.55}
       #mufy-recovery-material-tabs{display:grid;grid-template-columns:1fr 1fr;gap:6px}#mufy-recovery-material-tabs button.active{background:#786bd4;border-color:#8f84dd;color:#fff}#mufy-recovery-material-tools{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}#mufy-recovery-material-add{background:#5e4f91!important;border-color:#8373bb!important;font-weight:700}
       #mufy-recovery-material-list{display:grid;align-content:start;gap:7px;overflow:auto;padding-bottom:20px}.mufy-material-card{display:flex;align-items:flex-start;justify-content:space-between;gap:9px;padding:10px 11px;border:1px solid #4c485d;border-radius:10px;background:#272630;cursor:pointer}.mufy-material-card:hover{border-color:#8c7bd1;background:#302d40}.mufy-material-card>div{min-width:0;display:grid;gap:4px}.mufy-material-card strong{color:#f0edff}.mufy-material-card small{display:-webkit-box;overflow:hidden;color:#aaa;font-size:10px;line-height:1.5;-webkit-line-clamp:4;-webkit-box-orient:vertical;white-space:pre-wrap;overflow-wrap:anywhere}.mufy-material-card>span{display:flex;flex:none;gap:5px}.mufy-material-card>span button{padding:4px 7px!important;font-size:10px!important}
       #mufy-recovery-material-editor{position:absolute;inset:48px 10px 10px;z-index:14;display:flex;flex-direction:column;overflow:hidden;border:1px solid #766bb1;border-radius:12px;background:#292930;box-shadow:0 16px 45px #000c}#mufy-recovery-material-editor[hidden]{display:none}#mufy-recovery-material-editor-head{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid #4b4b55;background:#35353e}#mufy-recovery-material-editor-head button{padding:1px 7px!important;font-size:20px!important}#mufy-recovery-material-editor-body{flex:1;min-height:0;display:grid;grid-template-rows:auto minmax(0,1fr);gap:10px;padding:12px}#mufy-recovery-material-editor-body label{display:grid;grid-template-rows:auto auto;align-content:start;min-height:0;gap:5px;color:#bbb;font-size:11px}#mufy-recovery-material-editor-body label:last-child{grid-template-rows:auto minmax(180px,1fr)}#mufy-recovery-material-editor-body input,#mufy-recovery-material-editor-body textarea{box-sizing:border-box;width:100%;border:1px solid #555;border-radius:8px;background:#18181c;color:#fff;padding:9px;font:13px/1.55 system-ui;outline:none}#mufy-recovery-material-editor-body textarea{height:100%;min-height:180px;resize:none}#mufy-recovery-material-editor-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:0 12px 12px}#mufy-recovery-material-editor-save{background:#62539a!important;border-color:#8878c5!important}
       .mufy-recovery-section-note{display:grid;gap:4px;padding:10px 11px;border:1px solid #4d4962;border-radius:8px;background:#292733}.mufy-recovery-section-note span{color:#aaa;font-size:11px;line-height:1.5}
-      #mufy-recovery-regex-tools{display:grid;grid-template-columns:1fr 1fr;gap:6px}#mufy-recovery-regex-add{background:#5e4f91!important;border-color:#8373bb!important;font-weight:700}#mufy-recovery-regex-rich-limit-label{grid-column:1/-1;display:flex;align-items:center;gap:7px;padding:3px 2px;color:#aaa;font-size:10px}#mufy-recovery-regex-rich-limit{width:54px!important;padding:5px 6px!important;text-align:center}
-      #mufy-recovery-regex-test{display:grid;grid-template-columns:1fr 1fr;gap:7px}#mufy-recovery-regex-test label{display:grid;gap:4px;color:#aaa;font-size:10px}#mufy-recovery-regex-test textarea{box-sizing:border-box;width:100%;min-height:72px;resize:vertical;border:1px solid #555;border-radius:7px;background:#18181c;color:#eee;padding:7px;font:11px/1.45 system-ui}
-      #mufy-recovery-regex-html-preview{box-sizing:border-box;width:100%;height:clamp(520px,70vh,760px);border:1px solid #766bb1;border-radius:16px;background:transparent;box-shadow:0 16px 40px #0008}#mufy-recovery-regex-html-preview[hidden]{display:none}
-      #mufy-recovery-regex-list{display:grid;gap:6px}.mufy-regex-rule{display:flex;align-items:flex-start;justify-content:space-between;gap:7px;padding:8px;border:1px solid #444;border-radius:7px;background:#27272e}.mufy-regex-rule.is-enabled{border-color:#665b91}.mufy-regex-rule>label{display:flex;align-items:flex-start;gap:7px;min-width:0}.mufy-regex-rule>label input{margin-top:3px;accent-color:#8272cc}.mufy-regex-rule>label span{display:grid;gap:2px;min-width:0}.mufy-regex-rule small{color:#aaa;word-break:break-all}.mufy-regex-output-requirement{color:#d6c9ff!important;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}.mufy-regex-rule em{color:#ff9b9b;font-size:10px}.mufy-regex-rule .mufy-regex-html-status{color:#9fd8b1}.mufy-regex-rule-actions{display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end}.mufy-regex-rule-actions button{padding:3px 6px!important;font-size:10px}
-      .mufy-rich-regex-frame-wrap{box-sizing:border-box;width:100%;height:auto;margin:10px 0;display:grid;gap:12px;overflow:visible;border:0;background:transparent}.mufy-rich-regex-inline-wrap{display:block;width:100%;height:auto;margin:10px 0;background:transparent}.mufy-rich-regex-frame{display:block;width:100%;height:clamp(520px,76vh,760px);border:0;background:transparent}
       #mufy-recovery-list{flex:1 1 auto;min-height:0;overflow:auto;border-top:1px solid #444;padding:0 10px 16px}
       .mufy-recovery-row{display:flex;gap:8px;padding:7px 2px;border-bottom:1px solid #3e3e45}
       .mufy-recovery-row img{width:40px;height:40px;flex:none;border-radius:10px;object-fit:cover}
@@ -10753,7 +9895,6 @@ roleStateReady = true;
       .mufy-recovery-section-note{padding:12px 13px;border-color:#a995ff2e;border-radius:14px;background:linear-gradient(135deg,#8d73df18,#ffffff06);box-shadow:inset 0 1px #ffffff0d}.mufy-recovery-section-note strong{color:#f1edff;font-size:13px}.mufy-recovery-section-note span{color:#9d98ad}
       #mufy-recovery-panel input:not([type="checkbox"]):not([type="range"]):not([type="color"]),#mufy-recovery-panel select,#mufy-recovery-panel textarea{border-color:#ffffff20!important;border-radius:11px!important;background:#0e0e15b8!important;color:#f4f2fb!important;box-shadow:inset 0 1px 4px #0006!important;outline:none}#mufy-recovery-panel input:focus,#mufy-recovery-panel select:focus,#mufy-recovery-panel textarea:focus{border-color:#9f8bea88!important;box-shadow:0 0 0 3px #8d73df1e,inset 0 1px 4px #0006!important}
       #mufy-recovery-status{border-radius:11px;color:#c6bfdc}#mufy-recovery-list{border-color:#ffffff12}.mufy-recovery-row{margin:5px 0;padding:10px 9px;border:1px solid #ffffff0d;border-radius:13px;background:#ffffff05}.mufy-recovery-row:hover{border-color:#a995ff28;background:#ffffff08}.mufy-recovery-row img{border-radius:12px;box-shadow:0 5px 13px #0007}
-      .mufy-regex-rule{padding:11px;border-color:#ffffff17;border-radius:13px;background:linear-gradient(145deg,#ffffff09,#ffffff04)}.mufy-regex-rule.is-enabled{border-color:#9f8bea55;box-shadow:inset 3px 0 #9079db}.mufy-regex-rule .mufy-regex-html-status{color:#84d6a5}
       #mufy-recovery-model-modal,#mufy-recovery-log-modal,#mufy-recovery-export-modal,#mufy-recovery-chat-search-modal{border-color:#ffffff24;border-radius:16px;background:linear-gradient(155deg,#292936f5,#17171ff8);box-shadow:0 22px 60px #000c}.mufy-model-monitor-row{border-color:#ffffff14;border-radius:12px;background:#ffffff07}.mufy-model-monitor-row:has(input:checked){border-color:#9f8bea55;background:#8d73df18}
       #mufy-recovery-panel ::-webkit-scrollbar{width:7px;height:7px}#mufy-recovery-panel ::-webkit-scrollbar-track{background:transparent}#mufy-recovery-panel ::-webkit-scrollbar-thumb{border:2px solid transparent;border-radius:999px;background:#82769c;background-clip:padding-box}#mufy-recovery-panel ::-webkit-scrollbar-thumb:hover{background:#a594cb;background-clip:padding-box}
       @media (max-width:520px){
@@ -10765,7 +9906,6 @@ roleStateReady = true;
         #mufy-recovery-mask-actions{grid-template-columns:repeat(3,minmax(0,1fr));gap:5px}
         #mufy-recovery-site-actions{grid-template-columns:repeat(2,minmax(0,1fr));gap:5px}
         #mufy-recovery-manual-auto-actions{grid-template-columns:1fr 1fr}
-        #mufy-recovery-regex-test{grid-template-columns:1fr}
         #mufy-recovery-manual-auto-message{grid-column:1/-1}
         #mufy-recovery-tabs button,#mufy-recovery-favorite-tabs button,#mufy-recovery-chat-tabs button,#mufy-recovery-mask-tabs button{padding:6px 4px;font-size:11px}
         #mufy-recovery-export-options{gap:6px;padding:10px}
@@ -10989,12 +10129,6 @@ roleStateReady = true;
         </div>
         <div id="mufy-recovery-beauty-section" hidden><div class="mufy-recovery-section-note"><strong>摘录牌美化</strong><span>调整塔罗牌样式、字体、颜色、字号和对齐方式，并导出当前牌面。</span></div><button id="mufy-recovery-quote-entry" title="查看并美化角色摘录牌组">打开摘录牌组与美化设置</button></div>
         <div id="mufy-recovery-account-section" hidden><div class="mufy-recovery-section-note"><strong>账号快速切换</strong><span>一次只登录一个账号。脚本仅在本机保存邮箱与备注，不保存密码、Cookie 或登录令牌。</span></div><div id="mufy-recovery-account-current"></div><div id="mufy-recovery-account-tools"><button id="mufy-recovery-account-save">保存当前账号</button></div><div id="mufy-recovery-account-list"></div><small class="mufy-recovery-account-hint">点击“切换”后会退出当前登录、打开 Mufy 官方登录窗口并填入目标邮箱；密码仍由 Edge 自动填充或由你手动输入。</small></div>
-        <div id="mufy-recovery-regex-section" hidden>
-          <div class="mufy-recovery-section-note"><strong>聊天显示正则</strong><span>只改变网页当前显示的聊天正文，不修改服务器原文。按列表顺序依次执行。</span></div>
-          <div id="mufy-recovery-regex-tools"><button id="mufy-recovery-regex-add">新增规则</button><button id="mufy-recovery-regex-import">导入 JSON</button><button id="mufy-recovery-regex-export">导出 JSON</button><button id="mufy-recovery-regex-refresh">重新应用</button><label id="mufy-recovery-regex-rich-limit-label">仅检查最近 <input id="mufy-recovery-regex-rich-limit" type="number" min="1" max="10" value="${esc(state.regexRichRenderLimit)}"> 楼角色回复 <span>你方消息不计数，范围外界面自动卸载</span></label><input id="mufy-recovery-regex-file" type="file" accept=".json,application/json" hidden></div>
-          <div id="mufy-recovery-regex-test"><label>测试原文<textarea id="mufy-recovery-regex-test-input" placeholder="输入一段文字，立即查看全部已启用规则的结果"></textarea></label><label>处理结果<textarea id="mufy-recovery-regex-test-output" readonly></textarea></label></div><iframe id="mufy-recovery-regex-html-preview" title="HTML 正则交互预览" sandbox="allow-scripts allow-forms allow-modals allow-popups allow-downloads" referrerpolicy="no-referrer" hidden></iframe>
-          <div id="mufy-recovery-regex-list"></div>
-        </div>
         <div id="mufy-recovery-material-section" hidden><div id="mufy-recovery-material-tabs"><button data-material-kind="prompt">指令库</button><button data-material-kind="extra">番外库</button></div><div id="mufy-recovery-material-tools"><button id="mufy-recovery-material-add">新增指令</button><button id="mufy-recovery-material-import">导入 JSON</button><button id="mufy-recovery-material-export">导出 JSON</button><input id="mufy-recovery-material-file" type="file" accept=".json,application/json" hidden></div><div id="mufy-recovery-material-list"></div></div>
         <div id="mufy-recovery-mask-section" hidden>
           <div id="mufy-recovery-mask-tabs"><button data-category="masks">面具 (0)</button><button data-category="library">面具库 (0)</button><button id="mufy-recovery-save-all" class="mufy-recovery-tab-action">全部存入面具库</button></div>
@@ -11144,68 +10278,6 @@ roleStateReady = true;
     panel.querySelector('#mufy-recovery-quote-source').onclick = openSelectedQuoteSource;
     panel.querySelector('#mufy-recovery-quote-update').onclick = updateSelectedQuoteText;
     panel.querySelector('#mufy-recovery-quote-export').onclick = exportSelectedQuoteImage;
-    panel.querySelector('#mufy-recovery-regex-add').onclick = () => editRegexRule();
-    panel.querySelector('#mufy-recovery-regex-import').onclick = () => panel.querySelector('#mufy-recovery-regex-file').click();
-    panel.querySelector('#mufy-recovery-regex-export').onclick = exportRegexRules;
-    panel.querySelector('#mufy-recovery-regex-file').onchange = event => {
-      importRegexRules(event.target.files?.[0]);
-      event.target.value = '';
-    };
-    panel.querySelector('#mufy-recovery-regex-refresh').onclick = () => {
-      refreshRegexOnPage();
-      state.status = '已重新对当前页面聊天正文应用全部启用的正则规则。';
-      render();
-    };
-    panel.querySelector('#mufy-recovery-regex-test-input').oninput = renderRegexSection;
-    panel.querySelector('#mufy-recovery-regex-rich-limit').onchange = event => {
-      event.target.value = String(saveRegexRichRenderLimit(event.target.value));
-      refreshRegexOnPage();
-    };
-    panel.querySelector('#mufy-recovery-regex-list').onchange = event => {
-      const toggle = event.target.closest?.('[data-regex-toggle]');
-      if (!toggle) return;
-      const rule = state.regexRules.find(row => row.id === String(toggle.dataset.regexToggle || ''));
-      if (!rule) return;
-      rule.enabled = Boolean(toggle.checked);
-      saveRegexRules();
-      refreshRegexOnPage();
-    };
-    panel.querySelector('#mufy-recovery-regex-list').onclick = event => {
-      const insert = event.target.closest?.('[data-regex-insert]');
-      if (insert) { insertRegexOutputRequirement(String(insert.dataset.regexInsert || '')); return; }
-      const requirement = event.target.closest?.('[data-regex-requirement]');
-      if (requirement) { editRegexOutputRequirement(String(requirement.dataset.regexRequirement || '')); return; }
-      const edit = event.target.closest?.('[data-regex-edit]');
-      if (edit) { editRegexRule(String(edit.dataset.regexEdit || '')); return; }
-      const remove = event.target.closest?.('[data-regex-delete]');
-      if (remove) {
-        const id = String(remove.dataset.regexDelete || '');
-        const rule = state.regexRules.find(row => row.id === id);
-        if (!rule || !pageWindow.confirm(`确定删除正则规则“${rule.name}”吗？`)) return;
-        const associated = state.regexSandboxStorage?.[id];
-        const hasAssociatedData = Boolean(associated && (Object.keys(associated.localStorage || {}).length || Object.keys(associated.indexedDB || {}).length));
-        const deleteAssociatedData = hasAssociatedData && pageWindow.confirm(`检测到“${rule.name}”保存过图片或其他界面数据。\n\n确定：规则和关联数据一起删除\n取消：只删除规则，保留关联数据`);
-        state.regexRules = state.regexRules.filter(row => row.id !== id);
-        delete state.regexOutputRequirements[id];
-        if (deleteAssociatedData) delete state.regexSandboxStorage[id];
-        saveRegexRules();
-        refreshRegexOnPage();
-        state.status = `已删除正则规则“${rule.name}”及其输出要求。${hasAssociatedData ? (deleteAssociatedData ? '关联图片和界面数据也已删除。' : '关联图片和界面数据已保留。') : ''}`;
-        showRecoveryNotice(state.status);
-        return;
-      }
-      const up = event.target.closest?.('[data-regex-up]');
-      if (up) {
-        const index = state.regexRules.findIndex(row => row.id === String(up.dataset.regexUp || ''));
-        if (index <= 0) return;
-        [state.regexRules[index - 1], state.regexRules[index]] = [state.regexRules[index], state.regexRules[index - 1]];
-        saveRegexRules();
-        refreshRegexOnPage();
-        return;
-      }
-      const card = event.target.closest?.('[data-regex-card-insert]');
-      if (card && !event.target.closest?.('button,input,label')) insertRegexOutputRequirement(String(card.dataset.regexCardInsert || ''));
-    };
     panel.querySelectorAll('[data-material-kind]').forEach(button => {
       button.onclick = () => {
         state.materialKind = button.dataset.materialKind === 'extra' ? 'extra' : 'prompt';
@@ -11637,7 +10709,6 @@ roleStateReady = true;
       if (!previousFavoriteResult.completionNotified) pageWindow.alert(state.status);
     }
     installAutoMaskSwitch();
-    if (REGEX_FEATURE_ENABLED) addMountedGlobalListener(window, 'message', handleRegexSandboxStorageMessage);
     addMountedGlobalListener(document, 'selectionchange', rememberQuoteSelection);
     installMessageQuoteButtons();
     installAccountSwitchLoginAssist();
