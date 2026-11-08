@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.85
+// @version      3.0.0-dev.86
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -18,7 +18,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.85';
+    : '3.0.0-dev.86';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -1407,6 +1407,7 @@
     siteSearchRows: [],
     siteFavoriteStates: cachedRoles?.siteFavoriteStates || {},
     selectedSiteCharacterIds: new Set(),
+    siteRoleManaging: false,
     siteFavoriteStateLoading: false,
     maskQuery: '',
     loading: false,
@@ -7392,9 +7393,6 @@ roleStateReady = true;
       siteCaptureRenderTimer = 0;
       if (!panel) return;
       if (state.section === 'favorites' && (state.active === 'siteSearch' || state.active === 'siteAuthors')) {
-        if (!state.siteFavoriteStateLoading) {
-          state.status = '已从当前网站页面自动捕获 ' + state.siteSearchRows.length + ' 个可收藏角色；可在网站角色里勾选/长按，然后点网页里的“立即收藏”。';
-        }
         render();
       } else {
         updateSiteActionButtons();
@@ -7596,6 +7594,7 @@ roleStateReady = true;
       .map(row => String(row.characterId)));
     state.section = 'favorites';
     state.active = 'siteSearch';
+    state.siteRoleManaging = true;
     state.status = state.selectedSiteCharacterIds.size ? ('已选中 ' + state.selectedSiteCharacterIds.size + ' 个网站角色里的未收藏或待核对项。') : '网站角色里没有未收藏项可选。';
     render();
   }
@@ -7701,6 +7700,7 @@ roleStateReady = true;
   }
 
   async function favoriteSelectedSiteRows() {
+    if (state.favoriteRunning || state.shareRecoveryLoading || state.siteFavoriteStateLoading) return;
     const selected = selectedSiteRows();
     const directRows = selected.filter(row => !row.favoriteNeedsDetail && row.favoriteKnown === true && !row.isFavorite);
     const detailRows = selected.filter(row => row.favoriteNeedsDetail);
@@ -7709,6 +7709,8 @@ roleStateReady = true;
       render();
       return;
     }
+    state.siteFavoriteStateLoading = true;
+    render();
     try {
       // 趋势榜等可靠来源直接使用列表状态；只有作者列表标记的角色逐项查详情。
       const checkedDetailRows = detailRows.length
@@ -7718,6 +7720,8 @@ roleStateReady = true;
       await favoriteRows(rows, '选中的 ' + rows.length + ' 个网站角色');
     } catch (error) {
       state.status = `核对作者页面角色收藏状态失败：${explainFailure(error)}`;
+    } finally {
+      state.siteFavoriteStateLoading = false;
       render();
     }
   }
@@ -8796,23 +8800,29 @@ roleStateReady = true;
     </div></div>`;
   }
 
+  function canSelectSiteRoles() {
+    return state.section === 'favorites' && (state.active === 'siteAuthors'
+      || (state.active === 'siteSearch' && state.siteRoleManaging));
+  }
+
   function siteRoleCard(row, index) {
     const id = String(row.characterId || '');
-    const selected = state.selectedSiteCharacterIds.has(id);
+    const managing = canSelectSiteRoles();
+    const selected = managing && state.selectedSiteCharacterIds.has(id);
     const selectable = row.favoriteKnown === true || row.favoriteNeedsDetail;
     const selectTitle = row.favoriteNeedsDetail
       ? '勾选后会先请求角色详情，确认未收藏再执行'
       : row.favoriteKnown === true
         ? '勾选后可批量收藏'
         : '当前页面没有返回收藏状态，不能安全批量操作';
-    const selectBox = `<label class="mufy-recovery-site-select" title="${selectTitle}"><input type="checkbox" data-action="toggle-site-select" data-character-id="${esc(id)}" ${selected ? 'checked' : ''} ${selectable ? '' : 'disabled'}><span>选中</span></label>`;
+    const selectBox = `<label class="mufy-recovery-site-select" title="${selectTitle}"><input type="checkbox" aria-label="选中 ${esc(row.name || '角色')}" data-action="toggle-site-select" data-character-id="${esc(id)}" ${selected ? 'checked' : ''} ${selectable ? '' : 'disabled'}><span>选中</span></label>`;
     let card = roleCard(row, index).replace(
       '<div class="mufy-recovery-row">',
       `<div class="mufy-recovery-row mufy-recovery-site-role-row ${selected ? 'selected' : ''}" data-character-id="${esc(id)}">`
     );
     const archiveButtonPattern = /<button class="mufy-recovery-archive-button"[\s\S]*?<\/button>/;
-    if (archiveButtonPattern.test(card)) card = card.replace(archiveButtonPattern, selectBox);
-    else card = card.replace('<span class="mufy-recovery-role-tools">', `<span class="mufy-recovery-role-tools">${selectBox}`);
+    if (archiveButtonPattern.test(card)) card = card.replace(archiveButtonPattern, managing ? selectBox : '');
+    else if (managing) card = card.replace('<span class="mufy-recovery-role-tools">', `<span class="mufy-recovery-role-tools">${selectBox}`);
     return card.replace(/<div class="mufy-recovery-archives">[\s\S]*?<\/div>/, '');
   }
 
@@ -9418,6 +9428,7 @@ roleStateReady = true;
       const selectedCount = selectedSiteRows().filter(row => row.favoriteNeedsDetail || row.favoriteKnown === true && !row.isFavorite).length;
       favoriteSelected.disabled = state.favoriteRunning || state.shareRecoveryLoading || state.siteFavoriteStateLoading || selectedCount === 0;
       favoriteSelected.textContent = state.favoriteRunning ? '收藏中…' : ('立即收藏 (' + selectedCount + ')');
+      panel.querySelector('#mufy-recovery-site-selection-count').textContent = `已选 ${selectedSiteRows().length} 项`;
     }
   }
 
@@ -9499,7 +9510,15 @@ roleStateReady = true;
     }
     updateSiteActionButtons();
     const siteActions = panel.querySelector('#mufy-recovery-site-actions');
-    if (siteActions) siteActions.hidden = !(state.section === 'favorites' && (state.active === 'siteSearch' || state.active === 'siteAuthors'));
+    const siteSelectionVisible = canSelectSiteRoles();
+    panel.toggleAttribute('data-site-role-view', state.section === 'favorites' && state.active === 'siteSearch');
+    const siteManage = panel.querySelector('#mufy-recovery-site-manage');
+    siteManage.hidden = state.section !== 'favorites' || state.active !== 'siteSearch';
+    siteManage.disabled = state.favoriteRunning || state.shareRecoveryLoading || state.siteFavoriteStateLoading;
+    siteManage.textContent = state.siteRoleManaging ? '完成管理' : '管理';
+    siteManage.setAttribute('aria-pressed', String(state.siteRoleManaging));
+    siteActions.hidden = !siteSelectionVisible;
+    panel.querySelector('#mufy-recovery-site-selection-bar').hidden = !siteSelectionVisible;
     const manualAutoActions = panel.querySelector('#mufy-recovery-manual-auto-actions');
     const manualAutoMessage = panel.querySelector('#mufy-recovery-manual-auto-message');
     const manualAutoDelayMin = panel.querySelector('#mufy-recovery-manual-auto-delay-min');
@@ -10146,6 +10165,16 @@ roleStateReady = true;
       #mufy-recovery-role-more[open]{flex:1 0 100%}
       #mufy-recovery-role-more[open]>summary{width:max-content;margin-left:auto}
       #mufy-recovery-role-more>div{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:8px 0 0}
+      #mufy-recovery-site-manage{align-self:flex-end;padding:5px 12px}
+      #mufy-recovery-site-manage[aria-pressed="true"]{border-color:var(--mufy-panel-accent);background:var(--mufy-panel-accent-soft)}
+      #mufy-recovery-site-selection-bar{display:flex;align-items:center;justify-content:space-between;gap:10px;flex:none;padding:8px 12px 16px;border-top:1px solid var(--mufy-panel-border);background:var(--mufy-panel-surface)}
+      #mufy-recovery-site-selection-count{color:var(--mufy-panel-muted)}
+      #mufy-recovery-panel #mufy-recovery-favorite-selected-site{background:var(--mufy-panel-accent-button);border-color:var(--mufy-panel-border)}
+      #mufy-recovery-panel[data-site-role-view] .mufy-recovery-site-role-row{margin:0;border-width:0 0 1px;border-radius:0;box-shadow:none}
+      #mufy-recovery-panel[data-site-role-view] .mufy-recovery-site-role-row.selected{background:var(--mufy-panel-accent-soft)!important;outline:none}
+      #mufy-recovery-panel[data-site-role-view] .mufy-recovery-site-select{min-width:28px;min-height:28px;padding:3px;background:transparent!important;border-color:transparent!important;box-shadow:none}
+      #mufy-recovery-panel[data-site-role-view] .mufy-recovery-site-select span{display:none}
+      #mufy-recovery-panel[data-site-role-view] .mufy-recovery-site-select input{accent-color:var(--mufy-panel-accent)}
       #mufy-recovery-panel[data-section="roles"] .mufy-recovery-row{margin:0;border-width:0 0 1px;border-radius:0;background:none!important}
       .mufy-role-record{font-size:11px;color:var(--mufy-panel-muted);overflow-wrap:anywhere}
       .mufy-role-record summary{cursor:pointer;width:max-content}
@@ -10407,7 +10436,8 @@ roleStateReady = true;
           <div id="mufy-recovery-favorite-tabs"><button data-category="manualFavoriteChats">普通待聊 (0)</button><button data-category="siteSearch">网站角色 (0)</button><button data-category="siteAuthors">网站作者 (0)</button></div>
           <div id="mufy-recovery-favorite-actions"><button id="mufy-recovery-stop-action" title="整理或管理收藏夹">收藏夹</button></div>
           <label id="mufy-recovery-auto-folder-label"><input id="mufy-recovery-auto-add-favorite-folder" type="checkbox"><span>收藏后自动放入收藏夹<small>关闭后仍会正常收藏角色，只是不再自动按作者归入收藏夹；手动整理功能不受影响。</small></span></label>
-          <div id="mufy-recovery-site-actions"><button id="mufy-recovery-refresh-favorite-states">获取收藏状态</button><button id="mufy-recovery-select-unfavorite-site">全选未收藏</button><button id="mufy-recovery-favorite-selected-site">立即收藏 (0)</button><button id="mufy-recovery-clear-site-selection">清空勾选</button><button id="mufy-recovery-refresh-site-rows" title="刷新当前网站页面并重新捕获，之后翻页会继续自动获取">重新获取</button><button id="mufy-recovery-clear-site-rows">清空结果</button></div>
+          <button id="mufy-recovery-site-manage" hidden aria-pressed="false">管理</button>
+          <div id="mufy-recovery-site-actions"><button id="mufy-recovery-refresh-favorite-states">获取收藏状态</button><button id="mufy-recovery-select-unfavorite-site">全选未收藏</button><button id="mufy-recovery-clear-site-selection">清空勾选</button><button id="mufy-recovery-refresh-site-rows" title="刷新当前网站页面并重新捕获，之后翻页会继续自动获取">重新获取</button><button id="mufy-recovery-clear-site-rows">清空结果</button></div>
           <div id="mufy-recovery-manual-auto-actions" hidden><input id="mufy-recovery-manual-auto-message" type="text" maxlength="500" value="${esc(state.manualAutoChatMessage)}" aria-label="一键扣数发送内容"><label class="mufy-recovery-auto-delay">间隔 <input id="mufy-recovery-manual-auto-delay-min" type="number" min="0" max="300" step="1" value="${esc(state.manualAutoChatDelayMin)}" aria-label="随机冷却最短秒数">～<input id="mufy-recovery-manual-auto-delay-max" type="number" min="0" max="300" step="1" value="${esc(state.manualAutoChatDelayMax)}" aria-label="随机冷却最长秒数"> 秒</label><button id="mufy-recovery-manual-auto-start">一键扣数</button><button id="mufy-recovery-manual-auto-cancel" hidden>取消任务</button><button id="mufy-recovery-manual-chat-next" title="按普通待聊列表顺序打开角色；再次点击视为当前角色已处理并前往下一个">下一个</button></div>
         </div>
         <div id="mufy-recovery-chat-section" hidden>
@@ -10423,7 +10453,9 @@ roleStateReady = true;
           <label id="mufy-recovery-auto-switch-label"><input id="mufy-recovery-auto-switch" type="checkbox"> 自动切换绑定面具</label>
           <div id="mufy-recovery-mask-actions"><button id="mufy-recovery-import-masks">导入面具</button><button id="mufy-recovery-export-masks">导出面具</button><button id="mufy-recovery-undo" class="mufy-recovery-tab-action" disabled>撤回上次操作</button><input id="mufy-recovery-mask-file" type="file" accept=".json,application/json" hidden></div>
         </div>
-      </div><div id="mufy-recovery-list"></div><div id="mufy-recovery-resize-handle-bottom" title="上下拖动调整面板高度" aria-label="上下拖动调整面板高度"></div>`;
+      </div><div id="mufy-recovery-list"></div>
+      <div id="mufy-recovery-site-selection-bar" hidden><span id="mufy-recovery-site-selection-count">已选 0 项</span><button id="mufy-recovery-favorite-selected-site">立即收藏 (0)</button></div>
+      <div id="mufy-recovery-resize-handle-bottom" title="上下拖动调整面板高度" aria-label="上下拖动调整面板高度"></div>`;
     panel.style.display = 'none';
     document.body.appendChild(panel);
     pageWindow.__mufyRecoveryPanelVersion = SCRIPT_VERSION;
@@ -10848,6 +10880,10 @@ roleStateReady = true;
       if (event.key === 'Enter') searchRolesByChatRecord();
     };
     panel.querySelector('#mufy-recovery-refresh-favorite-states').onclick = refreshCapturedFavoriteStates;
+    panel.querySelector('#mufy-recovery-site-manage').onclick = () => {
+      state.siteRoleManaging = !state.siteRoleManaging;
+      render();
+    };
     panel.querySelector('#mufy-recovery-select-unfavorite-site').onclick = selectUnfavoriteSiteRows;
     panel.querySelector('#mufy-recovery-favorite-selected-site').onclick = favoriteSelectedSiteRows;
     panel.querySelector('#mufy-recovery-clear-site-selection').onclick = clearSiteSelection;
@@ -10890,6 +10926,7 @@ roleStateReady = true;
       };
     });
     panel.querySelector('#mufy-recovery-section-back').onclick = () => {
+      state.siteRoleManaging = false;
       state.section = 'home';
       render();
     };
@@ -10923,6 +10960,7 @@ roleStateReady = true;
     panel.querySelector('#mufy-recovery-manual-auto-cancel').onclick = cancelManualAutoChatJob;
     panel.querySelectorAll('[data-category]').forEach(button => {
       button.onclick = () => {
+        if (button.dataset.category !== 'siteSearch') state.siteRoleManaging = false;
         state.active = button.dataset.category;
         state.section = state.active === 'masks' || state.active === 'library' ? 'masks'
           : state.active === 'siteSearch' || state.active === 'siteAuthors' ? 'favorites'
@@ -10946,6 +10984,7 @@ roleStateReady = true;
       }
       const selectToggle = event.target.closest('[data-action="toggle-site-select"]');
       if (selectToggle) {
+        if (!canSelectSiteRoles()) return;
         const id = String(selectToggle.dataset.characterId || '');
         if (id) {
           if (selectToggle.checked) state.selectedSiteCharacterIds.add(id);
@@ -11007,7 +11046,7 @@ roleStateReady = true;
       siteLongPress = null;
       if (current.timer) clearTimeout(current.timer);
       current.card?.classList.remove('longpressing');
-      if (commit && current.ready && current.id) {
+      if (commit && current.ready && current.id && canSelectSiteRoles()) {
         if (state.selectedSiteCharacterIds.has(current.id)) state.selectedSiteCharacterIds.delete(current.id);
         else state.selectedSiteCharacterIds.add(current.id);
         current.card?.classList.toggle('selected', state.selectedSiteCharacterIds.has(current.id));
@@ -11021,7 +11060,7 @@ roleStateReady = true;
       }
     };
     panel.querySelector('#mufy-recovery-list').addEventListener('pointerdown', event => {
-      if (state.section !== 'favorites' || (state.active !== 'siteSearch' && state.active !== 'siteAuthors')) return;
+      if (!canSelectSiteRoles()) return;
       if (event.target.closest('button,input,label,a')) return;
       const card = event.target.closest('.mufy-recovery-site-role-row[data-character-id]');
       const id = String(card?.dataset.characterId || '');
