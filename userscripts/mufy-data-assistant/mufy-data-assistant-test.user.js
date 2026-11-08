@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.81
+// @version      3.0.0-dev.82
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -18,7 +18,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.81';
+    : '3.0.0-dev.82';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -10023,7 +10023,12 @@ roleStateReady = true;
       #mufy-recovery-panel .mufy-recovery-mask-editor-field,#mufy-recovery-panel #mufy-recovery-mask-editor-title,#mufy-recovery-panel #mufy-recovery-mask-editor-close{color:var(--mufy-panel-text)!important}#mufy-recovery-panel #mufy-recovery-mask-editor-hint{color:var(--mufy-panel-muted)!important}#mufy-recovery-panel #mufy-recovery-mask-editor-save-as{background:var(--mufy-panel-surface)!important;border-color:var(--mufy-panel-border)!important;color:var(--mufy-panel-text)!important}#mufy-recovery-panel #mufy-recovery-mask-editor-replace{background:var(--mufy-panel-accent-button)!important;border-color:var(--mufy-panel-accent)!important;color:var(--mufy-panel-accent-text)!important}
       #mufy-recovery-panel .mufy-recovery-log-entry{background:var(--mufy-panel-surface-strong)!important;border-color:var(--mufy-panel-border)!important;color:var(--mufy-panel-text)!important}#mufy-recovery-panel .mufy-recovery-log-entry.is-info{border-left-color:#4b91dc!important}#mufy-recovery-panel .mufy-recovery-log-entry.is-warn{background:color-mix(in srgb,#e6ad45 12%,var(--mufy-panel-bg))!important;border-left-color:#c98a19!important}#mufy-recovery-panel .mufy-recovery-log-entry.is-error{background:color-mix(in srgb,#e75d66 11%,var(--mufy-panel-bg))!important;border-left-color:#d94c57!important}
       #mufy-recovery-panel .mufy-recovery-log-message,#mufy-recovery-panel .mufy-recovery-log-summary{color:var(--mufy-panel-text)!important}#mufy-recovery-panel .mufy-recovery-log-meta,#mufy-recovery-panel .mufy-recovery-log-detail{color:var(--mufy-panel-muted)!important}#mufy-recovery-panel .mufy-recovery-log-detail pre{background:var(--mufy-panel-input)!important;color:var(--mufy-panel-text)!important;border:1px solid var(--mufy-panel-border)}#mufy-recovery-panel[data-panel-tone="light"] .is-warn .mufy-recovery-log-message{color:#754d05!important}#mufy-recovery-panel[data-panel-tone="light"] .is-error .mufy-recovery-log-message{color:#9f2834!important}
+      #mufy-recovery-panel #mufy-recovery-quote-stage{background:var(--mufy-panel-bg)!important;color:var(--mufy-panel-text)!important}#mufy-recovery-panel #mufy-recovery-quote-stage-panel{background:var(--mufy-panel-surface)!important;border-color:var(--mufy-panel-border)!important;color:var(--mufy-panel-text)!important;box-shadow:0 18px 42px #26313a24}#mufy-recovery-panel #mufy-recovery-quote-stage-head{color:var(--mufy-panel-text)!important}#mufy-recovery-panel #mufy-recovery-quote-stage-head small{color:var(--mufy-panel-muted)!important}
+      #mufy-recovery-panel #mufy-recovery-chat-search-start,#mufy-recovery-panel #mufy-recovery-share-recovery-one,#mufy-recovery-panel #mufy-recovery-material-editor-save,#mufy-recovery-panel #mufy-recovery-quote-editor-save,#mufy-recovery-panel #mufy-recovery-quote-update,#mufy-recovery-panel #mufy-recovery-quote-style-entry,#mufy-recovery-panel #mufy-recovery-panel-beauty-done{background:var(--mufy-panel-accent-button)!important;border-color:var(--mufy-panel-accent)!important;color:var(--mufy-panel-accent-text)!important}
+      #mufy-recovery-panel .mufy-recovery-export-head,#mufy-recovery-panel #mufy-recovery-help-head{background:var(--mufy-panel-surface-strong)!important;border-color:var(--mufy-panel-border)!important;color:var(--mufy-panel-text)!important}#mufy-recovery-panel #mufy-recovery-help-body,#mufy-recovery-panel .mufy-recovery-export-binding-option{color:var(--mufy-panel-text)!important}#mufy-recovery-panel .mufy-recovery-export-binding-hint{color:var(--mufy-panel-muted)!important}
+      #mufy-recovery-panel #mufy-recovery-help{background:var(--mufy-panel-surface)!important;border-color:var(--mufy-panel-border)!important;color:var(--mufy-panel-text)!important}
       #mufy-recovery-panel ::-webkit-scrollbar{width:7px;height:7px}#mufy-recovery-panel ::-webkit-scrollbar-track{background:transparent}#mufy-recovery-panel ::-webkit-scrollbar-thumb{border:2px solid transparent;border-radius:999px;background:#82769c;background-clip:padding-box}#mufy-recovery-panel ::-webkit-scrollbar-thumb:hover{background:#a594cb;background-clip:padding-box}
+      #mufy-recovery-panel ::-webkit-scrollbar-thumb{background:var(--mufy-panel-accent)!important;background-clip:padding-box!important}#mufy-recovery-panel ::-webkit-scrollbar-thumb:hover{background:var(--mufy-panel-accent-text)!important;background-clip:padding-box!important}
       @media (max-width:520px){
         #mufy-recovery-panel{right:8px;bottom:58px;width:calc(100vw - 16px);max-width:calc(100vw - 16px)}
         #mufy-recovery-role-actions button,#mufy-recovery-mask-actions button{font-size:11px;padding:6px 5px}
