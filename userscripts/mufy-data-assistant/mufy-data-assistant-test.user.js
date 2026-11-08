@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.93
+// @version      3.0.0-dev.94
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,7 +21,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.93';
+    : '3.0.0-dev.94';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -1381,27 +1381,16 @@
       const active = row.id === currentId;
       const hasPassword = Boolean(savedAccountPassword(row.id));
       const loginMode = accountLoginMode(row);
-      return `<article class="mufy-account-card ${active ? 'is-current' : ''}"><div><strong>${esc(row.label)}</strong><small>${esc(row.email)}</small><span class="mufy-account-badges">${active ? '<em>当前登录</em>' : ''}<em class="login-mode ${loginMode}">${loginMode === 'direct' ? '接口直登' : '官方表单'}</em>${hasPassword ? '<em class="has-password">已存密码</em>' : ''}</span></div><span>${active ? '' : `<button data-account-mark-current="${esc(row.id)}" title="网站已经登录此账号时，用它纠正当前标记">设为当前</button><button data-account-switch="${esc(row.id)}">切换</button>`}<button data-account-mode="${esc(row.id)}">${loginMode === 'direct' ? '改用表单' : '启用直登'}</button><button data-account-password="${esc(row.id)}">${hasPassword ? '改密码' : '存密码'}</button><button data-account-edit="${esc(row.id)}">修改</button><button data-account-delete="${esc(row.id)}">删除</button></span></article>`;
+      return `<article class="mufy-account-card ${active ? 'is-current' : ''}"><div><strong>${esc(row.label)}</strong><small>${esc(row.email)}</small><span class="mufy-account-badges">${active ? '<em>当前登录</em>' : ''}<em class="login-mode ${loginMode}">${loginMode === 'direct' ? '接口直登' : '官方表单'}</em>${hasPassword ? '<em class="has-password">已存密码</em>' : ''}</span></div><span>${active ? '' : `<button data-account-mark-current="${esc(row.id)}" title="网站已经登录此账号时，用它纠正当前标记">设为当前</button><button data-account-switch="${esc(row.id)}">切换</button>`}<button data-account-mode="${esc(row.id)}">${loginMode === 'direct' ? '改用表单' : '启用直登'}</button><button data-account-edit="${esc(row.id)}">编辑</button><button data-account-delete="${esc(row.id)}">删除</button></span></article>`;
     }).join('') || '<div class="mufy-recovery-empty">还没有保存账号。先登录一个 Mufy 账号，再点“保存当前账号”。</div>';
-  }
-
-  function editSavedAccount(accountId) {
-    const rows = loadAccountSwitchProfiles();
-    const row = rows.find(item => item.id === String(accountId || ''));
-    if (!row) return;
-    const email = String(pageWindow.prompt('登录邮箱：', row.email) || '').trim();
-    if (!email) return;
-    const label = String(pageWindow.prompt('账号名称：', row.label) || '').trim() || email;
-    row.email = email;
-    row.label = label;
-    saveAccountSwitchProfiles(rows);
-    renderAccountSection();
   }
 
   function closeAccountPasswordEditor() {
     const modal = panel?.querySelector('#mufy-recovery-account-password-modal');
-    const input = panel?.querySelector('#mufy-recovery-account-password-input');
-    if (input) input.value = '';
+    const emailInput = panel?.querySelector('#mufy-recovery-account-email-input');
+    const passwordInput = panel?.querySelector('#mufy-recovery-account-password-input');
+    if (emailInput) emailInput.value = '';
+    if (passwordInput) passwordInput.value = '';
     if (modal) modal.hidden = true;
     accountPasswordEditingId = '';
     accountPasswordEnableDirectAfterSave = false;
@@ -1413,40 +1402,57 @@
     accountPasswordEditingId = row.id;
     accountPasswordEnableDirectAfterSave = Boolean(enableDirectAfterSave);
     const modal = panel.querySelector('#mufy-recovery-account-password-modal');
-    panel.querySelector('#mufy-recovery-account-password-title').textContent = `保存“${row.label}”的密码`;
+    panel.querySelector('#mufy-recovery-account-password-title').textContent = `编辑“${row.label}”`;
     panel.querySelector('#mufy-recovery-account-password-summary').textContent = savedAccountPassword(row.id)
-      ? '此账号已有保存密码。输入新密码会覆盖；密码不会回显。'
-      : '只有你在这里输入并保存后，助手才会知道该密码；它只保存在当前使用者自己的浏览器中。';
-    const input = panel.querySelector('#mufy-recovery-account-password-input');
-    input.value = '';
+      ? '上下依次为登录邮箱和新密码。密码留空会保留现有密码，旧密码不会回显。'
+      : '上下依次为登录邮箱和密码。密码留空表示不保存；只有主动输入并保存后，助手才会知道该密码。';
+    const emailInput = panel.querySelector('#mufy-recovery-account-email-input');
+    const passwordInput = panel.querySelector('#mufy-recovery-account-password-input');
+    emailInput.value = row.email;
+    passwordInput.value = '';
     modal.hidden = false;
-    setTimeout(() => input.focus(), 0);
+    setTimeout(() => emailInput.focus(), 0);
   }
 
   function commitAccountPasswordEditor() {
     const rows = loadAccountSwitchProfiles();
     const row = rows.find(item => item.id === accountPasswordEditingId);
-    const input = panel.querySelector('#mufy-recovery-account-password-input');
-    const password = String(input?.value || '');
+    const emailInput = panel.querySelector('#mufy-recovery-account-email-input');
+    const passwordInput = panel.querySelector('#mufy-recovery-account-password-input');
+    const email = String(emailInput?.value || '').trim();
+    const password = String(passwordInput?.value || '');
     if (!row) { closeAccountPasswordEditor(); return; }
-    if (password.length < 6) {
-      showManualAutoChatToast('密码至少需要 6 位；没有保存任何内容。', { tone: 'error', duration: 6000 });
-      input?.focus();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      showManualAutoChatToast('请输入有效的登录邮箱。', { tone: 'error', duration: 6000 });
+      emailInput?.focus();
       return;
     }
-    if (!saveAccountPassword(row.id, password)) {
+    if (password && password.length < 6) {
+      showManualAutoChatToast('新密码至少需要 6 位；留空可以保留原密码或不保存密码。', { tone: 'error', duration: 6000 });
+      passwordInput?.focus();
+      return;
+    }
+    if (accountPasswordEnableDirectAfterSave && !password && !savedAccountPassword(row.id)) {
+      showManualAutoChatToast('启用接口直登需要输入至少 6 位密码。', { tone: 'error', duration: 6000 });
+      passwordInput?.focus();
+      return;
+    }
+    if (password && !saveAccountPassword(row.id, password)) {
       showManualAutoChatToast('无法写入篡改猴独立存储，密码没有保存。', { tone: 'error', duration: 7000 });
       return;
     }
+    const oldEmail = row.email;
+    if (row.label === oldEmail || row.label === oldEmail.split('@')[0]) row.label = email.split('@')[0] || email;
+    row.email = email;
     if (accountPasswordEnableDirectAfterSave) {
       row.loginMode = 'direct';
-      saveAccountSwitchProfiles(rows);
     }
+    saveAccountSwitchProfiles(rows);
     const directEnabled = accountPasswordEnableDirectAfterSave;
     closeAccountPasswordEditor();
     state.status = directEnabled
-      ? `已为“${row.label}”保存密码并启用接口直登。`
-      : `已为“${row.label}”保存登录密码。当前登录模式未改变。`;
+      ? `已保存“${row.label}”的邮箱和密码，并启用接口直登。`
+      : `已保存“${row.label}”的账号信息；登录模式未改变。`;
     showManualAutoChatToast(state.status, { tone: 'success', duration: 7000 });
     renderAccountSection();
   }
@@ -1455,7 +1461,7 @@
     const rows = loadAccountSwitchProfiles();
     const row = rows.find(item => item.id === accountPasswordEditingId);
     if (!row || !savedAccountPassword(row.id)) { closeAccountPasswordEditor(); return; }
-    if (!pageWindow.confirm(`清除“${row.label}”保存在篡改猴里的密码？`)) return;
+    if (!pageWindow.confirm(`清除“${row.label}”保存在篡改猴里的密码，并改用官方表单模式？`)) return;
     deleteAccountPassword(row.id);
     row.loginMode = 'native';
     saveAccountSwitchProfiles(rows);
@@ -1470,9 +1476,11 @@
     const row = rows.find(item => item.id === String(accountId || ''));
     if (!row) return;
     if (accountLoginMode(row) === 'direct') {
+      if (!pageWindow.confirm(`改用官方表单模式？\n\n这会同时真正删除“${row.label}”保存在篡改猴里的密码，之后密码需由 Edge 或你本人输入。`)) return;
+      deleteAccountPassword(row.id);
       row.loginMode = 'native';
       saveAccountSwitchProfiles(rows);
-      state.status = `“${row.label}”已改用官方表单模式；已存密码仍保留但不会用于登录，可点“改密码”进入后清除。`;
+      state.status = `“${row.label}”已改用官方表单模式，并已删除保存的密码。`;
       showManualAutoChatToast(state.status, { tone: 'success', duration: 7000 });
       renderAccountSection();
       return;
@@ -1512,7 +1520,8 @@
     deleteAccountPassword(row.id);
     saveAccountSwitchProfiles(rows.filter(item => item.id !== row.id));
     if (currentAccountSwitchId() === row.id) setCurrentAccountSwitchId('');
-    state.status = `已从快速切换列表删除“${row.label}”。`;
+    state.status = `已删除快捷账号“${row.label}”；对应的本机保存密码也已清除。`;
+    showManualAutoChatToast(state.status, { tone: 'success', duration: 6000 });
     renderAccountSection();
     render();
   }
@@ -10456,6 +10465,8 @@ roleStateReady = true;
       #mufy-recovery-section-nav{padding:1px 0 9px;border-color:#ffffff12}#mufy-recovery-section-back{border-radius:999px!important;background:#ffffff09!important}#mufy-recovery-section-title{font-size:16px;letter-spacing:.04em}
       .mufy-recovery-section-note{padding:12px 13px;border-color:#a995ff2e;border-radius:14px;background:linear-gradient(135deg,#8d73df18,#ffffff06);box-shadow:inset 0 1px #ffffff0d}.mufy-recovery-section-note strong{color:#f1edff;font-size:13px}.mufy-recovery-section-note span{color:#9d98ad}
       #mufy-recovery-panel input:not([type="checkbox"]):not([type="range"]):not([type="color"]),#mufy-recovery-panel select,#mufy-recovery-panel textarea{border-color:var(--mufy-panel-border)!important;border-radius:11px!important;background:var(--mufy-panel-input)!important;color:var(--mufy-panel-text)!important;box-shadow:inset 0 1px 4px #0002!important;outline:none}#mufy-recovery-panel input:focus,#mufy-recovery-panel select:focus,#mufy-recovery-panel textarea:focus{border-color:var(--mufy-panel-accent)!important;box-shadow:0 0 0 3px var(--mufy-panel-accent-soft)!important}
+      #mufy-recovery-panel #mufy-recovery-account-email-input,#mufy-recovery-panel #mufy-recovery-account-password-input{box-sizing:border-box;width:100%;padding:10px;font-size:14px}#mufy-recovery-panel #mufy-recovery-account-current,#mufy-recovery-panel #mufy-recovery-account-mode-guide>div{background:var(--mufy-panel-surface)!important;border-color:var(--mufy-panel-border)!important;color:var(--mufy-panel-text)!important;box-shadow:inset 0 1px color-mix(in srgb,#fff 55%,transparent)}#mufy-recovery-panel #mufy-recovery-account-current span,#mufy-recovery-panel #mufy-recovery-account-mode-guide strong,#mufy-recovery-panel #mufy-recovery-account-password-title{color:var(--mufy-panel-text)!important}#mufy-recovery-panel #mufy-recovery-account-current small,#mufy-recovery-panel #mufy-recovery-account-mode-guide small,#mufy-recovery-panel #mufy-recovery-account-password-summary{color:var(--mufy-panel-muted)!important}#mufy-recovery-panel #mufy-recovery-account-password-warning{background:var(--mufy-panel-accent-soft)!important;border-color:var(--mufy-panel-border)!important;color:var(--mufy-panel-text)!important}
+      #mufy-recovery-panel #mufy-recovery-account-mode-guide{grid-template-columns:1fr!important}#mufy-recovery-panel .mufy-account-card>span{max-width:58%}#mufy-recovery-panel .mufy-account-card>span button{background:var(--mufy-panel-surface-strong)!important;border-color:var(--mufy-panel-border)!important;color:var(--mufy-panel-text)!important}#mufy-recovery-panel .mufy-account-card>span button:hover{background:var(--mufy-panel-accent-soft)!important;border-color:var(--mufy-panel-accent)!important}
       #mufy-recovery-status{border-radius:11px;color:#c6bfdc}#mufy-recovery-list{border-color:#ffffff12}.mufy-recovery-row{margin:5px 0;padding:10px 9px;border:1px solid #ffffff0d;border-radius:13px;background:#ffffff05}.mufy-recovery-row:hover{border-color:#a995ff28;background:#ffffff08}.mufy-recovery-row img{border-radius:12px;box-shadow:0 5px 13px #0007}
       #mufy-recovery-model-modal,#mufy-recovery-log-modal,#mufy-recovery-export-modal{border-color:#ffffff24;border-radius:16px;background:linear-gradient(155deg,#292936f5,#17171ff8);box-shadow:0 22px 60px #000c}.mufy-model-monitor-row{border-color:#ffffff14;border-radius:12px;background:#ffffff07}.mufy-model-monitor-row:has(input:checked){border-color:#9f8bea55;background:#8d73df18}
       /* Selected theme owns every panel surface; no legacy purple/black mixing. */
@@ -10701,7 +10712,7 @@ roleStateReady = true;
 <li><strong>根据聊天内容找角色：</strong>进入“聊天记录”点击“搜索聊天记录”，可选择搜索所有角色或指定单个角色。单角色允许搜索 1 个字，所有角色至少需要 2 个字。结果会标记关键词；点击“打开并定位”后进入原会话，自动向上加载并尝试滚动到对应消息。</li>
 <li><strong>角色回复摘录：</strong>在角色回复里选中文字，展开该消息的省略号操作栏并点击“摘录”；不选文字时会把整条回复放进编辑框。摘录按角色组成牌组，进入“摘录/美化”选择“打开摘录”即可查看、编辑或导出；牌面样式从具体摘录牌内的“牌面样式”进入。</li>
 <li><strong>面板美化：</strong>进入“摘录/美化”选择“打开美化”，可独立调整整个助手面板的主题、背景色、强调色、文字色、透明度、字号和圆角，不会修改摘录牌样式。</li>
-<li><strong>账号快速切换：</strong>每个账号可自行选择“官方表单”或“接口直登”。官方表单模式不保存密码：脚本只填邮箱，密码由 Edge 或本人交给 Mufy 官方表单；当前脚本不记录或导出密码，也不会把它另行发送到 Mufy 之外的地址，因此不产生“本地保存密码”这项额外风险，但不代表任何软件都能承诺绝对零风险。接口直登只有在用户主动输入并保存后才会知道密码；密码只保存在使用者自己的浏览器里，脚本作者不会收到，并将 <code>email</code> 和 <code>password</code> 直接 POST 到 Mufy 官方 <code>/api/users/login</code>。请勿安装来源不明或被篡改的插件或脚本，防止密码泄露。删除快捷账号或点击“清除已存”会同时从篡改猴独立存储中真正删除对应密码。</li>
+<li><strong>账号快速切换：</strong>每个账号可自行选择“官方表单”或“接口直登”。官方表单模式不保存密码：脚本只填邮箱，密码由 Edge 或本人交给 Mufy 官方表单；当前脚本不记录或导出密码，也不会把它另行发送到 Mufy 之外的地址，因此不产生“本地保存密码”这项额外风险，但不代表任何软件都能承诺绝对零风险。接口直登只有在用户主动输入并保存后才会知道密码；密码只保存在使用者自己的浏览器里，脚本作者不会收到，并将 <code>email</code> 和 <code>password</code> 直接 POST 到 Mufy 官方 <code>/api/users/login</code>。请勿安装来源不明或被篡改的插件或脚本，防止密码泄露。“编辑”可在上下两个输入框修改邮箱和密码；改用表单、删除快捷账号或点击“清除已存”都会从篡改猴独立存储中真正删除对应密码并给出提示。</li>
 <li><strong>模型可用性监控：</strong>在功能首页底部点击“模型监控”，勾选需要监控的模型。脚本每 5 分钟读取一次网站模型状态；悬浮按钮上方用绿、黄、红、灰色圆点分别表示流畅、拥堵、中断和暂时未知。点击状态点可查看响应时长、成功率和最后检测时间。</li>
 <li><strong>导出分享链接：</strong>点击“导出角色”，再选择“仅分享链接 TXT”。角色 JSON/CSV 也会附带已保存的分享链接；独立 TXT 会导出当前账号缓存中的全部分享链接，包括当前角色列表里已经找不到但本地仍有记录的角色。</li>
 <li><strong>收藏未聊转为链接收藏：</strong>进入“角色”→“收藏未聊”，点击“检测未记录角色”。分享链接记录按账号隔离，本账号已有记录的角色会直接跳过；其余角色严格一次处理一个：先保存分享链接，再取消原收藏，从分享链接进入并重新收藏。任务可以中断、继续或彻底取消。</li>
@@ -10773,7 +10784,7 @@ roleStateReady = true;
       </div>
       <div id="mufy-recovery-panel-beauty-modal" hidden><div id="mufy-recovery-panel-beauty-head"><span><strong>面板美化</strong><small id="mufy-recovery-panel-beauty-summary">选择已经完整适配的成套主题</small></span><button id="mufy-recovery-panel-beauty-close" title="关闭">×</button></div><div id="mufy-recovery-panel-beauty-fields"><label>成套主题<select data-panel-theme="preset"><option value="midnight">深夜紫灰</option><option value="rose">奶油粉</option><option value="mist">浅雾蓝</option><option value="sage">清浅绿</option><option value="black">纯黑</option></select></label><label>卡片层次<input data-panel-theme="opacity" type="range" min="72" max="100" step="1"></label><label>整体字号<input data-panel-theme="fontSize" type="range" min="11" max="17" step="1"></label><label>面板圆角<input data-panel-theme="radius" type="range" min="0" max="28" step="1"></label></div><div id="mufy-recovery-panel-beauty-actions"><button id="mufy-recovery-panel-beauty-reset">恢复默认</button><button id="mufy-recovery-panel-beauty-done">完成</button></div></div>
       <div id="mufy-recovery-model-modal" hidden><div id="mufy-recovery-model-head"><span><strong>模型可用性监控</strong><small id="mufy-recovery-model-summary">每 5 分钟检测一次</small></span><button id="mufy-recovery-model-close" title="关闭">×</button></div><div id="mufy-recovery-model-tools"><input id="mufy-recovery-model-search" placeholder="搜索模型名称"><button id="mufy-recovery-model-refresh">立即检测</button><label id="mufy-recovery-model-notify-label"><input id="mufy-recovery-model-notify" type="checkbox"><span id="mufy-recovery-model-notify-text">异常通知（可选）</span><small>仅在已选模型由正常变为拥堵或中断时提醒</small></label></div><div id="mufy-recovery-model-list"><div class="mufy-recovery-empty">正在读取模型状态…</div></div></div>
-      <div id="mufy-recovery-account-password-modal" hidden><h3 id="mufy-recovery-account-password-title">保存账号密码</h3><div id="mufy-recovery-account-password-summary"></div><div id="mufy-recovery-account-password-warning">密码只保存在使用者自己的浏览器里，脚本作者不会收到。请勿安装来源不明或被篡改的插件或脚本，防止密码泄露；仅建议在可信的个人设备上使用。</div><input id="mufy-recovery-account-password-input" type="password" minlength="6" autocomplete="new-password" placeholder="输入至少 6 位密码"><div id="mufy-recovery-account-password-actions"><button id="mufy-recovery-account-password-clear">清除已存</button><button id="mufy-recovery-account-password-cancel">取消</button><button id="mufy-recovery-account-password-save">保存密码</button></div></div>
+      <div id="mufy-recovery-account-password-modal" hidden><h3 id="mufy-recovery-account-password-title">编辑账号</h3><div id="mufy-recovery-account-password-summary"></div><input id="mufy-recovery-account-email-input" type="email" name="account-email" autocomplete="off" placeholder="登录邮箱"><input id="mufy-recovery-account-password-input" type="password" minlength="6" autocomplete="new-password" placeholder="新密码（留空则保留原值）"><div id="mufy-recovery-account-password-warning">密码只保存在使用者自己的浏览器里，脚本作者不会收到。请勿安装来源不明或被篡改的插件或脚本，防止密码泄露；仅建议在可信的个人设备上使用。</div><div id="mufy-recovery-account-password-actions"><button id="mufy-recovery-account-password-clear">清除已存</button><button id="mufy-recovery-account-password-cancel">取消</button><button id="mufy-recovery-account-password-save">保存修改</button></div></div>
       <div id="mufy-recovery-material-editor" hidden><div id="mufy-recovery-material-editor-head"><strong id="mufy-recovery-material-editor-title">新增指令</strong><button id="mufy-recovery-material-editor-close" title="关闭">×</button></div><div id="mufy-recovery-material-editor-body"><label>标题<input id="mufy-recovery-material-title" maxlength="120" placeholder="例如：总结当前剧情"></label><label>内容<textarea id="mufy-recovery-material-content" maxlength="50000" placeholder="输入要填入聊天框的完整内容"></textarea></label></div><div id="mufy-recovery-material-editor-actions"><button id="mufy-recovery-material-editor-cancel">取消</button><button id="mufy-recovery-material-editor-save">保存</button></div></div>
       <div id="mufy-recovery-controls">
         <div id="mufy-recovery-section-home"><div id="mufy-recovery-section-home-head"><strong>选择功能分区</strong><small>进入后可通过返回按钮切换到其他分区</small></div><div id="mufy-recovery-section-cards"><button class="mufy-recovery-section-card" data-section="roles"><strong>角色</strong><small>找回、状态、收藏未聊、作者与标签</small></button><button class="mufy-recovery-section-card" data-section="favorites"><strong>收藏</strong><small>网页角色、普通待聊、一键扣数与收藏夹</small></button><button class="mufy-recovery-section-card" data-section="chats"><strong>聊天记录</strong><small>内容搜索与完整导出</small></button><button class="mufy-recovery-section-card" id="mufy-recovery-quote-entry"><strong>摘录</strong><small>查看摘录牌、调整牌面与导出</small></button><button class="mufy-recovery-section-card" data-section="masks"><strong>面具</strong><small>面具库、编辑、绑定与导入导出</small></button><button class="mufy-recovery-section-card" data-section="accounts"><strong>账号切换</strong><small>一次登录一个账号，快速退出并填入另一个账号邮箱</small></button><button class="mufy-recovery-section-card" data-section="materials"><strong>素材库</strong><small>指令库与番外库，点击快速填入</small></button><button class="mufy-recovery-section-card" id="mufy-recovery-panel-beauty-entry"><strong>美化</strong><small>设置面板主题、字号和圆角</small></button><button id="mufy-recovery-model-entry" class="mufy-recovery-section-card" title="选择并监控模型状态"><strong>模型监控</strong><small>选择模型并查看可用性、响应时间和成功率</small></button><button id="mufy-recovery-update-entry" class="mufy-recovery-section-card" title="检查并安装测试版更新"><strong>检查更新</strong><small id="mufy-recovery-update-text">当前 ${esc(SCRIPT_VERSION)} · 点击检查</small></button></div></div>
@@ -10807,7 +10818,7 @@ roleStateReady = true;
           </form>
           <div id="mufy-recovery-chat-result-count" class="mufy-recovery-muted">搜索结果 · 0</div>
         </div>
-        <div id="mufy-recovery-account-section" hidden><div class="mufy-recovery-section-note"><strong>账号快速切换</strong><span>一次只登录一个账号。每个账号可独立选择登录方式；只有主动输入并保存后，助手才会知道该密码。</span></div><div id="mufy-recovery-account-mode-guide"><div><strong>官方表单 · 不保存密码</strong><small>只填邮箱；密码由 Edge 或本人交给 Mufy。脚本不记录或导出密码，也不另行发送到 Mufy 之外；没有本地保存密码的额外风险。</small></div><div><strong>接口直登 · 本机保存密码</strong><small>密码只保存在使用者自己的浏览器，直接发送给 Mufy 官方登录接口。请勿安装来源不明或被篡改的插件或脚本。</small></div></div><div id="mufy-recovery-account-current"></div><div id="mufy-recovery-account-tools"><button id="mufy-recovery-account-save">保存当前账号</button></div><div id="mufy-recovery-account-list"></div><small class="mufy-recovery-account-hint">账号卡会标明“官方表单”或“接口直登”，点击模式按钮可自行切换。删除快捷账号会同时真正清除该账号保存在篡改猴里的密码；也可在“改密码”中单独清除。</small></div>
+        <div id="mufy-recovery-account-section" hidden><div class="mufy-recovery-section-note"><strong>账号快速切换</strong><span>一次只登录一个账号。每个账号可独立选择登录方式；只有主动输入并保存后，助手才会知道该密码。</span></div><div id="mufy-recovery-account-mode-guide"><div><strong>官方表单 · 不保存密码</strong><small>只填邮箱；密码由 Edge 或本人交给 Mufy。脚本不记录或导出密码，也不另行发送到 Mufy 之外；没有本地保存密码的额外风险。</small></div><div><strong>接口直登 · 本机保存密码</strong><small>密码只保存在使用者自己的浏览器，直接发送给 Mufy 官方登录接口。请勿安装来源不明或被篡改的插件或脚本。</small></div></div><div id="mufy-recovery-account-current"></div><div id="mufy-recovery-account-tools"><button id="mufy-recovery-account-save">保存当前账号</button></div><div id="mufy-recovery-account-list"></div><small class="mufy-recovery-account-hint">“编辑”中上下修改登录邮箱和密码。点击“改用表单”会真正删除已存密码并弹出提示；删除快捷账号也会同步清除密码。</small></div>
         <div id="mufy-recovery-material-section" hidden><div id="mufy-recovery-material-tabs"><button data-material-kind="prompt">指令库</button><button data-material-kind="extra">番外库</button></div><div id="mufy-recovery-material-tools"><button id="mufy-recovery-material-add">新增指令</button><button id="mufy-recovery-material-import">导入 JSON</button><button id="mufy-recovery-material-export">导出 JSON</button><input id="mufy-recovery-material-file" type="file" accept=".json,application/json" hidden></div><div id="mufy-recovery-material-list"></div></div>
         <div id="mufy-recovery-mask-section" hidden>
           <div id="mufy-recovery-mask-tabs"><button data-category="masks">面具 (0)</button><button data-category="library">面具库 (0)</button><button id="mufy-recovery-save-all" class="mufy-recovery-tab-action">全部存入面具库</button></div>
@@ -11070,20 +11081,20 @@ roleStateReady = true;
       if (switchButton) { switchToSavedAccount(String(switchButton.dataset.accountSwitch || '')); return; }
       const modeButton = event.target.closest?.('[data-account-mode]');
       if (modeButton) { toggleAccountLoginMode(String(modeButton.dataset.accountMode || '')); return; }
-      const passwordButton = event.target.closest?.('[data-account-password]');
-      if (passwordButton) { openAccountPasswordEditor(String(passwordButton.dataset.accountPassword || '')); return; }
       const editButton = event.target.closest?.('[data-account-edit]');
-      if (editButton) { editSavedAccount(String(editButton.dataset.accountEdit || '')); return; }
+      if (editButton) { openAccountPasswordEditor(String(editButton.dataset.accountEdit || '')); return; }
       const deleteButton = event.target.closest?.('[data-account-delete]');
       if (deleteButton) deleteSavedAccount(String(deleteButton.dataset.accountDelete || ''));
     };
     panel.querySelector('#mufy-recovery-account-password-save').onclick = commitAccountPasswordEditor;
     panel.querySelector('#mufy-recovery-account-password-clear').onclick = clearAccountPasswordEditor;
     panel.querySelector('#mufy-recovery-account-password-cancel').onclick = closeAccountPasswordEditor;
-    panel.querySelector('#mufy-recovery-account-password-input').onkeydown = event => {
-      if (event.key === 'Enter') { event.preventDefault(); commitAccountPasswordEditor(); }
-      if (event.key === 'Escape') closeAccountPasswordEditor();
-    };
+    ['#mufy-recovery-account-email-input', '#mufy-recovery-account-password-input'].forEach(selector => {
+      panel.querySelector(selector).onkeydown = event => {
+        if (event.key === 'Enter') { event.preventDefault(); commitAccountPasswordEditor(); }
+        if (event.key === 'Escape') closeAccountPasswordEditor();
+      };
+    });
     const modelModal = panel.querySelector('#mufy-recovery-model-modal');
     const openModelMonitor = () => {
       panel.style.display = 'flex';
