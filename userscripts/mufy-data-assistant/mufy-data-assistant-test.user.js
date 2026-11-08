@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.97
+// @version      3.0.0-dev.98
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,7 +21,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.97';
+    : '3.0.0-dev.98';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -9225,6 +9225,9 @@ roleStateReady = true;
   let quoteInlineEditing = false;
   let quoteToolsOpen = false;
   let quoteStyleOpen = false;
+  const pendingQuoteAvatars = new Set();
+  let quoteAvatarQueue = Promise.resolve();
+  let quoteAvatarRetryAt = 0;
 
   function messageContainerFromAction(actionBox) {
     let node = actionBox;
@@ -9258,8 +9261,39 @@ roleStateReady = true;
     return {
       ...context,
       name: String(known?.name || document.querySelector('h1,h2')?.textContent?.trim() || '当前角色'),
-      avatarUrl: String(known?.avatarUrl || '')
+      avatarUrl: ''
     };
+  }
+
+  function queueQuoteAvatar(characterId) {
+    const scope = maskAccountScope;
+    const key = JSON.stringify([scope, characterId]);
+    if (pendingQuoteAvatars.has(key)) return;
+    pendingQuoteAvatars.add(key);
+    quoteAvatarQueue = quoteAvatarQueue.then(async () => {
+      if (scope !== maskAccountScope || Date.now() < quoteAvatarRetryAt) return;
+      if (!state.quoteCards.some(row => row.characterId === characterId && !row.avatarUrl)) return;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
+      try {
+        const detail = await requestCharacterDetail(characterId, controller.signal);
+        const avatarUrl = String(detail?.avatarUrl || '').trim();
+        if (!avatarUrl || scope !== maskAccountScope) return;
+        const rows = state.quoteCards.filter(row => row.characterId === characterId && !row.avatarUrl);
+        if (!rows.length) return;
+        rows.forEach(row => { row.avatarUrl = avatarUrl; });
+        saveQuoteCards();
+        const library = panel?.querySelector('#mufy-recovery-quote-library-modal');
+        if (library && !library.hidden && !quoteInlineEditing) renderQuoteLibraryModal();
+      } catch (error) {
+        if (error instanceof RateLimitError) quoteAvatarRetryAt = Date.now() + 60000;
+      } finally {
+        clearTimeout(timeout);
+        await wait(METADATA_REQUEST_INTERVAL_MS);
+      }
+    }).catch(error => {
+      appendRunLog('warn', '摘录封面补图失败', error);
+    }).finally(() => pendingQuoteAvatars.delete(key));
   }
 
   function openQuoteEditor(container) {
@@ -9307,6 +9341,7 @@ roleStateReady = true;
     state.quoteCards.unshift(row);
     state.quoteSelectedId = id;
     saveQuoteCards();
+    queueQuoteAvatar(row.characterId);
     panel.querySelector('#mufy-recovery-quote-editor-modal').hidden = true;
     quoteDraftContext = null;
     lastQuoteSelection = null;
@@ -9365,7 +9400,9 @@ roleStateReady = true;
     state.quoteCards.forEach(row => {
       const key = String(row.characterId);
       if (!groups.has(key)) groups.set(key, { characterId: key, name: row.characterName || '未命名角色', avatarUrl: row.avatarUrl || '', rows: [] });
-      groups.get(key).rows.push(row);
+      const group = groups.get(key);
+      if (!group.avatarUrl && row.avatarUrl) group.avatarUrl = row.avatarUrl;
+      group.rows.push(row);
     });
     return [...groups.values()];
   }
@@ -9460,6 +9497,9 @@ roleStateReady = true;
     quoteStyleOpen = false;
     renderQuoteLibraryModal();
     modal.hidden = false;
+    for (const group of quoteCardGroups()) {
+      if (!group.avatarUrl) queueQuoteAvatar(group.characterId);
+    }
   }
 
   function deleteSelectedQuote() {
