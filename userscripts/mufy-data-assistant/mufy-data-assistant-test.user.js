@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.101
+// @version      3.0.0-dev.102
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,7 +21,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.101';
+    : '3.0.0-dev.102';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -5201,10 +5201,11 @@ roleStateReady = true;
     const binding = localBindingForCharacter(context.characterId);
     if (!binding) return;
     const key = `${context.characterId}|${context.sessionId}|${binding.libraryId || binding.sourceMaskId || binding.savedAt}`;
-    if (state.autoSwitchKey === key) return;
+    const reloadKey = JSON.stringify([maskAccountScope, key, binding.savedAt || '']);
+    if (!options.force && state.autoSwitchKey === key) return;
     try {
-      if (pageWindow.sessionStorage.getItem(AUTO_SWITCH_RELOAD_KEY) === key) {
-        pageWindow.sessionStorage.removeItem(AUTO_SWITCH_RELOAD_KEY);
+      const appliedKey = pageWindow.sessionStorage.getItem(AUTO_SWITCH_RELOAD_KEY);
+      if (!options.force && (appliedKey === reloadKey || appliedKey === key)) {
         state.autoSwitchKey = key;
         return;
       }
@@ -5226,8 +5227,18 @@ roleStateReady = true;
       await setCharacterDefaultMask(context.characterId, active.maskId);
       if (context.sessionId) await setSessionMask(context.sessionId, active.maskId);
       state.autoSwitchKey = key;
-      reloadChat = Boolean(context.sessionId);
-      state.status = `已自动切换当前角色面具：“${maskBindingLabel(targetMask)}”${reloadChat ? '，正在同步聊天页选中状态……' : '。'}`;
+      const current = currentRoleContext();
+      const sameChat = Boolean(context.sessionId) && current.characterId === context.characterId && current.sessionId === context.sessionId;
+      const navigationType = pageWindow.performance?.getEntriesByType?.('navigation')?.[0]?.type;
+      if (sameChat) {
+        try {
+          pageWindow.sessionStorage.setItem(AUTO_SWITCH_RELOAD_KEY, reloadKey);
+          reloadChat = options.force || navigationType === 'navigate' || navigationType === 'back_forward';
+        } catch (_) {
+          // 无法留下跨刷新标记时，只同步网站面具，不主动刷新。
+        }
+      }
+      state.status = `已自动切换当前角色面具：“${maskBindingLabel(targetMask)}”${reloadChat ? '，正在同步聊天页选中状态……' : sameChat ? '。如需同步页面显示，可手动刷新。' : '。'}`;
     } catch (error) {
       state.status = `自动切换面具失败：${explainFailure(error)}`;
     } finally {
@@ -5237,7 +5248,6 @@ roleStateReady = true;
     }
     if (reloadChat) {
       try {
-        pageWindow.sessionStorage.setItem(AUTO_SWITCH_RELOAD_KEY, key);
         pageWindow.location.reload();
       } catch (_) {
         state.status = `面具已切换为“${maskBindingLabel(targetMask)}”，请手动刷新聊天页以同步选中状态。`;
