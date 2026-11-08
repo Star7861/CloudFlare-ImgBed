@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.100
+// @version      3.0.0-dev.101
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,7 +21,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.100';
+    : '3.0.0-dev.101';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -10813,15 +10813,15 @@ roleStateReady = true;
     panel.innerHTML = `<div id="mufy-recovery-resize-handle" title="上下拖动调整面板高度" aria-label="上下拖动调整面板高度"></div>
       <div id="mufy-recovery-head"><span id="mufy-recovery-title"><span id="mufy-recovery-section-nav" hidden><button id="mufy-recovery-section-back" aria-label="返回功能分区" title="返回功能分区">‹</button><strong id="mufy-recovery-section-title"></strong></span><span><span id="mufy-recovery-brand">Mufy 数据助手 <small class="mufy-recovery-version">v${DISPLAY_VERSION}</small></span> <small id="mufy-recovery-count">0/0</small></span><button id="mufy-recovery-help" title="使用说明" aria-label="使用说明">?</button></span><button id="mufy-recovery-log-entry" title="查看运行日志">日志</button><button id="mufy-recovery-history-entry" title="查看本账号历史角色索引">索引</button><button id="mufy-recovery-export-chat" hidden>导出聊天</button><button id="mufy-recovery-close">×</button></div>
       <div id="mufy-recovery-help-modal" hidden><div id="mufy-recovery-help-head"><strong>使用说明</strong><button id="mufy-recovery-help-close" title="关闭说明">×</button></div><div id="mufy-recovery-help-body"><ol>
-<li><strong>找回聊过的角色：</strong>打开“角色”面板，点击“找回角色链接”。可以选择完整读取或查找最新几页；读取过程中可以点击“停止找回”，之后再继续读取，已读取的数据会保留。</li>
-<li><strong>收藏趋势榜角色：</strong>打开 Mufy 趋势榜页面，再打开脚本面板。趋势榜返回的数据已经包含可靠的收藏状态，不需要点击“获取收藏状态”；直接在网页角色列表中多选要收藏的角色，点击“立即收藏”即可。收藏完成后回到“角色”区域点击“更新状态”，可核对这些角色的收藏和公开状态。</li>
-<li><strong>收藏作者的全部角色：</strong>有两种方式，按需要选择一种即可：<ol><li>在“角色”→“作者合集”中找到对应作者，点击右侧收藏角色可选择收藏。</li><li>在 Mufy 网页搜索作者并进入作者主页，打开脚本面板；切到“网页”，让页面翻页自动获取角色。作者主页返回的收藏状态不准确，需要先点击“获取收藏状态”，等待逐个查询完成，再点击“全选未收藏”和“立即收藏”。</li></ol></li>
-<li><strong>整理或删除收藏夹：</strong>进入“收藏”区域点击“收藏夹”，可以按作者创建或复用收藏夹并整理角色，也可以进入管理界面核对角色数量、筛选空收藏夹或批量删除。删除收藏夹不会取消角色收藏，且不能由脚本撤回。</li>
-<li><strong>普通收藏：</strong>角色卡片右侧的星星可以收藏或取消收藏。收藏时会优先使用并保存当前账号的分享链接；没有分享链接时会提示并改用普通收藏。批量收藏结束会弹窗显示分享链接收藏数和普通收藏数。</li>
-<li><strong>普通角色一键扣数：</strong>进入“收藏”→“普通待聊”，可以修改默认发送内容并启动“一键扣数”。脚本会逐个打开角色、发送一次消息，并等待回复生成结束且 URL 出现 sessionId 后再进入下一个；任务可以停止、继续或取消。</li>
-<li><strong>完整导出当前聊天：</strong>进入一段已有 sessionId 的具体聊天，再到“聊天记录”点击“导出当前聊天”。脚本会直接分页读取服务器记录，按消息 ID 去重，并用服务器 total 与分页末尾双重校验；最终下载一个 ZIP，内含适合手机浏览器阅读的 HTML 和纯文字 TXT，不包含 JSON。再次点击可停止导出。</li>
-<li><strong>根据聊天内容找角色：</strong>进入“聊天记录”点击“搜索聊天记录”，可选择搜索所有角色或指定单个角色。单角色允许搜索 1 个字，所有角色至少需要 2 个字。结果会标记关键词；点击“打开并定位”后进入原会话，自动向上加载并尝试滚动到对应消息。</li>
-<li><strong>角色回复摘录：</strong>在角色回复里选中文字，展开该消息的省略号操作栏并点击“摘录”；不选文字时会把整条回复放进编辑框。摘录按角色组成牌组，进入“摘录/美化”选择“打开摘录”即可查看、编辑或导出；牌面样式从具体摘录牌内的“牌面样式”进入。
+<li><strong>找回聊过的角色：</strong>进入「角色」→「找回角色链接」，选择完整读取或只查最近几页。可随时停止，下次继续。</li>
+<li><strong>收藏趋势榜角色：</strong>打开 Mufy 趋势榜，再到助手「收藏」→「网页」勾选角色，点「立即收藏」。需要核对时，到「角色」点「更新状态」。</li>
+<li><strong>收藏作者的全部角色：</strong><ol><li>进入「角色」→「作者合集」，找到作者，点右侧收藏按钮。</li><li>打开作者主页，进入助手「收藏」→「网页」，依次点「获取收藏状态」「全选未收藏」「立即收藏」。</li></ol></li>
+<li><strong>整理或删除收藏夹：</strong>进入「收藏」→「收藏夹」，可按作者整理角色，也可筛选空收藏夹或批量删除。删除收藏夹会保留角色收藏。</li>
+<li><strong>收藏：</strong>点角色卡片上的星星收藏或取消收藏。有分享链接时优先用分享链接收藏。</li>
+<li><strong>普通角色一键扣数：</strong>进入「收藏」→「普通待聊」，可修改发送内容，再点「一键扣数」。任务可以停止、继续或取消，完成后可刷新查看结果。</li>
+<li><strong>完整导出当前聊天：</strong>打开要导出的对话，再到助手「聊天记录」点「导出当前聊天」。下载的 ZIP 内含 HTML 和 TXT。再点一次可停止导出。</li>
+<li><strong>根据聊天内容找角色：</strong>进入「聊天记录」，输入关键词后点「搜索」。可选全部或指定角色。单角色至少输入 1 个字，全部角色至少 2 个字。点「打开并定位」回到原对话。</li>
+<li><strong>角色回复摘录：</strong>选中回复里的文字，点该条回复的「⋯」→「摘录」，再点「收藏到牌组」。直接点「摘录」可选中整条回复。进入助手「摘录」可查看、编辑或导出。
 <details class="mufy-recovery-tutorial">
 <summary>查看图文教程</summary>
 <ol>
@@ -10831,13 +10831,12 @@ roleStateReady = true;
 </ol>
 </details>
 </li>
-<li><strong>面板美化：</strong>进入“摘录/美化”选择“打开美化”，可独立调整整个助手面板的主题、背景色、强调色、文字色、透明度、字号和圆角，不会修改摘录牌样式。</li>
-<li><strong>账号快速切换：</strong>每个账号可自行选择“官方表单”或“接口直登”。官方表单模式不保存密码：脚本只填邮箱，密码由 Edge 或本人交给 Mufy 官方表单；当前脚本不记录或导出密码，也不会把它另行发送到 Mufy 之外的地址，因此不产生“本地保存密码”这项额外风险，但不代表任何软件都能承诺绝对零风险。接口直登只有在用户主动输入并保存后才会知道密码；密码只保存在使用者自己的浏览器里，脚本作者不会收到，并将 <code>email</code> 和 <code>password</code> 直接 POST 到 Mufy 官方 <code>/api/users/login</code>。请勿安装来源不明或被篡改的插件或脚本，防止密码泄露。“编辑”可在上下两个输入框修改邮箱和密码；改用表单、删除快捷账号或点击“清除已存”都会从篡改猴独立存储中真正删除对应密码并给出提示。</li>
-<li><strong>模型可用性监控：</strong>在功能首页底部点击“模型监控”，勾选需要监控的模型。脚本每 5 分钟读取一次网站模型状态；悬浮按钮上方用绿、黄、红、灰色圆点分别表示流畅、拥堵、中断和暂时未知。点击状态点可查看响应时长、成功率和最后检测时间。</li>
-<li><strong>导出分享链接：</strong>点击“导出角色”，再选择“仅分享链接 TXT”。角色 JSON/CSV 也会附带已保存的分享链接；独立 TXT 会导出当前账号缓存中的全部分享链接，包括当前角色列表里已经找不到但本地仍有记录的角色。</li>
-<li><strong>收藏未聊转为链接收藏：</strong>进入“角色”→“收藏未聊”，点击“检测未记录角色”。分享链接记录按账号隔离，本账号已有记录的角色会直接跳过；其余角色严格一次处理一个：先保存分享链接，再取消原收藏，从分享链接进入并重新收藏。任务可以中断、继续或彻底取消。</li>
-<li><strong>中断收藏：</strong>收藏任务运行时可点击“中断收藏”，选择保留剩余队列或彻底取消。脚本开关、浏览器关闭等原因留下的未完成任务不会自行恢复，必须手动选择“继续收藏”，也可以直接“取消任务”。</li>
-<li><strong>面具保存：</strong>先直接在 Mufy 网站编写或保存面具。完成后打开脚本面板，点击顶部“面具”加载网站当前面具，然后点击“全部存入面具库”保存到本地；相同面具会自动去重。
+<li><strong>面板美化：</strong>进入「美化」，调整助手面板的主题、透明度、字号和圆角。</li>
+<li><strong>模型可用性监控：</strong>进入「模型监控」，勾选要看的模型。绿、黄、红、灰分别表示流畅、拥堵、中断和未知。点状态圆点可查看详情。</li>
+<li><strong>导出分享链接：</strong>点「导出角色」→「仅分享链接 TXT」。角色 JSON 和 CSV 也会附带已保存的分享链接。</li>
+<li><strong>收藏未聊转为链接收藏：</strong>进入「角色」→「收藏未聊」，点「检测未记录角色」。任务可以中断、继续或取消。</li>
+<li><strong>中断收藏：</strong>点「中断收藏」，选择保留队列或取消任务。保留队列后，点「继续收藏」即可接着做。</li>
+<li><strong>面具保存：</strong>先在 Mufy 网站编辑并保存面具，再到助手的「面具」分区点「全部存入面具库」。
 <details class="mufy-recovery-tutorial">
 <summary>查看图文教程</summary>
 <ol>
@@ -10846,12 +10845,10 @@ roleStateReady = true;
 </ol>
 </details>
 </li>
-<li><strong>编辑和复制面具：</strong>“面具”和“面具库”列表都可以点击“编辑面具”，在大编辑板中一次修改全部字段。面具卡片右上角的 ⧉ 会复制完整信息；编辑板每个字段旁边的 ⧉ 只复制该项当前内容，包括尚未保存的修改。从网站面具进入时，“另存”会新增本地副本，“替换本地原面具”会更新对应副本；从面具库进入时，“保存修改”会直接更新当前面具并保留角色绑定，“另存”则新增一份。</li>
-<li><strong>绑定面具：</strong>切到“面具库”，在需要使用的面具上点击“绑定角色”，选择角色即可。</li>
-<li><strong>账号分区：</strong>面具库和角色绑定仍保存在当前浏览器本地，但会按 Mufy 账号分别保存。同一浏览器切换账号后会自动换到该账号自己的库；旧版公共库只迁移给升级时第一个识别到的账号。面板显示“未识别账号”时，请先打开任意角色聊天页让网站发出登录请求。</li>
-<li><strong>面具导出/导入：</strong>面具库保存在浏览器本地，不会自动同步到其他浏览器，也不会自动复制到另一个 Mufy 账号。更换浏览器、账号或清除浏览器缓存前，请先点击“导出面具”保存文件；导出 JSON 时可选择是否同时复制角色绑定信息；导入时可选择清空旧面具库后导入，或保留旧数据合并导入，含绑定信息的文件还会询问是否恢复绑定；之后用“导入面具”恢复，防止本地面具数据丢失。</li>
-<li><strong>更新作者和状态：</strong>点击“更新状态”会同时更新最近一次读取到的角色状态和作者名称；如果中途停止或部分失败，稍后再次点击同一个按钮即可继续补充。</li>
-<li><strong>标签搜索：</strong>搜索框可直接输入标签文字，也可以使用 <code>#标签</code> 精确按标签筛选；多个标签用空格分隔且需要同时满足，使用 <code>-#标签</code> 可排除标签。角色卡片上的标签可以直接点击筛选。</li>
+<li><strong>编辑和复制面具：</strong>在「面具」或「面具库」点「编辑面具」。卡片右上角的 ⧉ 复制整张面具，编辑框旁的 ⧉ 复制单项。面具库里可「保存修改」或「另存」。</li>
+<li><strong>面具导出/导入：</strong>点「导出面具」备份，导出 JSON 时可选择附带角色绑定。点「导入面具」恢复，可选择合并或替换。</li>
+<li><strong>更新作者和状态：</strong>点「更新状态」补齐角色状态和作者名。中断后可以再点一次继续。</li>
+<li><strong>标签搜索：</strong>在搜索框输入标签文字，或用 <code>#标签</code> 精确筛选、<code>-#标签</code> 排除。也可直接点角色卡上的标签。</li>
 </ol></div></div>
       <div id="mufy-recovery-mask-editor" hidden>
         <div id="mufy-recovery-mask-editor-head"><strong id="mufy-recovery-mask-editor-title">编辑面具</strong><button id="mufy-recovery-mask-editor-close" title="关闭编辑">×</button></div>
