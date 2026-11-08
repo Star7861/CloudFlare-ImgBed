@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.77
+// @version      3.0.0-dev.78
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -974,10 +974,11 @@
   }
 
   const PANEL_THEME_PRESETS = {
-    midnight: { background: '#17151f', accent: '#9b87e8', textColor: '#f5f2ff' },
-    mist: { background: '#eaf4fb', accent: '#4f90bd', textColor: '#20323f' },
-    rose: { background: '#f8e8f0', accent: '#c95f91', textColor: '#3b2631' },
-    black: { background: '#111114', accent: '#b7b7c8', textColor: '#f5f5f7' }
+    midnight: { background: '#191820', accent: '#7765c7', textColor: '#f4f2f8' },
+    rose: { background: '#fff8fb', accent: '#b94376', textColor: '#2b1d25' },
+    mist: { background: '#f6fafc', accent: '#397ba5', textColor: '#1d2c36' },
+    sage: { background: '#f5faf6', accent: '#397553', textColor: '#1d3025' },
+    black: { background: '#111214', accent: '#777b87', textColor: '#f3f4f6' }
   };
 
   function defaultPanelTheme() {
@@ -986,18 +987,16 @@
 
   function normalizePanelTheme(value = {}) {
     const base = defaultPanelTheme();
-    const hex = (input, fallback) => /^#[0-9a-f]{6}$/i.test(String(input || '')) ? String(input) : fallback;
-    const migrated = value?.preset === 'rose' && String(value?.background || '').toLowerCase() === '#2a1c25'
-      ? { ...value, ...PANEL_THEME_PRESETS.rose }
-      : value;
+    const legacyBackground = String(value?.background || '').toLowerCase();
+    const requestedPreset = legacyBackground === '#2a1c25' ? 'rose' : String(value?.preset || '');
+    const preset = Object.prototype.hasOwnProperty.call(PANEL_THEME_PRESETS, requestedPreset) ? requestedPreset : 'midnight';
+    const palette = PANEL_THEME_PRESETS[preset];
     return {
-      preset: Object.prototype.hasOwnProperty.call(PANEL_THEME_PRESETS, migrated.preset) ? String(migrated.preset) : 'custom',
-      background: hex(migrated.background, base.background),
-      accent: hex(migrated.accent, base.accent),
-      textColor: hex(migrated.textColor, base.textColor),
-      opacity: Math.max(72, Math.min(100, Number(migrated.opacity) || base.opacity)),
-      fontSize: Math.max(11, Math.min(17, Number(migrated.fontSize) || base.fontSize)),
-      radius: Math.max(0, Math.min(28, Number.isFinite(Number(migrated.radius)) ? Number(migrated.radius) : base.radius))
+      preset,
+      ...palette,
+      opacity: Math.max(72, Math.min(100, Number(value.opacity) || base.opacity)),
+      fontSize: Math.max(11, Math.min(17, Number(value.fontSize) || base.fontSize)),
+      radius: Math.max(0, Math.min(28, Number.isFinite(Number(value.radius)) ? Number(value.radius) : base.radius))
     };
   }
 
@@ -1033,6 +1032,7 @@
     const strongAlpha = light ? 0.48 + layerStrength * 0.32 : 0.075 + layerStrength * 0.1;
     const layerColor = light ? '#ffffff' : '#ffffff';
     panel.style.setProperty('--mufy-panel-accent', theme.accent);
+    panel.style.setProperty('--mufy-panel-on-accent', '#ffffff');
     panel.style.setProperty('--mufy-panel-text', theme.textColor);
     panel.style.setProperty('--mufy-panel-bg', theme.background);
     panel.style.setProperty('--mufy-panel-muted', panelThemeRgba(theme.textColor, 0.68));
@@ -9998,7 +9998,13 @@ roleStateReady = true;
       #mufy-recovery-panel #mufy-recovery-panel-beauty-modal,#mufy-recovery-panel #mufy-recovery-model-modal,#mufy-recovery-panel #mufy-recovery-log-modal,#mufy-recovery-panel #mufy-recovery-export-modal,#mufy-recovery-panel #mufy-recovery-chat-search-modal,#mufy-recovery-panel #mufy-recovery-material-editor,#mufy-recovery-panel #mufy-recovery-quote-editor-modal,#mufy-recovery-panel #mufy-recovery-quote-library-modal,#mufy-recovery-panel #mufy-recovery-quote-style-modal{background:var(--mufy-panel-bg)!important;border-color:var(--mufy-panel-border)!important;color:var(--mufy-panel-text)!important}
       #mufy-recovery-panel button{color:var(--mufy-panel-text)}#mufy-recovery-panel button.active,#mufy-recovery-panel .mufy-recovery-section-card:first-child{background:var(--mufy-panel-accent-soft)!important;border-color:var(--mufy-panel-accent)!important}
       #mufy-recovery-panel small,#mufy-recovery-panel .mufy-recovery-muted,#mufy-recovery-panel .mufy-recovery-section-card small,#mufy-recovery-panel .mufy-recovery-section-note span,#mufy-recovery-panel .mufy-beauty-launch small,#mufy-recovery-panel-beauty-fields label{color:var(--mufy-panel-muted)!important}
-      #mufy-recovery-panel[data-panel-tone="light"]{box-shadow:0 24px 60px #4b2b3b2b,inset 0 1px #fff}#mufy-recovery-panel[data-panel-tone="light"] button{box-shadow:inset 0 1px #fff8,0 3px 10px #56324512}#mufy-recovery-panel[data-panel-tone="light"] #mufy-recovery-title,#mufy-recovery-panel[data-panel-tone="light"] strong{color:var(--mufy-panel-text)}
+      #mufy-recovery-panel[data-panel-tone="light"]{box-shadow:0 24px 60px #26313a24,inset 0 1px #fff}#mufy-recovery-panel[data-panel-tone="light"] button{box-shadow:inset 0 1px #fff8,0 3px 10px #26313a10}#mufy-recovery-panel[data-panel-tone="light"] #mufy-recovery-title,#mufy-recovery-panel[data-panel-tone="light"] strong{color:var(--mufy-panel-text)}
+      #mufy-recovery-panel #mufy-recovery-log-entry,#mufy-recovery-panel #mufy-recovery-history-entry,#mufy-recovery-panel #mufy-recovery-section-back{background:var(--mufy-panel-surface)!important;border-color:var(--mufy-panel-border)!important;color:var(--mufy-panel-text)!important}
+      #mufy-recovery-panel #mufy-recovery-status,#mufy-recovery-panel #mufy-recovery-role-read-options,#mufy-recovery-panel #mufy-recovery-auto-switch-label,#mufy-recovery-panel .mufy-recovery-auto-delay{color:var(--mufy-panel-muted)!important}
+      #mufy-recovery-panel #mufy-recovery-auto-folder-label,#mufy-recovery-panel #mufy-recovery-manual-auto-actions,#mufy-recovery-panel #mufy-recovery-favorite-task-controls{background:var(--mufy-panel-surface-strong)!important;border-color:var(--mufy-panel-border)!important;color:var(--mufy-panel-text)!important}
+      #mufy-recovery-panel #mufy-recovery-tabs button.active,#mufy-recovery-panel #mufy-recovery-favorite-tabs button.active,#mufy-recovery-panel #mufy-recovery-chat-tabs button.active,#mufy-recovery-panel #mufy-recovery-mask-tabs button.active,#mufy-recovery-panel #mufy-recovery-material-tabs button.active,#mufy-recovery-panel .mufy-recovery-tab-action,#mufy-recovery-panel #mufy-recovery-run,#mufy-recovery-panel #mufy-recovery-manual-auto-start{background:var(--mufy-panel-accent)!important;border-color:var(--mufy-panel-accent)!important;color:var(--mufy-panel-on-accent)!important}
+      #mufy-recovery-panel .mufy-recovery-role-tags button,#mufy-recovery-panel .mufy-recovery-role-tag{background:var(--mufy-panel-accent-soft)!important;border-color:var(--mufy-panel-border)!important;color:var(--mufy-panel-text)!important}
+      #mufy-recovery-panel[data-panel-tone="light"] #mufy-recovery-controls,#mufy-recovery-panel[data-panel-tone="light"] #mufy-recovery-list,#mufy-recovery-panel[data-panel-tone="light"] .mufy-recovery-info,#mufy-recovery-panel[data-panel-tone="light"] .mufy-recovery-detail{color:var(--mufy-panel-text)!important}
       #mufy-recovery-panel ::-webkit-scrollbar{width:7px;height:7px}#mufy-recovery-panel ::-webkit-scrollbar-track{background:transparent}#mufy-recovery-panel ::-webkit-scrollbar-thumb{border:2px solid transparent;border-radius:999px;background:#82769c;background-clip:padding-box}#mufy-recovery-panel ::-webkit-scrollbar-thumb:hover{background:#a594cb;background-clip:padding-box}
       @media (max-width:520px){
         #mufy-recovery-panel{right:8px;bottom:58px;width:calc(100vw - 16px);max-width:calc(100vw - 16px)}
@@ -10202,7 +10208,7 @@ roleStateReady = true;
           <label class="mufy-quote-style-field">对齐<select data-quote-style="align"><option value="left">左对齐</option><option value="center">居中</option><option value="right">右对齐</option></select></label><label class="mufy-quote-style-check"><input data-quote-style="showRole" type="checkbox">显示角色名称</label>
         </div></div></div>
       </div>
-      <div id="mufy-recovery-panel-beauty-modal" hidden><div id="mufy-recovery-panel-beauty-head"><span><strong>面板美化</strong><small id="mufy-recovery-panel-beauty-summary">调整整个助手面板</small></span><button id="mufy-recovery-panel-beauty-close" title="关闭">×</button></div><div id="mufy-recovery-panel-beauty-fields"><label>主题预设<select data-panel-theme="preset"><option value="midnight">深夜</option><option value="mist">浅雾蓝</option><option value="rose">浅雾粉</option><option value="black">纯黑</option><option value="custom">自定义</option></select></label><label>面板背景<input data-panel-theme="background" type="color"></label><label>强调色<input data-panel-theme="accent" type="color"></label><label>文字色<input data-panel-theme="textColor" type="color"></label><label>卡片层次<input data-panel-theme="opacity" type="range" min="72" max="100" step="1"></label><label>整体字号<input data-panel-theme="fontSize" type="range" min="11" max="17" step="1"></label><label>面板圆角<input data-panel-theme="radius" type="range" min="0" max="28" step="1"></label></div><div id="mufy-recovery-panel-beauty-actions"><button id="mufy-recovery-panel-beauty-reset">恢复默认</button><button id="mufy-recovery-panel-beauty-done">完成</button></div></div>
+      <div id="mufy-recovery-panel-beauty-modal" hidden><div id="mufy-recovery-panel-beauty-head"><span><strong>面板美化</strong><small id="mufy-recovery-panel-beauty-summary">选择已经完整适配的成套主题</small></span><button id="mufy-recovery-panel-beauty-close" title="关闭">×</button></div><div id="mufy-recovery-panel-beauty-fields"><label>成套主题<select data-panel-theme="preset"><option value="midnight">深夜紫灰</option><option value="rose">奶油粉</option><option value="mist">浅雾蓝</option><option value="sage">清浅绿</option><option value="black">纯黑</option></select></label><label>卡片层次<input data-panel-theme="opacity" type="range" min="72" max="100" step="1"></label><label>整体字号<input data-panel-theme="fontSize" type="range" min="11" max="17" step="1"></label><label>面板圆角<input data-panel-theme="radius" type="range" min="0" max="28" step="1"></label></div><div id="mufy-recovery-panel-beauty-actions"><button id="mufy-recovery-panel-beauty-reset">恢复默认</button><button id="mufy-recovery-panel-beauty-done">完成</button></div></div>
       <div id="mufy-recovery-model-modal" hidden><div id="mufy-recovery-model-head"><span><strong>模型可用性监控</strong><small id="mufy-recovery-model-summary">每 5 分钟检测一次</small></span><button id="mufy-recovery-model-close" title="关闭">×</button></div><div id="mufy-recovery-model-tools"><input id="mufy-recovery-model-search" placeholder="搜索模型名称"><button id="mufy-recovery-model-refresh">立即检测</button><label id="mufy-recovery-model-notify-label"><input id="mufy-recovery-model-notify" type="checkbox"><span id="mufy-recovery-model-notify-text">异常通知（可选）</span><small>仅在已选模型由正常变为拥堵或中断时提醒</small></label></div><div id="mufy-recovery-model-list"><div class="mufy-recovery-empty">正在读取模型状态…</div></div></div>
       <div id="mufy-recovery-material-editor" hidden><div id="mufy-recovery-material-editor-head"><strong id="mufy-recovery-material-editor-title">新增指令</strong><button id="mufy-recovery-material-editor-close" title="关闭">×</button></div><div id="mufy-recovery-material-editor-body"><label>标题<input id="mufy-recovery-material-title" maxlength="120" placeholder="例如：总结当前剧情"></label><label>内容<textarea id="mufy-recovery-material-content" maxlength="50000" placeholder="输入要填入聊天框的完整内容"></textarea></label></div><div id="mufy-recovery-material-editor-actions"><button id="mufy-recovery-material-editor-cancel">取消</button><button id="mufy-recovery-material-editor-save">保存</button></div></div>
       <div id="mufy-recovery-controls">
@@ -10350,12 +10356,12 @@ roleStateReady = true;
       const updatePanelTheme = () => {
         const key = String(control.dataset.panelTheme || '');
         if (key === 'preset') {
-          const presetName = String(control.value || 'custom');
-          const preset = PANEL_THEME_PRESETS[presetName];
-          state.panelTheme = normalizePanelTheme(preset ? { ...state.panelTheme, ...preset, preset: presetName } : { ...state.panelTheme, preset: 'custom' });
+          const requestedPreset = String(control.value || 'midnight');
+          const presetName = Object.prototype.hasOwnProperty.call(PANEL_THEME_PRESETS, requestedPreset) ? requestedPreset : 'midnight';
+          state.panelTheme = normalizePanelTheme({ ...state.panelTheme, ...PANEL_THEME_PRESETS[presetName], preset: presetName });
         } else {
           const value = control.type === 'range' ? Number(control.value) : control.value;
-          state.panelTheme = normalizePanelTheme({ ...state.panelTheme, [key]: value, preset: 'custom' });
+          state.panelTheme = normalizePanelTheme({ ...state.panelTheme, [key]: value });
         }
         savePanelTheme();
         applyPanelTheme();
