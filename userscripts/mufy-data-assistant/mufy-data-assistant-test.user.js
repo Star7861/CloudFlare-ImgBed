@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.114
+// @version      3.0.0-dev.115
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,7 +21,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.114';
+    : '3.0.0-dev.115';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -1166,14 +1166,12 @@
   }
 
   function enqueueManualFavoriteChats(rows) {
-    const knownSessions = new Set([...state.chatted, ...state.roleHistory]
-      .filter(row => row.lastSessionId).map(row => String(row.characterId)));
     const queued = new Map([...state.manualFavoriteChats, ...loadManualFavoriteChats()]
       .map(row => [String(row.characterId), row]));
     const previousSize = queued.size;
     for (const row of rows) {
       const id = String(row?.characterId || '');
-      if (!id || row.lastSessionId || knownSessions.has(id) || queued.has(id)) continue;
+      if (!id || queued.has(id)) continue;
       queued.set(id, { ...row, isFavorite: true, favoriteKnown: true, manualChatAddedAt: new Date().toISOString() });
     }
     if (!saveManualFavoriteChats([...queued.values()])) return null;
@@ -2270,22 +2268,55 @@ roleStateReady = true;
     throw new Error('没有获取到当前角色所选模型的 modelId/modelTemplateId；请刷新该角色页面，等待模型名称显示后再继续');
   }
 
-  function hasExistingManualChatSession(characterId) {
-    const current = currentRoleContext();
-    const hasSession = value => Boolean(value && String(value) !== '00000000-0000-0000-0000-000000000000');
-    if (current.characterId === characterId && hasSession(current.sessionId)) return true;
-    return [...state.manualFavoriteChats, ...state.chatted, ...state.roleHistory].some(row =>
-      String(row.characterId) === characterId && hasSession(row.lastSessionId)
-    );
+  function realChatSessionId(value) {
+    const id = String(value || '').trim();
+    return id && id !== '00000000-0000-0000-0000-000000000000' ? id : '';
   }
 
-  async function sendManualChatViaApi(job) {
+  async function confirmExistingManualChatSession(job, verifiedEmptySessions) {
+    const characterId = String(job.activeCharacterId || '');
+    const current = currentRoleContext();
+    const sessions = new Set([
+      current.characterId === characterId ? realChatSessionId(current.sessionId) : '',
+      ...[...state.manualFavoriteChats, ...state.chatted, ...state.roleHistory]
+        .filter(row => String(row.characterId) === characterId)
+        .map(row => realChatSessionId(row.lastSessionId))
+    ].filter(Boolean));
+    for (const sessionId of sessions) {
+      if (verifiedEmptySessions.has(sessionId)) continue;
+      state.status = '正在核验当前角色的旧会话……';
+      render();
+      showManualAutoChatToast(state.status);
+      const controller = new (pageWindow.AbortController || globalThis.AbortController)();
+      const timeout = setTimeout(() => controller.abort(), 20000);
+      try {
+        const data = await requestDialogPage({ characterId, sessionId }, 1, CHAT_EXPORT_SAFE_PAGE_SIZE, controller.signal);
+        if (manualAutoChatWasStopped()) throw new ManualAutoChatPausedError('任务已暂停');
+        if (job.accountScope && job.accountScope !== maskAccountScope) throw new Error('核验期间切换了 Mufy 账号');
+        const rows = dialogRowsFromPage(data, null);
+        if (!rows) throw new Error('会话详情未提供可核验的消息列表');
+        if (rows.length) return true;
+        const total = Number(data?.total ?? data?.totalCount ?? data?.count);
+        if (total > 0 || data?.hasNext === true || data?.hasMore === true) throw new Error('会话首屏为空，但接口仍提示有消息');
+        verifiedEmptySessions.add(sessionId);
+      } catch (error) {
+        if (error instanceof ManualAutoChatPausedError) throw error;
+        const reason = controller.signal.aborted ? '请求超时' : explainFailure(error);
+        throw new Error(`无法核验这个角色的旧会话，已暂停发送：${reason}`);
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+    return false;
+  }
+
+  async function sendManualChatViaApi(job, verifiedEmptySessions) {
     scanStoredAuthorization();
     const characterId = String(job.activeCharacterId || '');
-    if (hasExistingManualChatSession(characterId)) return false;
+    if (await confirmExistingManualChatSession(job, verifiedEmptySessions)) return false;
     const config = await resolveManualChatModelConfig(characterId);
     if (manualAutoChatWasStopped()) throw new ManualAutoChatPausedError('任务已暂停');
-    if (hasExistingManualChatSession(characterId)) return false;
+    if (await confirmExistingManualChatSession(job, verifiedEmptySessions)) return false;
     const headers = { Accept: 'text/event-stream', 'Content-Type': 'application/json' };
     if (authorization) headers.Authorization = authorization;
     const payload = {
@@ -2516,13 +2547,14 @@ roleStateReady = true;
         pageWindow.location.assign(roleUrl(job.activeCharacterId));
         return;
       }
-      if (!['response-complete', 'waiting-response', 'already-chatted'].includes(job.phase)
-        && hasExistingManualChatSession(String(job.activeCharacterId))) {
-        job.phase = 'already-chatted';
-        if (!saveManualAutoChatJob(job)) throw new Error('无法保存跳过状态');
-      }
+      const verifiedEmptySessions = new Set();
       if (job.phase === 'sending') {
         throw new Error('上一条消息的发送结果无法确认。为避免重复发送，请先在对话中核对。');
+      }
+      if (!['response-complete', 'waiting-response', 'already-chatted'].includes(job.phase)
+        && await confirmExistingManualChatSession(job, verifiedEmptySessions)) {
+        job.phase = 'already-chatted';
+        if (!saveManualAutoChatJob(job)) throw new Error('无法保存跳过状态');
       }
       if (job.phase === 'waiting-response') {
         const composer = findManualChatComposer();
@@ -2555,7 +2587,7 @@ roleStateReady = true;
         job.sentAt = Date.now();
         if (!saveManualAutoChatJob(job)) throw new Error('发送前无法保存任务状态');
         showManualAutoChatToast(`一键扣数 ${Number(job.completed || 0) + 1}/${job.total}：消息发送中，正在等待完整回复…`);
-        const sent = await sendManualChatViaApi(job);
+        const sent = await sendManualChatViaApi(job, verifiedEmptySessions);
         const latest = loadManualAutoChatJob();
         if (!latest) {
           reportManualAutoChatCancelResult(job, sent ? true : null);
@@ -3939,7 +3971,7 @@ roleStateReady = true;
         : favoriteStatusFrom(row, character);
     return {
       characterId: String(value('characterId', 'id', 'roleId', 'character_id', 'characterID', 'role_id', 'roleID') || ''),
-      lastSessionId: String(value('lastSessionId', 'sessionId') || ''),
+      lastSessionId: realChatSessionId(value('lastSessionId', 'sessionId')),
       name: String(value('name', 'characterName', 'character_name', 'roleName', 'role_name', 'charName', 'characterTitle', 'displayName', 'title') || '未命名角色'),
       avatarUrl: String(value('avatarUrl', 'avatar', 'imageUrl', 'coverUrl', 'cover', 'icon') || ''),
       lastInteracted: String(value('lastInteracted', 'updatedAt', 'lastChatAt') || ''),
@@ -5160,7 +5192,7 @@ roleStateReady = true;
     if (pageWindow.location.pathname !== '/chat' || !roleStateReady) return;
     const { characterId, sessionId } = currentRoleContext();
     // 仅打开角色开场白没有 sessionId，不应算作已经聊过。
-    if (!characterId || !sessionId) return;
+    if (!characterId || !realChatSessionId(sessionId)) return;
     if (!maskAccountScope) scanStoredAuthorization();
     const scope = maskAccountScope;
     if (!scope) return;
@@ -5900,7 +5932,7 @@ roleStateReady = true;
     state.chatted = nextChatted;
     // 普通待聊只保留尚未出现在会话列表中的角色；
     // 用户手动发送消息后，下一次读取角色链接即可自动从待办中移除。
-    const chattedIds = new Set(nextChatted.filter(row => row.lastSessionId).map(row => String(row.characterId)));
+    const chattedIds = new Set(recentRows.filter(row => realChatSessionId(row.lastSessionId)).map(row => String(row.characterId)));
     if (chattedIds.size) {
       state.manualFavoriteChats = state.manualFavoriteChats.filter(row => !chattedIds.has(String(row.characterId)));
       saveManualFavoriteChats(state.manualFavoriteChats);
@@ -8349,7 +8381,7 @@ roleStateReady = true;
     const added = enqueueManualFavoriteChats(rows);
     state.status = added == null ? '普通待聊保存失败，请检查浏览器存储后重试。'
       : added ? `已将 ${added} 个已收藏角色加入普通待聊。`
-      : '选中的已收藏角色已在待聊列表里，或已经聊过。';
+      : '选中的已收藏角色已在待聊列表里。';
     if (added) state.active = 'manualFavoriteChats';
     render();
   }
@@ -8486,12 +8518,12 @@ roleStateReady = true;
   const CHAT_EXPORT_SAFE_PAGE_SIZE = 16;
   const CHAT_EXPORT_PART_SIZE = 100;
 
-  function dialogRowsFromPage(data) {
+  function dialogRowsFromPage(data, fallback = []) {
     if (Array.isArray(data)) return data;
     for (const key of ['data', 'rows', 'list', 'records', 'items', 'content', 'results']) {
       if (Array.isArray(data?.[key])) return data[key];
     }
-    return [];
+    return fallback;
   }
 
   async function requestDialogPage(context, pageNum, pageSize, signal) {
@@ -9702,7 +9734,7 @@ roleStateReady = true;
     return `<div class="mufy-recovery-row">
       ${row.avatarUrl ? `<img src="${esc(row.avatarUrl)}" alt="">` : ''}
       <div class="mufy-recovery-info">
-        <div class="mufy-recovery-row-title"><b>${index + 1}. ${esc(row.name)}</b>${old ? '<span class="mufy-recovery-old">旧记录</span>' : ''}${rowTools}</div>
+        <div class="mufy-recovery-row-title"><b>${index + 1}. ${esc(row.name)}</b>${old ? '<span class="mufy-recovery-old" title="记录时间较早，不能据此判断是否聊过">时间较早</span>' : ''}${rowTools}</div>
         <div class="mufy-recovery-muted">作者：${esc(authorLabel(row))} ${visibilityBadge(row)}</div>
         ${state.section === 'roles'
           ? `<details class="mufy-role-record"><summary>记录详情</summary><div>${esc(row.lastInteracted || '时间未知')} · ${esc(row.characterId)}</div></details>`
