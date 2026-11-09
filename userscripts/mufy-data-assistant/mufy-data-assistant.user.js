@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手
 // @namespace    local.mufy.session-recovery
-// @version      3.0.2
+// @version      3.0.3
 // @description  管理 Mufy 角色、收藏、聊天记录、摘录和面具。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,7 +21,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.2';
+    : '3.0.3';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const STABLE_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-stable-update-check-v2';
@@ -35,6 +35,7 @@
   const MASK_DATABASE_VERSION = 1;
   const MASK_DATABASE_STORE = 'account-data';
   const ROLE_HISTORY_RECORD_PREFIX = 'role-history:';
+  const ROLE_CACHE_RECORD_PREFIX = 'role-cache:';
   const AUTO_SWITCH_KEY = 'mufy-recovery-auto-switch-v1';
   const AUTO_SWITCH_RELOAD_KEY = 'mufy-recovery-auto-switch-reload-v1';
   const TOGGLE_POSITION_KEY = 'mufy-recovery-toggle-position-v1';
@@ -97,6 +98,7 @@
   let maskStorageWriteQueue = Promise.resolve();
   let maskStorageGeneration = 0;
   let roleHistoryWriteQueue = Promise.resolve();
+  let roleCacheContext = null;
   let roleHistoryGeneration = 0;
   let contentStorageMode = 'initializing';
   let contentStorageWriteQueue = Promise.resolve();
@@ -1091,50 +1093,49 @@
     console.warn('[Mufy 角色与面具找回助手] 读取登录状态失败，仍继续加载面板。', error);
   }
 
-  function loadRoleCache() {
-    try {
-      if (!maskAccountScope) return null;
-      const scopedKey = accountStorageKey(ROLE_CACHE_KEY);
-      let raw = localStorage.getItem(scopedKey) || '';
-      if (!raw) {
-        const legacy = localStorage.getItem(ROLE_CACHE_KEY) || '';
-        const owner = localStorage.getItem(ROLE_CACHE_ACCOUNT_MIGRATION_OWNER_KEY) || '';
-        if (legacy && (!owner || owner === maskAccountScope)) {
-          raw = legacy;
-          try {
-            localStorage.setItem(ROLE_CACHE_ACCOUNT_MIGRATION_OWNER_KEY, maskAccountScope);
-            localStorage.setItem(scopedKey, legacy);
-            if (localStorage.getItem(scopedKey) === legacy) localStorage.removeItem(ROLE_CACHE_KEY);
-          } catch (_) {
-            // 空间不足时仍可读取旧缓存；新历史索引另写 IndexedDB。
-          }
-        }
-      }
-      const cached = JSON.parse(raw || 'null');
-      if (!cached || typeof cached !== 'object') return null;
-      const valid = value => Array.isArray(value) ? value.filter(row => row && row.characterId).map(row => {
-        if (typeof row.favoriteKnown === 'boolean') return row;
-        const favoriteState = favoriteStatusFrom(row);
-        return {
-          ...row,
-          isFavorite: favoriteState === true,
-          isFollowed: favoriteState === true,
-          favoriteKnown: favoriteState !== null
-        };
-      }).map(clearLegacyUnavailableStatus) : [];
+  function normalizeRoleCacheSnapshot(cached) {
+    if (!cached || typeof cached !== 'object' || !Array.isArray(cached.chatted)) return null;
+    const valid = value => Array.isArray(value) ? value.filter(row => row && row.characterId).map(row => {
+      row = clearLegacyRoleInteractionTime(row);
+      if (typeof row.favoriteKnown === 'boolean') return row;
+      const favoriteState = favoriteStatusFrom(row);
       return {
-        chatted: valid(cached.chatted),
-        chattedNotFavorite: valid(cached.chattedNotFavorite),
-        favoriteOnly: valid(cached.favoriteOnly),
-        siteFavoriteStates: cached.siteFavoriteStates && typeof cached.siteFavoriteStates === 'object'
-          ? Object.fromEntries(Object.entries(cached.siteFavoriteStates).filter(([, value]) => typeof value === 'boolean'))
-          : {},
-        archived: valid(cached.archived),
-        archiveCheckedCharacterIds: Array.isArray(cached.archiveCheckedCharacterIds)
-          ? cached.archiveCheckedCharacterIds.map(String)
-          : [],
-        savedAt: String(cached.savedAt || '')
+        ...row,
+        isFavorite: favoriteState === true,
+        isFollowed: favoriteState === true,
+        favoriteKnown: favoriteState !== null
       };
+    }).map(clearLegacyUnavailableStatus) : [];
+    return {
+      chatted: valid(cached.chatted),
+      chattedNotFavorite: valid(cached.chattedNotFavorite),
+      favoriteOnly: valid(cached.favoriteOnly),
+      siteFavoriteStates: cached.siteFavoriteStates && typeof cached.siteFavoriteStates === 'object'
+        ? Object.fromEntries(Object.entries(cached.siteFavoriteStates).filter(([, value]) => typeof value === 'boolean'))
+        : {},
+      archived: valid(cached.archived),
+      archiveCheckedCharacterIds: Array.isArray(cached.archiveCheckedCharacterIds)
+        ? cached.archiveCheckedCharacterIds.map(String)
+        : [],
+      savedAt: String(cached.savedAt || '')
+    };
+  }
+
+  function readLegacyRoleCache(scope) {
+    if (!scope) return null;
+    try {
+      let key = accountStorageKey(ROLE_CACHE_KEY, scope);
+      let raw = localStorage.getItem(key);
+      if (!raw) {
+        key = ROLE_CACHE_KEY;
+        raw = localStorage.getItem(key);
+        if (!raw) return null;
+        const owner = localStorage.getItem(ROLE_CACHE_ACCOUNT_MIGRATION_OWNER_KEY);
+        if (owner && owner !== scope) return null;
+        if (!owner) localStorage.setItem(ROLE_CACHE_ACCOUNT_MIGRATION_OWNER_KEY, scope);
+      }
+      const snapshot = normalizeRoleCacheSnapshot(JSON.parse(raw));
+      return snapshot ? { key, raw, snapshot } : null;
     } catch (_) {
       return null;
     }
@@ -1166,14 +1167,12 @@
   }
 
   function enqueueManualFavoriteChats(rows) {
-    const knownSessions = new Set([...state.chatted, ...state.roleHistory]
-      .filter(row => row.lastSessionId).map(row => String(row.characterId)));
     const queued = new Map([...state.manualFavoriteChats, ...loadManualFavoriteChats()]
       .map(row => [String(row.characterId), row]));
     const previousSize = queued.size;
     for (const row of rows) {
       const id = String(row?.characterId || '');
-      if (!id || row.lastSessionId || knownSessions.has(id) || queued.has(id)) continue;
+      if (!id || queued.has(id)) continue;
       queued.set(id, { ...row, isFavorite: true, favoriteKnown: true, manualChatAddedAt: new Date().toISOString() });
     }
     if (!saveManualFavoriteChats([...queued.values()])) return null;
@@ -1820,7 +1819,8 @@
     pageWindow.location.assign(sessionUrl(nextRow));
   }
 
-  const cachedRoles = loadRoleCache();
+  const legacyRoleCache = readLegacyRoleCache(maskAccountScope);
+  const cachedRoles = legacyRoleCache?.snapshot;
   const authorProfileCache = loadAuthorProfileCache();
   const shareCodeCache = loadShareCodeCache();
 
@@ -1950,34 +1950,122 @@ roleStateReady = true;
   cleanOrphanedMaskBindings(false);
   initializeMaskStorageForAccount(maskAccountScope);
   initializeSharedContentStorage();
-  if (maskAccountScope) initializeRoleHistoryForAccount(maskAccountScope);
+  if (maskAccountScope) {
+    initializeRoleCacheForAccount(maskAccountScope, legacyRoleCache);
+    initializeRoleHistoryForAccount(maskAccountScope);
+  }
   initializeShareFavoriteJobStorage();
 
-  function saveRoleCache() {
-    if (!maskAccountScope) return;
+  function roleCacheSnapshot() {
+    return {
+      chatted: state.chatted.slice(),
+      chattedNotFavorite: state.chattedNotFavorite.slice(),
+      favoriteOnly: state.favoriteOnly.slice(),
+      siteFavoriteStates: { ...state.siteFavoriteStates },
+      archived: state.archived.slice(),
+      archiveCheckedCharacterIds: [...state.archiveCheckedCharacterIds],
+      savedAt: new Date().toISOString()
+    };
+  }
+
+  function applyRoleCacheSnapshot(snapshot) {
+    state.chatted = snapshot?.chatted || [];
+    state.chattedNotFavorite = snapshot?.chattedNotFavorite || [];
+    state.favoriteOnly = snapshot?.favoriteOnly || [];
+    state.siteFavoriteStates = snapshot?.siteFavoriteStates || {};
+    state.archived = snapshot?.archived || [];
+    state.archiveCheckedCharacterIds = new Set(snapshot?.archiveCheckedCharacterIds || []);
+  }
+
+  function mergeRoleCacheDuringLoad(saved, baseline, live) {
+    // 只把数据库打开期间发生的增删覆盖到已保存的列表上。
+    function mergeEntries(previous, current, stored) {
+      const result = new Map(stored);
+      for (const [key] of previous) if (!current.has(key)) result.delete(key);
+      for (const [key, value] of current) if (previous.get(key) !== value) result.set(key, value);
+      return result;
+    }
+    function mergeRows(key, identify = row => String(row.characterId)) {
+      const entries = snapshot => new Map(snapshot[key].map(row => [identify(row), row]));
+      return [...mergeEntries(entries(baseline), entries(live), entries(saved)).values()];
+    }
+    const entries = snapshot => new Map(Object.entries(snapshot.siteFavoriteStates));
+    return {
+      chatted: mergeRows('chatted'),
+      chattedNotFavorite: mergeRows('chattedNotFavorite'),
+      favoriteOnly: mergeRows('favoriteOnly'),
+      archived: mergeRows('archived', archiveSessionKey),
+      archiveCheckedCharacterIds: mergeRows('archiveCheckedCharacterIds', id => id),
+      siteFavoriteStates: Object.fromEntries(mergeEntries(entries(baseline), entries(live), entries(saved))),
+      savedAt: live.savedAt
+    };
+  }
+
+  function initializeRoleCacheForAccount(scope, legacy) {
+    roleCacheContext = scope ? { scope, legacy, baseline: roleCacheSnapshot(), pending: null, ready: false, running: false } : null;
+    if (roleCacheContext) void persistRoleCache(roleCacheContext);
+  }
+
+  async function persistRoleCache(context) {
+    if (context.running) return;
+    context.running = true;
     try {
-      localStorage.setItem(accountStorageKey(ROLE_CACHE_KEY), JSON.stringify({
-        chatted: state.chatted,
-        chattedNotFavorite: state.chattedNotFavorite,
-        favoriteOnly: state.favoriteOnly,
-        siteFavoriteStates: state.siteFavoriteStates,
-        archived: state.archived,
-        archiveCheckedCharacterIds: [...state.archiveCheckedCharacterIds],
-        savedAt: new Date().toISOString()
-      }));
+      const database = await openMaskDatabase();
+      const accountKey = ROLE_CACHE_RECORD_PREFIX + context.scope;
+      if (!context.ready) {
+        const record = await readMaskDatabaseRecord(database, accountKey);
+        const stored = normalizeRoleCacheSnapshot(record?.snapshot);
+        const legacy = context.legacy?.snapshot;
+        const useStored = stored && (!legacy || (Date.parse(stored.savedAt) || 0) >= (Date.parse(legacy.savedAt) || 0));
+        if (useStored) {
+          const restored = context.pending ? mergeRoleCacheDuringLoad(stored, context.baseline, context.pending) : stored;
+          if (context.pending || context.legacy) context.pending = restored;
+          if (roleCacheContext === context && maskAccountScope === context.scope) {
+            applyRoleCacheSnapshot(restored);
+            if (restored.savedAt && state.status === '准备就绪。首次安装后请刷新一次 Mufy 页面。') {
+              state.status = `已恢复上次读取的角色列表（${new Date(restored.savedAt).toLocaleString('zh-CN')}）。`;
+            }
+            render();
+          }
+        } else if (legacy && !context.pending) {
+          context.pending = legacy;
+        }
+        context.ready = true;
+        context.baseline = null;
+      }
+      while (context.pending) {
+        const snapshot = context.pending;
+        const transaction = database.transaction(MASK_DATABASE_STORE, 'readwrite');
+        const done = transactionDone(transaction);
+        transaction.objectStore(MASK_DATABASE_STORE).put({ accountKey, schemaVersion: 1, snapshot });
+        await done;
+        if (context.legacy) {
+          const verified = await readMaskDatabaseRecord(database, accountKey);
+          if (JSON.stringify(verified?.snapshot) !== JSON.stringify(snapshot)) throw new Error('迁移后回读校验失败');
+          const { key, raw } = context.legacy;
+          if (localStorage.getItem(key) === raw) localStorage.removeItem(key);
+          context.legacy = null;
+        }
+        if (context.pending === snapshot) context.pending = null;
+      }
     } catch (error) {
-      appendRunLog('error', '角色列表缓存写入 localStorage 失败；历史索引仍会尝试保存到 IndexedDB', error);
+      appendRunLog('error', '角色列表缓存读写 IndexedDB 失败，保留现有缓存', error);
+    } finally {
+      context.running = false;
     }
   }
 
+  function saveRoleCache() {
+    const context = roleCacheContext;
+    if (!context || context.scope !== maskAccountScope) return;
+    context.pending = roleCacheSnapshot();
+    void persistRoleCache(context);
+  }
+
   function reloadRoleCacheForAccount() {
-    const cached = loadRoleCache();
-    state.chatted = cached?.chatted || [];
-    state.chattedNotFavorite = cached?.chattedNotFavorite || [];
-    state.favoriteOnly = cached?.favoriteOnly || [];
-    state.siteFavoriteStates = cached?.siteFavoriteStates || {};
-    state.archived = cached?.archived || [];
-    state.archiveCheckedCharacterIds = new Set(cached?.archiveCheckedCharacterIds || []);
+    const legacy = readLegacyRoleCache(maskAccountScope);
+    applyRoleCacheSnapshot(legacy?.snapshot);
+    initializeRoleCacheForAccount(maskAccountScope, legacy);
     state.archiveOpenCharacterIds.clear();
     state.manualFavoriteChats = loadManualFavoriteChats();
     try { state.manualFavoriteChatCurrentId = loadAndMigrateScopedValue(MANUAL_FAVORITE_CHAT_CURRENT_KEY) || ''; } catch (_) { state.manualFavoriteChatCurrentId = ''; }
@@ -2270,22 +2358,55 @@ roleStateReady = true;
     throw new Error('没有获取到当前角色所选模型的 modelId/modelTemplateId；请刷新该角色页面，等待模型名称显示后再继续');
   }
 
-  function hasExistingManualChatSession(characterId) {
-    const current = currentRoleContext();
-    const hasSession = value => Boolean(value && String(value) !== '00000000-0000-0000-0000-000000000000');
-    if (current.characterId === characterId && hasSession(current.sessionId)) return true;
-    return [...state.manualFavoriteChats, ...state.chatted, ...state.roleHistory].some(row =>
-      String(row.characterId) === characterId && hasSession(row.lastSessionId)
-    );
+  function realChatSessionId(value) {
+    const id = String(value || '').trim();
+    return id && id !== '00000000-0000-0000-0000-000000000000' ? id : '';
   }
 
-  async function sendManualChatViaApi(job) {
+  async function confirmExistingManualChatSession(job, verifiedEmptySessions) {
+    const characterId = String(job.activeCharacterId || '');
+    const current = currentRoleContext();
+    const sessions = new Set([
+      current.characterId === characterId ? realChatSessionId(current.sessionId) : '',
+      ...[...state.manualFavoriteChats, ...state.chatted, ...state.roleHistory]
+        .filter(row => String(row.characterId) === characterId)
+        .map(row => realChatSessionId(row.lastSessionId))
+    ].filter(Boolean));
+    for (const sessionId of sessions) {
+      if (verifiedEmptySessions.has(sessionId)) continue;
+      state.status = '正在核验当前角色的旧会话……';
+      render();
+      showManualAutoChatToast(state.status);
+      const controller = new (pageWindow.AbortController || globalThis.AbortController)();
+      const timeout = setTimeout(() => controller.abort(), 20000);
+      try {
+        const data = await requestDialogPage({ characterId, sessionId }, 1, CHAT_EXPORT_SAFE_PAGE_SIZE, controller.signal);
+        if (manualAutoChatWasStopped()) throw new ManualAutoChatPausedError('任务已暂停');
+        if (job.accountScope && job.accountScope !== maskAccountScope) throw new Error('核验期间切换了 Mufy 账号');
+        const rows = dialogRowsFromPage(data, null);
+        if (!rows) throw new Error('会话详情未提供可核验的消息列表');
+        if (rows.length) return true;
+        const total = Number(data?.total ?? data?.totalCount ?? data?.count);
+        if (total > 0 || data?.hasNext === true || data?.hasMore === true) throw new Error('会话首屏为空，但接口仍提示有消息');
+        verifiedEmptySessions.add(sessionId);
+      } catch (error) {
+        if (error instanceof ManualAutoChatPausedError) throw error;
+        const reason = controller.signal.aborted ? '请求超时' : explainFailure(error);
+        throw new Error(`无法核验这个角色的旧会话，已暂停发送：${reason}`);
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+    return false;
+  }
+
+  async function sendManualChatViaApi(job, verifiedEmptySessions) {
     scanStoredAuthorization();
     const characterId = String(job.activeCharacterId || '');
-    if (hasExistingManualChatSession(characterId)) return false;
+    if (await confirmExistingManualChatSession(job, verifiedEmptySessions)) return false;
     const config = await resolveManualChatModelConfig(characterId);
     if (manualAutoChatWasStopped()) throw new ManualAutoChatPausedError('任务已暂停');
-    if (hasExistingManualChatSession(characterId)) return false;
+    if (await confirmExistingManualChatSession(job, verifiedEmptySessions)) return false;
     const headers = { Accept: 'text/event-stream', 'Content-Type': 'application/json' };
     if (authorization) headers.Authorization = authorization;
     const payload = {
@@ -2516,13 +2637,14 @@ roleStateReady = true;
         pageWindow.location.assign(roleUrl(job.activeCharacterId));
         return;
       }
-      if (!['response-complete', 'waiting-response', 'already-chatted'].includes(job.phase)
-        && hasExistingManualChatSession(String(job.activeCharacterId))) {
-        job.phase = 'already-chatted';
-        if (!saveManualAutoChatJob(job)) throw new Error('无法保存跳过状态');
-      }
+      const verifiedEmptySessions = new Set();
       if (job.phase === 'sending') {
         throw new Error('上一条消息的发送结果无法确认。为避免重复发送，请先在对话中核对。');
+      }
+      if (!['response-complete', 'waiting-response', 'already-chatted'].includes(job.phase)
+        && await confirmExistingManualChatSession(job, verifiedEmptySessions)) {
+        job.phase = 'already-chatted';
+        if (!saveManualAutoChatJob(job)) throw new Error('无法保存跳过状态');
       }
       if (job.phase === 'waiting-response') {
         const composer = findManualChatComposer();
@@ -2555,7 +2677,7 @@ roleStateReady = true;
         job.sentAt = Date.now();
         if (!saveManualAutoChatJob(job)) throw new Error('发送前无法保存任务状态');
         showManualAutoChatToast(`一键扣数 ${Number(job.completed || 0) + 1}/${job.total}：消息发送中，正在等待完整回复…`);
-        const sent = await sendManualChatViaApi(job);
+        const sent = await sendManualChatViaApi(job, verifiedEmptySessions);
         const latest = loadManualAutoChatJob();
         if (!latest) {
           reportManualAutoChatCancelResult(job, sent ? true : null);
@@ -3327,14 +3449,23 @@ roleStateReady = true;
     return true;
   }
 
+  function clearLegacyRoleInteractionTime(row) {
+    return row.lastInteracted && row.interactionTimeVerified !== true && !row.archive
+      ? { ...row, lastInteracted: '', interactionTimeVerified: false }
+      : row;
+  }
+
   function compactRoleHistoryRow(row, previous = null) {
     const characterId = String(row?.characterId || '').trim();
     if (!characterId) return null;
     const now = new Date().toISOString();
     const name = String(row?.name || '').trim();
     const authorName = String(row?.authorName || '').trim();
-    const incomingTime = Date.parse(String(row?.lastInteracted || '')) || 0;
-    const previousTime = Date.parse(String(previous?.lastInteracted || '')) || 0;
+    const incomingInteraction = row?.interactionTimeVerified === true ? row.lastInteracted : '';
+    const previousInteraction = previous?.interactionTimeVerified === true ? previous.lastInteracted : '';
+    const incomingTime = Date.parse(incomingInteraction) || 0;
+    const previousTime = Date.parse(previousInteraction) || 0;
+    const lastInteracted = incomingTime >= previousTime ? incomingInteraction : previousInteraction;
     const useIncomingSession = Boolean(row?.lastSessionId) && (!previous?.lastSessionId || incomingTime >= previousTime);
     return {
       characterId,
@@ -3343,7 +3474,8 @@ roleStateReady = true;
       authorId: String(row?.authorId || previous?.authorId || ''),
       tags: normalizeRoleTags(previous?.tags, row?.tags),
       lastSessionId: String(useIncomingSession ? row.lastSessionId : (previous?.lastSessionId || row?.lastSessionId || '')),
-      lastInteracted: String(incomingTime >= previousTime ? (row?.lastInteracted || previous?.lastInteracted || '') : previous?.lastInteracted || ''),
+      lastInteracted,
+      interactionTimeVerified: Boolean(lastInteracted),
       firstSeenAt: previous?.firstSeenAt || now,
       lastSeenAt: now
     };
@@ -3353,7 +3485,7 @@ roleStateReady = true;
     if (!scope) return [];
     const database = await openMaskDatabase();
     const record = await readMaskDatabaseRecord(database, `${ROLE_HISTORY_RECORD_PREFIX}${scope}`);
-    return Array.isArray(record?.rows) ? record.rows.filter(row => row?.characterId) : [];
+    return Array.isArray(record?.rows) ? record.rows.filter(row => row?.characterId).map(clearLegacyRoleInteractionTime) : [];
   }
 
   async function initializeRoleHistoryForAccount(scope) {
@@ -3930,6 +4062,9 @@ roleStateReady = true;
       || row?.createdBy || row?.createdByUser || character?.author || character?.authorInfo || character?.creator || character?.creatorInfo
       || character?.user || character?.userInfo || character?.owner || character?.createdBy || {};
     const value = (...keys) => keys.map(key => row?.[key] ?? character?.[key]).find(item => item != null && item !== '');
+    const lastInteracted = row?.interactionTimeVerified === false || row?.archive
+      ? ''
+      : [row?.lastChatAt, row?.lastInteracted].find(value => typeof value === 'string' && Number.isFinite(Date.parse(value))) || '';
     // 已经标准化过的记录必须保持幂等：favoriteKnown=false 表示来源没有提供收藏状态，
     // 不能因为内部补出的 isFavorite=false，在第二次 normalize 时变成“明确未收藏”。
     const favoriteState = row?.favoriteKnown === false
@@ -3939,10 +4074,11 @@ roleStateReady = true;
         : favoriteStatusFrom(row, character);
     return {
       characterId: String(value('characterId', 'id', 'roleId', 'character_id', 'characterID', 'role_id', 'roleID') || ''),
-      lastSessionId: String(value('lastSessionId', 'sessionId') || ''),
+      lastSessionId: realChatSessionId(value('lastSessionId', 'sessionId')),
       name: String(value('name', 'characterName', 'character_name', 'roleName', 'role_name', 'charName', 'characterTitle', 'displayName', 'title') || '未命名角色'),
       avatarUrl: String(value('avatarUrl', 'avatar', 'imageUrl', 'coverUrl', 'cover', 'icon') || ''),
-      lastInteracted: String(value('lastInteracted', 'updatedAt', 'lastChatAt') || ''),
+      lastInteracted,
+      interactionTimeVerified: Boolean(lastInteracted),
       isFollowed: favoriteState === true,
       isFavorite: favoriteState === true,
       favoriteKnown: favoriteState !== null,
@@ -4013,13 +4149,18 @@ roleStateReady = true;
   function mergeRole(existing, incoming) {
     if (!incoming || typeof incoming !== 'object') return existing || {};
     if (!existing || typeof existing !== 'object') return normalize(incoming);
+    const previousInteraction = existing.interactionTimeVerified === true ? existing.lastInteracted : '';
+    const incomingInteraction = incoming.interactionTimeVerified === true ? incoming.lastInteracted : '';
+    const lastInteracted = (Date.parse(incomingInteraction) || 0) > (Date.parse(previousInteraction) || 0)
+      ? incomingInteraction : previousInteraction;
     return {
       ...existing,
       ...incoming,
       name: existing.name || incoming.name,
       avatarUrl: existing.avatarUrl || incoming.avatarUrl,
       lastSessionId: existing.lastSessionId || incoming.lastSessionId,
-      lastInteracted: existing.lastInteracted || incoming.lastInteracted,
+      lastInteracted,
+      interactionTimeVerified: Boolean(lastInteracted),
       authorId: existing.authorId || incoming.authorId,
       authorName: existing.authorName || incoming.authorName,
       tags: normalizeRoleTags(existing?.tags, incoming?.tags),
@@ -4249,16 +4390,6 @@ roleStateReady = true;
       favorite: text(source?.favorite),
       command: text(source?.command)
     };
-  }
-
-  function isOlderThanTwoMonths(dateText) {
-    const date = new Date(dateText);
-    if (Number.isNaN(date.getTime())) return false;
-    const boundary = new Date();
-    boundary.setMonth(boundary.getMonth() - 2);
-    boundary.setDate(1);
-    boundary.setHours(0, 0, 0, 0);
-    return date < boundary;
   }
 
   async function requestPage(pageNum, isFollowed, pageParameter = 'pageNum') {
@@ -5160,7 +5291,7 @@ roleStateReady = true;
     if (pageWindow.location.pathname !== '/chat' || !roleStateReady) return;
     const { characterId, sessionId } = currentRoleContext();
     // 仅打开角色开场白没有 sessionId，不应算作已经聊过。
-    if (!characterId || !sessionId) return;
+    if (!characterId || !realChatSessionId(sessionId)) return;
     if (!maskAccountScope) scanStoredAuthorization();
     const scope = maskAccountScope;
     if (!scope) return;
@@ -5896,11 +6027,11 @@ roleStateReady = true;
       .filter(row => !chatted.has(row.characterId) && !row.lastSessionId)
       .map(row => [String(row.characterId), { ...row, isFavorite: true, isFollowed: true, favoriteKnown: true }])).values()];
     const nextChatted = [...chatted.values()]
-      .sort((a, b) => new Date(b.lastInteracted) - new Date(a.lastInteracted));
+      .sort((a, b) => (Date.parse(b.lastInteracted) || 0) - (Date.parse(a.lastInteracted) || 0));
     state.chatted = nextChatted;
     // 普通待聊只保留尚未出现在会话列表中的角色；
     // 用户手动发送消息后，下一次读取角色链接即可自动从待办中移除。
-    const chattedIds = new Set(nextChatted.filter(row => row.lastSessionId).map(row => String(row.characterId)));
+    const chattedIds = new Set(recentRows.filter(row => realChatSessionId(row.lastSessionId)).map(row => String(row.characterId)));
     if (chattedIds.size) {
       state.manualFavoriteChats = state.manualFavoriteChats.filter(row => !chattedIds.has(String(row.characterId)));
       saveManualFavoriteChats(state.manualFavoriteChats);
@@ -5966,8 +6097,7 @@ roleStateReady = true;
       applyRoleFetchResults(state.rolePendingRecent, state.rolePendingFavorites, state.roleReadMode === 'full');
       saveRoleCache();
       const historySaved = await queueRoleHistoryPersist(state.rolePendingRecent);
-      const hidden = state.chatted.filter(row => isOlderThanTwoMonths(row.lastInteracted)).length;
-      state.status = `角色链接已经更新完毕：聊过 ${state.chatted.length} 个；聊过未收藏 ${state.chattedNotFavorite.length} 个；收藏未聊 ${state.favoriteOnly.length} 个${hidden ? `；旧会话约 ${hidden} 个` : ''}。${historySaved ? `本账号历史索引累计 ${state.roleHistory.length} 个角色。` : '历史索引未保存，请查看运行日志。'}`;
+      state.status = `角色链接已经更新完毕：聊过 ${state.chatted.length} 个；聊过未收藏 ${state.chattedNotFavorite.length} 个；收藏未聊 ${state.favoriteOnly.length} 个。${historySaved ? `本账号历史索引累计 ${state.roleHistory.length} 个角色。` : '历史索引未保存，请查看运行日志。'}`;
       promptMetadata = pendingMetadataRows().length > 0;
       state.rolePendingRecent = [];
       state.rolePendingFavorites = [];
@@ -8349,7 +8479,7 @@ roleStateReady = true;
     const added = enqueueManualFavoriteChats(rows);
     state.status = added == null ? '普通待聊保存失败，请检查浏览器存储后重试。'
       : added ? `已将 ${added} 个已收藏角色加入普通待聊。`
-      : '选中的已收藏角色已在待聊列表里，或已经聊过。';
+      : '选中的已收藏角色已在待聊列表里。';
     if (added) state.active = 'manualFavoriteChats';
     render();
   }
@@ -8486,12 +8616,12 @@ roleStateReady = true;
   const CHAT_EXPORT_SAFE_PAGE_SIZE = 16;
   const CHAT_EXPORT_PART_SIZE = 100;
 
-  function dialogRowsFromPage(data) {
+  function dialogRowsFromPage(data, fallback = []) {
     if (Array.isArray(data)) return data;
     for (const key of ['data', 'rows', 'list', 'records', 'items', 'content', 'results']) {
       if (Array.isArray(data?.[key])) return data[key];
     }
-    return [];
+    return fallback;
   }
 
   async function requestDialogPage(context, pageNum, pageSize, signal) {
@@ -9668,7 +9798,6 @@ roleStateReady = true;
   }
 
   function roleCard(row, index) {
-    const old = isOlderThanTwoMonths(row.lastInteracted);
     const binding = `<span class="mufy-recovery-mask-binding-info">${esc(characterMaskLabel(row))}</span>`;
     const hasLocalBinding = Boolean(localBindingForCharacter(row.characterId));
     const manualDoneButton = state.active === 'manualFavoriteChats' ? `<button data-action="manual-chat-done" data-character-id="${esc(row.characterId)}">已完成</button>` : '';
@@ -9702,11 +9831,11 @@ roleStateReady = true;
     return `<div class="mufy-recovery-row">
       ${row.avatarUrl ? `<img src="${esc(row.avatarUrl)}" alt="">` : ''}
       <div class="mufy-recovery-info">
-        <div class="mufy-recovery-row-title"><b>${index + 1}. ${esc(row.name)}</b>${old ? '<span class="mufy-recovery-old">旧记录</span>' : ''}${rowTools}</div>
+        <div class="mufy-recovery-row-title"><b>${index + 1}. ${esc(row.name)}</b>${rowTools}</div>
         <div class="mufy-recovery-muted">作者：${esc(authorLabel(row))} ${visibilityBadge(row)}</div>
         ${state.section === 'roles'
-          ? `<details class="mufy-role-record"><summary>记录详情</summary><div>${esc(row.lastInteracted || '时间未知')} · ${esc(row.characterId)}</div></details>`
-          : `<div class="mufy-recovery-muted">${esc(row.lastInteracted || '时间未知')} · ${esc(row.characterId)}</div>`}
+          ? `<details class="mufy-role-record"><summary>记录详情</summary><div>${esc(row.characterId)}</div></details>`
+          : `<div class="mufy-recovery-muted">${esc(row.characterId)}</div>`}
         ${roleTagButtons(row)}
         ${matchSnippet}
         ${archiveList}
@@ -9720,7 +9849,6 @@ roleStateReady = true;
     return `<div class="mufy-recovery-row"><div class="mufy-recovery-info">
       <div class="mufy-recovery-row-title"><b>${index + 1}. ${esc(row.name || '未命名角色')}</b></div>
       <div class="mufy-recovery-muted">${esc(row.authorName || '作者未知')} · ${esc(row.characterId)}</div>
-      <div class="mufy-recovery-muted">最后记录：${esc(row.lastInteracted || row.lastSeenAt || '时间未知')}</div>
       ${roleTagButtons(row)}
       <div class="mufy-recovery-row-actions"><a href="${esc(roleUrl(row.characterId))}" rel="noreferrer">打开角色</a>${row.lastSessionId ? `<a href="${esc(sessionUrl(row))}" rel="noreferrer">打开记录的会话</a>` : ''}${shareCode ? `<a href="${esc(shareUrlFromCode(shareCode))}" rel="noreferrer">打开分享链接</a>` : ''}</div>
     </div></div>`;
@@ -11008,7 +11136,6 @@ roleStateReady = true;
       .mufy-recovery-mask-binding-info{color:#898995;font-size:10px;white-space:nowrap}
       .mufy-recovery-share-select{flex:none;border:0!important;background:transparent!important;color:#aaa1ff!important;font-size:18px!important;line-height:1;padding:2px 5px!important}
       .mufy-recovery-share-select.is-selected{color:#cabfff!important}
-      .mufy-recovery-old{display:inline-block;margin-left:7px;border-radius:10px;background:#614d30;color:#ffd99a;padding:1px 6px;font-size:10px}
       .mufy-recovery-empty{padding:22px;text-align:center;color:#999}
       .mufy-quote-action-separator{height:14px;width:1px;flex:none;border-radius:999px;background:#ffffff33}
       .mufy-quote-action-button{display:flex;align-items:center;gap:4px;padding-right:16px;color:#e9c77f;font-size:14px;line-height:1;cursor:pointer;white-space:nowrap;user-select:none}
@@ -11117,6 +11244,8 @@ roleStateReady = true;
       #mufy-recovery-panel #mufy-recovery-head,#mufy-recovery-panel #mufy-recovery-panel-beauty-head,#mufy-recovery-panel .mufy-quote-modal-head,#mufy-recovery-panel #mufy-recovery-material-editor-head,#mufy-recovery-panel #mufy-recovery-model-head{background:var(--mufy-panel-surface-strong)!important;border-color:var(--mufy-panel-border)!important}
       #mufy-recovery-panel #mufy-recovery-panel-beauty-modal,#mufy-recovery-panel #mufy-recovery-model-modal,#mufy-recovery-panel #mufy-recovery-log-modal,#mufy-recovery-panel #mufy-recovery-export-modal,#mufy-recovery-panel #mufy-recovery-material-editor,#mufy-recovery-panel #mufy-recovery-quote-editor-modal,#mufy-recovery-panel #mufy-recovery-quote-library-modal,#mufy-recovery-panel #mufy-recovery-quote-style-modal{background:var(--mufy-panel-bg)!important;border-color:var(--mufy-panel-border)!important;color:var(--mufy-panel-text)!important}
       #mufy-recovery-panel button{color:var(--mufy-panel-text)}#mufy-recovery-panel button.active,#mufy-recovery-panel .mufy-recovery-section-card:first-child{background:var(--mufy-panel-accent-soft)!important;border-color:var(--mufy-panel-accent)!important}
+      #mufy-recovery-panel:where([data-panel-tone="light"]) button{color:var(--mufy-panel-text)!important}
+      #mufy-recovery-panel[data-panel-tone="light"] .mufy-recovery-row-actions a{color:var(--mufy-panel-accent-text)!important}
       #mufy-recovery-panel small,#mufy-recovery-panel .mufy-recovery-muted,#mufy-recovery-panel .mufy-recovery-section-card small,#mufy-recovery-panel .mufy-recovery-section-note span,#mufy-recovery-panel-beauty-fields label{color:var(--mufy-panel-muted)!important}
       #mufy-recovery-panel[data-panel-tone="light"]{box-shadow:0 24px 60px #26313a24,inset 0 1px #fff}#mufy-recovery-panel[data-panel-tone="light"] button{box-shadow:inset 0 1px #fff8,0 3px 10px #26313a10}#mufy-recovery-panel[data-panel-tone="light"] #mufy-recovery-title,#mufy-recovery-panel[data-panel-tone="light"] strong{color:var(--mufy-panel-text)}
       #mufy-recovery-panel #mufy-recovery-log-entry,#mufy-recovery-panel #mufy-recovery-history-entry,#mufy-recovery-panel #mufy-recovery-section-back{background:var(--mufy-panel-surface)!important;border-color:var(--mufy-panel-border)!important;color:var(--mufy-panel-text)!important}
