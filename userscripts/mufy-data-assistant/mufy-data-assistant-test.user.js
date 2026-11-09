@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.108
+// @version      3.0.0-dev.109
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,7 +21,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.108';
+    : '3.0.0-dev.109';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -629,25 +629,27 @@
     }
   }
 
-  function switchToSavedAccount(accountId) {
+  function switchToSavedAccount(accountId, directRetry = false) {
     if (accountLogoutRequesting || accountDirectLoginRequesting) return;
     const row = loadAccountSwitchProfiles().find(item => item.id === String(accountId || ''));
     if (!row) return;
     const password = accountLoginMode(row) === 'direct' ? savedAccountPassword(row.id) : '';
     const signedOut = websiteSignInVisible();
+    const retryCurrent = directRetry && password && row.id === currentAccountSwitchId();
+    const skipLogout = signedOut || retryCurrent;
     const pending = {
       id: row.id,
       email: row.email,
       label: row.label,
       targetScope: row.scope || '',
-      sourceScope: signedOut ? '' : maskAccountScope || accountIdentityFromAuthorization().scope,
+      sourceScope: skipLogout ? '' : maskAccountScope || accountIdentityFromAuthorization().scope,
       useDirectLogin: Boolean(password),
       authStorageSlot: password ? findAuthorizationStorageSlot() : null,
-      phase: signedOut ? (password ? 'direct-login' : 'login') : 'logout',
+      phase: skipLogout ? (password ? 'direct-login' : 'login') : 'logout',
       startedAt: Date.now()
     };
     savePendingAccountSwitch(pending);
-    if (signedOut) {
+    if (skipLogout) {
       authorization = '';
       if (password) attemptDirectAccountLogin(pending, password);
       else {
@@ -1121,7 +1123,29 @@
     } catch (_) { return []; }
   }
   function saveManualFavoriteChats(rows) {
-    try { localStorage.setItem(accountStorageKey(MANUAL_FAVORITE_CHAT_KEY), JSON.stringify(rows)); } catch (_) {}
+    try {
+      localStorage.setItem(accountStorageKey(MANUAL_FAVORITE_CHAT_KEY), JSON.stringify(rows));
+      return true;
+    } catch (error) {
+      appendRunLog('error', '普通待聊列表保存失败', error);
+      return false;
+    }
+  }
+
+  function enqueueManualFavoriteChats(rows) {
+    const knownSessions = new Set([...state.chatted, ...state.roleHistory]
+      .filter(row => row.lastSessionId).map(row => String(row.characterId)));
+    const queued = new Map([...state.manualFavoriteChats, ...loadManualFavoriteChats()]
+      .map(row => [String(row.characterId), row]));
+    const previousSize = queued.size;
+    for (const row of rows) {
+      const id = String(row?.characterId || '');
+      if (!id || row.lastSessionId || knownSessions.has(id) || queued.has(id)) continue;
+      queued.set(id, { ...row, isFavorite: true, favoriteKnown: true, manualChatAddedAt: new Date().toISOString() });
+    }
+    if (!saveManualFavoriteChats([...queued.values()])) return null;
+    state.manualFavoriteChats = [...queued.values()];
+    return queued.size - previousSize;
   }
 
   function loadManualFavoriteNextDismissed() {
@@ -1422,7 +1446,9 @@
       const signIn = signedOut
         ? `<button data-account-switch="${esc(row.id)}">${loginMode === 'direct' && hasPassword ? '直接登录' : '登录'}</button>`
         : active
-        ? ''
+        ? (loginMode === 'direct' && hasPassword
+          ? `<button data-account-switch="${esc(row.id)}" data-account-retry title="Mufy 掉线时用保存的密码重新登录">直接登录</button>`
+          : '')
         : `<button data-account-mark-current="${esc(row.id)}" title="网站已经登录此账号时，用它纠正当前标记">设为当前</button><button data-account-switch="${esc(row.id)}">切换</button>`;
       return `<article class="mufy-account-card ${active ? 'is-current' : ''}"><div><strong>${esc(row.label)}</strong><small>${esc(row.email)}</small><span class="mufy-account-badges">${active ? '<em>当前登录</em>' : ''}<em class="login-mode ${loginMode}">${loginMode === 'direct' ? '接口直登' : '官方表单'}</em>${hasPassword ? '<em class="has-password">已存密码</em>' : ''}</span></div><span>${signIn}<button data-account-mode="${esc(row.id)}">${loginMode === 'direct' ? '改用表单' : '启用直登'}</button><button data-account-edit="${esc(row.id)}">编辑</button><button data-account-delete="${esc(row.id)}">删除</button></span></article>`;
     }).join('') || '<div class="mufy-recovery-empty">还没有保存账号。可添加其他账号，或保存当前登录账号。</div>';
@@ -2521,7 +2547,7 @@ roleStateReady = true;
       return;
     }
     if (!state.manualFavoriteChats.length) {
-      state.status = '普通待聊列表为空，没有需要一键扣数的角色。';
+      state.status = '普通待聊为空。可在「网站角色」勾选已收藏角色，再点「加入普通待聊」。';
       render();
       return;
     }
@@ -7453,15 +7479,10 @@ roleStateReady = true;
   }
 
   async function finishShareFavoriteJob(job) {
-    const manualRows = new Map(state.manualFavoriteChats.map(row => [String(row.characterId), row]));
-    (job.normalFallback || []).forEach(item => {
-      const source = (job.rows || []).find(row => String(row.characterId) === String(item.characterId));
-      if (source && (job.favoritedIds || []).some(id => String(id) === String(item.characterId)) && !state.chatted.some(row => String(row.characterId) === String(item.characterId))) {
-        manualRows.set(String(item.characterId), { ...source, isFavorite: true, favoriteKnown: true, manualChatAddedAt: new Date().toISOString() });
-      }
-    });
-    state.manualFavoriteChats = [...manualRows.values()];
-    saveManualFavoriteChats(state.manualFavoriteChats);
+    const normalIds = new Set((job.normalFallback || []).map(item => String(item.characterId)));
+    const favoritedIds = new Set((job.favoritedIds || []).map(String));
+    const manualRows = (job.rows || []).filter(row => normalIds.has(String(row.characterId)) && favoritedIds.has(String(row.characterId)));
+    if (manualRows.length && (!job.accountScope || job.accountScope === maskAccountScope)) enqueueManualFavoriteChats(manualRows);
     const result = {
       label: job.label,
       shareSuccess: job.shareSuccess || 0,
@@ -7609,6 +7630,7 @@ roleStateReady = true;
           applyFavoriteState(row.characterId, true);
           job.favoritedIds = [...new Set([...(job.favoritedIds || []), String(row.characterId)])];
           job.normalSuccess = (job.normalSuccess || 0) + 1;
+          if (!job.accountScope || job.accountScope === maskAccountScope) enqueueManualFavoriteChats([row]);
           job.index += 1;
           job.activeCharacterId = '';
           job.activeShareCode = '';
@@ -8170,6 +8192,21 @@ roleStateReady = true;
     state.siteSearchRows = [];
     state.selectedSiteCharacterIds.clear();
     state.status = '已清空网站角色结果；可以去发现页/搜索页刷新或滚动，脚本会重新自动捕获。';
+    render();
+  }
+
+  function queueSelectedSiteRowsForChat() {
+    if (!maskAccountScope) {
+      state.status = '请先登录 Mufy，打开一个角色页面识别账号后再加入普通待聊。';
+      render();
+      return;
+    }
+    const rows = selectedSiteRows().filter(row => row.favoriteKnown === true && row.isFavorite);
+    const added = enqueueManualFavoriteChats(rows);
+    state.status = added == null ? '普通待聊保存失败，请检查浏览器存储后重试。'
+      : added ? `已将 ${added} 个已收藏角色加入普通待聊。`
+      : '选中的已收藏角色已在待聊列表里，或已经聊过。';
+    if (added) state.active = 'manualFavoriteChats';
     render();
   }
 
@@ -10201,6 +10238,11 @@ roleStateReady = true;
       const button = panel.querySelector(selector);
       if (button) button.disabled = state.favoriteRunning || state.shareRecoveryLoading || state.siteFavoriteStateLoading || !state.siteSearchRows.length;
     });
+    const queueForChat = panel.querySelector('#mufy-recovery-queue-site-for-chat');
+    if (queueForChat) {
+      queueForChat.disabled = state.favoriteRunning || state.siteFavoriteStateLoading
+        || !selectedSiteRows().some(row => row.favoriteKnown === true && row.isFavorite);
+    }
     const refreshFavoriteStates = panel.querySelector('#mufy-recovery-refresh-favorite-states');
     if (refreshFavoriteStates) {
       refreshFavoriteStates.hidden = !isAuthorProfilePage();
@@ -11279,7 +11321,7 @@ roleStateReady = true;
           </div>
           <div id="mufy-recovery-favorite-actions"><button id="mufy-recovery-folder-organize">按作者整理</button><button id="mufy-recovery-folder-manage">新建 / 删除收藏夹</button><button id="mufy-recovery-stop-action" hidden>停止找回</button></div>
           <label id="mufy-recovery-auto-folder-label"><input id="mufy-recovery-auto-add-favorite-folder" type="checkbox"><span>收藏后自动放入收藏夹<small>关闭后仍会正常收藏角色，只是不再自动按作者归入收藏夹；手动整理功能不受影响。</small></span></label>
-          <div id="mufy-recovery-site-actions"><button id="mufy-recovery-refresh-favorite-states">获取收藏状态</button><button id="mufy-recovery-select-unfavorite-site">全选未收藏</button><button id="mufy-recovery-clear-site-selection">清空勾选</button><button id="mufy-recovery-refresh-site-rows" title="刷新当前网站页面并重新捕获，之后翻页会继续自动获取">重新获取</button><button id="mufy-recovery-clear-site-rows">清空结果</button></div>
+          <div id="mufy-recovery-site-actions"><button id="mufy-recovery-refresh-favorite-states">获取收藏状态</button><button id="mufy-recovery-select-unfavorite-site">全选未收藏</button><button id="mufy-recovery-queue-site-for-chat">加入普通待聊</button><button id="mufy-recovery-clear-site-selection">清空勾选</button><button id="mufy-recovery-refresh-site-rows" title="刷新当前网站页面并重新捕获，之后翻页会继续自动获取">重新获取</button><button id="mufy-recovery-clear-site-rows">清空结果</button></div>
           <div id="mufy-recovery-manual-auto-actions" hidden><input id="mufy-recovery-manual-auto-message" type="text" maxlength="500" value="${esc(state.manualAutoChatMessage)}" aria-label="一键扣数发送内容"><label class="mufy-recovery-auto-delay">间隔 <input id="mufy-recovery-manual-auto-delay-min" type="number" min="0" max="300" step="1" value="${esc(state.manualAutoChatDelayMin)}" aria-label="随机冷却最短秒数">～<input id="mufy-recovery-manual-auto-delay-max" type="number" min="0" max="300" step="1" value="${esc(state.manualAutoChatDelayMax)}" aria-label="随机冷却最长秒数"> 秒</label><button id="mufy-recovery-manual-auto-start">一键扣数</button><button id="mufy-recovery-manual-auto-cancel" hidden>取消任务</button><button id="mufy-recovery-manual-chat-next" title="按普通待聊列表顺序打开角色；再次点击视为当前角色已处理并前往下一个">下一个</button></div>
         </div>
         <div id="mufy-recovery-chat-section" hidden>
@@ -11584,7 +11626,7 @@ roleStateReady = true;
       const markButton = event.target.closest?.('[data-account-mark-current]');
       if (markButton) { markSavedAccountCurrent(String(markButton.dataset.accountMarkCurrent || '')); return; }
       const switchButton = event.target.closest?.('[data-account-switch]');
-      if (switchButton) { switchToSavedAccount(String(switchButton.dataset.accountSwitch || '')); return; }
+      if (switchButton) { switchToSavedAccount(String(switchButton.dataset.accountSwitch || ''), switchButton.hasAttribute('data-account-retry')); return; }
       const modeButton = event.target.closest?.('[data-account-mode]');
       if (modeButton) { toggleAccountLoginMode(String(modeButton.dataset.accountMode || '')); return; }
       const editButton = event.target.closest?.('[data-account-edit]');
@@ -11771,6 +11813,7 @@ roleStateReady = true;
       searchRolesByChatRecord();
     };
     panel.querySelector('#mufy-recovery-refresh-favorite-states').onclick = refreshCapturedFavoriteStates;
+    panel.querySelector('#mufy-recovery-queue-site-for-chat').onclick = queueSelectedSiteRowsForChat;
     panel.querySelector('#mufy-recovery-site-manage').onclick = () => {
       state.siteRoleManaging = !state.siteRoleManaging;
       render();
