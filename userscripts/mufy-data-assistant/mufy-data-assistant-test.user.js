@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.111
+// @version      3.0.0-dev.112
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,7 +21,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.111';
+    : '3.0.0-dev.112';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -6843,7 +6843,7 @@ roleStateReady = true;
 
   function favoriteFolderCount(folder) {
     for (const value of [folder?._characterCount, folder?.characterCount, folder?.charactersCount,
-      folder?.characterNum, folder?.character_count, folder?.characters_count, folder?.roleCount, folder?.role_count]) {
+      folder?.characterCnt, folder?.characterNum, folder?.character_count, folder?.characters_count, folder?.roleCount, folder?.role_count]) {
       if (typeof value !== 'number' && (typeof value !== 'string' || !/^\d+$/.test(value.trim()))) continue;
       const count = Number(value);
       if (Number.isSafeInteger(count) && count >= 0) return count;
