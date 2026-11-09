@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.110
+// @version      3.0.0-dev.111
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,10 +21,10 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.110';
+    : '3.0.0-dev.111';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
-  const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
+  const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
   const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
   const MASK_LIBRARY_KEY = 'mufy-recovery-mask-library-v1';
   const MASK_LIBRARY_BACKUP_KEY = 'mufy-recovery-mask-library-backup-v1';
@@ -712,7 +712,8 @@
   async function checkForScriptUpdate(force = false) {
     if (state.updateChecking) return state.updateAvailable;
     const cached = loadUpdateCheckSnapshot();
-    if (!force && cached.checkedAt && Date.now() - Number(cached.checkedAt) < UPDATE_CHECK_INTERVAL_MS) {
+    if (!force && cached.checkedAt && Number.isSafeInteger(cached.requestedAt) && Date.now() - Number(cached.checkedAt) < UPDATE_CHECK_INTERVAL_MS) {
+      state.updateInstallUrl = `${TEST_UPDATE_URL}?check=${cached.requestedAt}`;
       state.latestScriptVersion = String(cached.latestVersion || '');
       state.updateAvailable = compareScriptVersions(state.latestScriptVersion, SCRIPT_VERSION) > 0;
       render();
@@ -722,7 +723,9 @@
     state.updateError = '';
     render();
     try {
-      const response = await pageWindow.fetch(`${TEST_UPDATE_URL}?check=${Date.now()}`, { cache: 'no-store', credentials: 'omit' });
+      const requestedAt = Date.now();
+      const installUrl = `${TEST_UPDATE_URL}?check=${requestedAt}`;
+      const response = await pageWindow.fetch(installUrl, { cache: 'no-store', credentials: 'omit' });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const header = (await response.text()).slice(0, 3000);
       const latestVersion = String(header.match(/^\/\/\s*@version\s+([^\s]+)\s*$/mi)?.[1] || '');
@@ -730,7 +733,8 @@
       const wasAvailable = state.updateAvailable;
       state.latestScriptVersion = latestVersion;
       state.updateAvailable = compareScriptVersions(latestVersion, SCRIPT_VERSION) > 0;
-      localStorage.setItem(UPDATE_CHECK_KEY, JSON.stringify({ latestVersion, checkedAt: Date.now() }));
+      state.updateInstallUrl = installUrl;
+      localStorage.setItem(UPDATE_CHECK_KEY, JSON.stringify({ latestVersion, requestedAt, checkedAt: Date.now() }));
       if (state.updateAvailable && !wasAvailable) {
         showManualAutoChatToast(`发现测试版更新 ${latestVersion}，打开脚本后点击“检查更新”即可安装。`, { tone: 'success', duration: 9000 });
       }
@@ -746,9 +750,9 @@
   }
 
   async function handleScriptUpdateEntry() {
-    const available = state.updateAvailable || await checkForScriptUpdate(true);
-    if (available) {
-      pageWindow.open(TEST_UPDATE_URL, '_blank', 'noopener');
+    const available = (state.updateAvailable && state.updateInstallUrl) || await checkForScriptUpdate(true);
+    if (available && state.updateInstallUrl) {
+      pageWindow.open(state.updateInstallUrl, '_blank', 'noopener');
       state.status = `已打开 ${state.latestScriptVersion || '最新测试版'} 安装页；请在篡改猴页面确认更新。`;
     } else if (state.updateError) {
       state.status = `检查更新失败：${state.updateError}。可稍后重试。`;
@@ -1902,6 +1906,7 @@
     favoriteFolderDeleteRows: [],
     selectedFavoriteFolderIds: new Set(),
     favoriteFolderDeleteEmptyOnly: true,
+    updateInstallUrl: '',
     latestScriptVersion: loadUpdateCheckSnapshot().latestVersion || '',
     updateAvailable: compareScriptVersions(loadUpdateCheckSnapshot().latestVersion, SCRIPT_VERSION) > 0,
     updateChecking: false,
@@ -6768,17 +6773,16 @@ roleStateReady = true;
     }
   }
 
-  function favoriteFolderCharacterRows(body) {
+  function favoriteFolderCharacterLists(body) {
     const data = body?.data;
-    const candidates = [
+    return [
       data?.characters, data?.data, data?.items, data?.list, data?.rows,
-      body?.characters, body?.items, body?.list, body?.rows
-    ];
-    return candidates.find(rows => Array.isArray(rows)) || [];
+      body?.characters, body?.items, body?.list, body?.rows, data
+    ].filter(Array.isArray);
   }
 
   function favoriteFolderCharacterIds(body) {
-    return new Set(favoriteFolderCharacterRows(body).map(item => String(
+    return new Set((favoriteFolderCharacterLists(body)[0] || []).map(item => String(
       item?.characterId || item?.characterID || item?.roleId || item?.id
         || item?.character?.id || item?.character?.characterId || item?.character?.characterID || ''
     ).trim()).filter(Boolean));
@@ -6838,8 +6842,22 @@ roleStateReady = true;
   }
 
   function favoriteFolderCount(folder) {
-    const value = folder?._characterCount ?? folder?.characterCount ?? folder?.charactersCount ?? folder?.count ?? folder?.total ?? folder?.characterNum;
-    return Number.isFinite(Number(value)) ? Number(value) : null;
+    for (const value of [folder?._characterCount, folder?.characterCount, folder?.charactersCount,
+      folder?.characterNum, folder?.character_count, folder?.characters_count, folder?.roleCount, folder?.role_count]) {
+      if (typeof value !== 'number' && (typeof value !== 'string' || !/^\d+$/.test(value.trim()))) continue;
+      const count = Number(value);
+      if (Number.isSafeInteger(count) && count >= 0) return count;
+    }
+    return null;
+  }
+
+  function verifiedFavoriteFolderDetailCount(body) {
+    if (!body || (body.code != null && Number(body.code) !== 200)) return null;
+    const counts = [
+      favoriteFolderCount(body.data), favoriteFolderCount(body),
+      ...favoriteFolderCharacterLists(body).map(rows => rows.length)
+    ].filter(count => count != null);
+    return counts.length ? Math.max(...counts) : null;
   }
 
   function renderFavoriteFolderDeleteModal() {
@@ -6851,12 +6869,15 @@ roleStateReady = true;
     const emptyRows = rows.filter(folder => folder?._countVerified === true && favoriteFolderCount(folder) === 0);
     const visibleRows = state.favoriteFolderDeleteEmptyOnly ? emptyRows : rows;
     const selectedCount = rows.filter(folder => selected.has(favoriteFolderId(folder))).length;
+    const unverifiedCount = rows.filter(folder => folder?._countVerified !== true).length;
     if (state.favoriteFolderDeleteLoading && !rows.length) {
       list.innerHTML = '<div class="mufy-recovery-folder-delete-empty">正在读取收藏夹……</div>';
     } else if (!rows.length) {
       list.innerHTML = '<div class="mufy-recovery-folder-delete-empty">没有可删除的收藏夹</div>';
     } else if (!visibleRows.length) {
-      list.innerHTML = '<div class="mufy-recovery-folder-delete-empty">当前没有空收藏夹；关闭“只看空收藏夹”可管理全部收藏夹</div>';
+      list.innerHTML = unverifiedCount
+        ? '<div class="mufy-recovery-folder-delete-empty">暂未确认空收藏夹，部分数量未读到。可以重新打开重试。</div>'
+        : '<div class="mufy-recovery-folder-delete-empty">当前没有空收藏夹；关闭“只看空收藏夹”可管理全部收藏夹</div>';
     } else {
       list.innerHTML = visibleRows.map(folder => {
         const id = favoriteFolderId(folder);
@@ -6865,7 +6886,7 @@ roleStateReady = true;
       }).join('');
     }
     const summary = modal.querySelector('#mufy-recovery-folder-delete-summary');
-    if (summary) summary.textContent = `共 ${rows.length} 个收藏夹，其中空收藏夹 ${emptyRows.length} 个，已选择 ${selectedCount} 个。删除收藏夹不会取消其中角色的收藏。`;
+    if (summary) summary.textContent = `共 ${rows.length} 个收藏夹，其中空收藏夹 ${emptyRows.length} 个${unverifiedCount ? `，未核验 ${unverifiedCount} 个` : ''}，已选择 ${selectedCount} 个。删除收藏夹不会取消其中角色的收藏。`;
     const emptyOnly = modal.querySelector('#mufy-recovery-folder-delete-empty-only');
     if (emptyOnly) {
       emptyOnly.checked = state.favoriteFolderDeleteEmptyOnly;
@@ -6908,19 +6929,28 @@ roleStateReady = true;
         if (id && !unique.has(id)) unique.set(id, folder);
       });
       const folderRows = [...unique.values()];
+      const detailRows = folderRows.filter(folder => {
+        const count = favoriteFolderCount(folder);
+        if (count == null) return true;
+        folder._characterCount = count;
+        folder._countVerified = true;
+        return false;
+      });
       let nextFolderIndex = 0;
-      let completedFolders = 0;
+      let completedFolders = folderRows.length - detailRows.length;
       let rateLimited = false;
       const scanWorker = async () => {
         while (!rateLimited) {
           const index = nextFolderIndex;
           nextFolderIndex += 1;
-          if (index >= folderRows.length) return;
-          const folder = folderRows[index];
+          if (index >= detailRows.length) return;
+          const folder = detailRows[index];
           try {
             const body = await requestFavoriteFolder(favoriteFolderId(folder));
-            folder._characterCount = favoriteFolderCharacterIds(body).size;
-            folder._countVerified = true;
+            const count = verifiedFavoriteFolderDetailCount(body);
+            folder._characterCount = count;
+            folder._countVerified = count != null;
+            if (count == null) folder._countError = '接口未提供可核验的角色数量';
           } catch (error) {
             folder._countVerified = false;
             folder._countError = explainFailure(error);
@@ -6932,9 +6962,10 @@ roleStateReady = true;
             const status = panel?.querySelector('#mufy-recovery-status');
             if (status) status.textContent = state.status;
           }
+          if (!rateLimited && nextFolderIndex < detailRows.length) await wait(250);
         }
       };
-      const workerCount = Math.min(4, folderRows.length);
+      const workerCount = Math.min(2, detailRows.length);
       await Promise.all(Array.from({ length: workerCount }, () => scanWorker()));
       state.favoriteFolderDeleteRows = folderRows;
       const emptyCount = folderRows.filter(folder => folder?._countVerified === true && favoriteFolderCount(folder) === 0).length;
@@ -6978,7 +7009,7 @@ roleStateReady = true;
     }
   }
 
-  async function deleteSelectedFavoriteFolders() {
+  async function deleteSelectedFavoriteFolders(onlyEmpty = false) {
     if (state.favoriteFolderDeleteLoading) return;
     const targets = state.favoriteFolderDeleteRows.filter(folder => state.selectedFavoriteFolderIds.has(favoriteFolderId(folder)));
     if (!targets.length) return;
@@ -7000,6 +7031,12 @@ roleStateReady = true;
       state.status = `正在删除收藏夹 ${index + 1}/${targets.length}：“${favoriteFolderName(folder)}”……`;
       render();
       try {
+        if (onlyEmpty === true) {
+          const count = verifiedFavoriteFolderDetailCount(await requestFavoriteFolder(id));
+          folder._characterCount = count;
+          folder._countVerified = count != null;
+          if (count !== 0) throw new Error(count == null ? '无法确认收藏夹为空' : '复核发现收藏夹仍有角色');
+        }
         await deleteFavoriteFolder(id);
         deletedIds.add(id);
         appendRunLog('info', `已删除收藏夹：${favoriteFolderName(folder)}`, { folderId: id });
@@ -7035,7 +7072,7 @@ roleStateReady = true;
     state.selectedFavoriteFolderIds.clear();
     emptyRows.forEach(folder => state.selectedFavoriteFolderIds.add(favoriteFolderId(folder)));
     renderFavoriteFolderDeleteModal();
-    await deleteSelectedFavoriteFolders();
+    await deleteSelectedFavoriteFolders(true);
   }
 
   function loadAuthorFolderMap() {
