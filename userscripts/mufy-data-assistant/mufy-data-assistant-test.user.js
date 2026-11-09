@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.109
+// @version      3.0.0-dev.110
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,7 +21,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.109';
+    : '3.0.0-dev.110';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -431,13 +431,19 @@
   }
 
   async function attemptDirectAccountLogin(pending, password) {
-    if (!pending || !password || accountDirectLoginRequesting) return;
+    if (!pending || accountDirectLoginRequesting) return;
+    if (!password) {
+      stopPendingAccountSwitch('此账号的已存密码无法读取。请在账号切换里编辑并重新保存密码，再点直接登录。');
+      return;
+    }
     accountDirectLoginRequesting = true;
     state.status = `正在通过 Mufy 官方登录接口切换到“${pending.label || pending.email}”…`;
     showManualAutoChatToast(state.status, { tone: 'info', duration: 8000 });
     if (panel) render();
     try {
-      const response = await pageWindow.fetch('/api/users/login', {
+      const loginUrl = new URL('/api/users/login', pageWindow.location.origin);
+      appendRunLog('info', '正在发送 POST /api/users/login。');
+      const response = await pageWindow.fetch(loginUrl.href, {
         method: 'POST',
         headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -474,6 +480,10 @@
       setTimeout(() => attemptOfficialAccountLogout(pending), 200);
       return;
     }
+    if (pending.phase === 'direct-login') {
+      attemptDirectAccountLogin(pending, savedAccountPassword(pending.id));
+      return;
+    }
     let attempts = 0;
     let sawEmailInput = false;
     let emailNoticeShown = false;
@@ -483,12 +493,17 @@
     let loginSubmitAttempted = false;
     const storedPassword = pending.useDirectLogin ? savedAccountPassword(pending.id) : '';
     const timer = setInterval(() => {
+      const current = pendingAccountSwitch();
+      if (!current || current.id !== pending.id || current.startedAt !== pending.startedAt || current.phase !== pending.phase) {
+        clearInterval(timer);
+        return;
+      }
       attempts += 1;
       const emailInput = officialAccountEmailInput();
       if (pending.phase === 'verify-logout') {
         const loginButton = emailInput ? null : officialLoginControl();
         if (emailInput || loginButton) {
-          pending = { ...pending, phase: storedPassword ? 'direct-login' : 'login', logoutVerifiedAt: Date.now() };
+          pending = { ...pending, phase: pending.useDirectLogin ? 'direct-login' : 'login', logoutVerifiedAt: Date.now() };
           savePendingAccountSwitch(pending);
           attempts = 0;
           authorization = '';
@@ -497,7 +512,7 @@
             ? `已确认退出当前账号，正在通过官方接口直接登录“${pending.label || pending.email}”…`
             : `已确认退出当前账号，正在准备登录“${pending.label || pending.email}”…`;
           if (panel) render();
-          if (storedPassword) {
+          if (pending.useDirectLogin) {
             clearInterval(timer);
             attemptDirectAccountLogin(pending, storedPassword);
             return;
@@ -594,8 +609,16 @@
   }
 
   function finishAccountLogout(pending) {
-    const next = { ...pending, phase: 'verify-logout', logoutRequestedAt: Date.now() };
+    const next = {
+      ...pending,
+      phase: pending.useDirectLogin ? 'direct-login' : 'verify-logout',
+      logoutRequestedAt: Date.now()
+    };
     savePendingAccountSwitch(next);
+    if (next.useDirectLogin) {
+      authorization = '';
+      return attemptDirectAccountLogin(next, savedAccountPassword(next.id));
+    }
     pageWindow.location.assign('/');
   }
 
@@ -617,7 +640,7 @@
       const success = response.ok && (Number(body?.code) === 200 || String(body?.reason || '').toLowerCase() === 'success');
       if (!success) throw new Error(`官方 logout 失败（HTTP ${response.status}${body?.reason ? `：${body.reason}` : ''}）`);
       appendRunLog('info', '已通过 POST /api/users/logout 正式退出当前账号。');
-      finishAccountLogout(pending);
+      await finishAccountLogout(pending);
     } catch (error) {
       try { sessionStorage.removeItem(ACCOUNT_SWITCH_PENDING_KEY); } catch (_) {}
       state.status = `切换已停止：${explainFailure(error)}。当前账号不会被清除。`;
@@ -633,7 +656,12 @@
     if (accountLogoutRequesting || accountDirectLoginRequesting) return;
     const row = loadAccountSwitchProfiles().find(item => item.id === String(accountId || ''));
     if (!row) return;
-    const password = accountLoginMode(row) === 'direct' ? savedAccountPassword(row.id) : '';
+    const direct = accountLoginMode(row) === 'direct';
+    const password = direct ? savedAccountPassword(row.id) : '';
+    if (direct && !password) {
+      stopPendingAccountSwitch('此账号的已存密码无法读取。请编辑并重新保存密码后再切换。');
+      return;
+    }
     const signedOut = websiteSignInVisible();
     const retryCurrent = directRetry && password && row.id === currentAccountSwitchId();
     const skipLogout = signedOut || retryCurrent;
@@ -660,6 +688,7 @@
     }
     state.status = `正在切换到“${row.label}”…`;
     showManualAutoChatToast(`正在退出当前账号，然后切换到“${row.label}”…`, { tone: 'info', duration: 5000 });
+    if (panel) render();
     attemptOfficialAccountLogout(pending);
   }
 
