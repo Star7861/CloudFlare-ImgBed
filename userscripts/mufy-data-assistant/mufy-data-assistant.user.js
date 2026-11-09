@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手
 // @namespace    local.mufy.session-recovery
-// @version      3.0.0
+// @version      3.0.1
 // @description  管理 Mufy 角色、收藏、聊天记录、摘录和面具。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,10 +21,10 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0';
+    : '3.0.1';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const STABLE_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant.user.js';
-  const UPDATE_CHECK_KEY = 'mufy-recovery-stable-update-check-v1';
+  const UPDATE_CHECK_KEY = 'mufy-recovery-stable-update-check-v2';
   const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
   const MASK_LIBRARY_KEY = 'mufy-recovery-mask-library-v1';
   const MASK_LIBRARY_BACKUP_KEY = 'mufy-recovery-mask-library-backup-v1';
@@ -362,6 +362,17 @@
     render();
   }
 
+  function websiteSignInVisible() {
+    const loginForm = officialAccountEmailInput()?.closest('form,[role="dialog"]');
+    const password = loginForm?.querySelector('input[type="password"]');
+    if (password && visibleWebsiteElement(password)) return true;
+    return [...document.querySelectorAll('button,a,[role="button"]')].some(control => {
+      const labels = [control.textContent, control.getAttribute('aria-label'), control.getAttribute('title')];
+      return labels.some(label => /^(登录|登入|log in|login|sign in)$/i.test(String(label || '').trim()))
+        && visibleWebsiteElement(control);
+    });
+  }
+
   function setWebsiteInputValue(input, value) {
     const descriptor = Object.getOwnPropertyDescriptor(pageWindow.HTMLInputElement.prototype, 'value');
     descriptor?.set?.call(input, value);
@@ -420,13 +431,19 @@
   }
 
   async function attemptDirectAccountLogin(pending, password) {
-    if (!pending || !password || accountDirectLoginRequesting) return;
+    if (!pending || accountDirectLoginRequesting) return;
+    if (!password) {
+      stopPendingAccountSwitch('此账号的已存密码无法读取。请在账号切换里编辑并重新保存密码，再点直接登录。');
+      return;
+    }
     accountDirectLoginRequesting = true;
     state.status = `正在通过 Mufy 官方登录接口切换到“${pending.label || pending.email}”…`;
     showManualAutoChatToast(state.status, { tone: 'info', duration: 8000 });
     if (panel) render();
     try {
-      const response = await pageWindow.fetch('/api/users/login', {
+      const loginUrl = new URL('/api/users/login', pageWindow.location.origin);
+      appendRunLog('info', '正在发送 POST /api/users/login。');
+      const response = await pageWindow.fetch(loginUrl.href, {
         method: 'POST',
         headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -463,6 +480,10 @@
       setTimeout(() => attemptOfficialAccountLogout(pending), 200);
       return;
     }
+    if (pending.phase === 'direct-login') {
+      attemptDirectAccountLogin(pending, savedAccountPassword(pending.id));
+      return;
+    }
     let attempts = 0;
     let sawEmailInput = false;
     let emailNoticeShown = false;
@@ -472,12 +493,17 @@
     let loginSubmitAttempted = false;
     const storedPassword = pending.useDirectLogin ? savedAccountPassword(pending.id) : '';
     const timer = setInterval(() => {
+      const current = pendingAccountSwitch();
+      if (!current || current.id !== pending.id || current.startedAt !== pending.startedAt || current.phase !== pending.phase) {
+        clearInterval(timer);
+        return;
+      }
       attempts += 1;
       const emailInput = officialAccountEmailInput();
       if (pending.phase === 'verify-logout') {
         const loginButton = emailInput ? null : officialLoginControl();
         if (emailInput || loginButton) {
-          pending = { ...pending, phase: storedPassword ? 'direct-login' : 'login', logoutVerifiedAt: Date.now() };
+          pending = { ...pending, phase: pending.useDirectLogin ? 'direct-login' : 'login', logoutVerifiedAt: Date.now() };
           savePendingAccountSwitch(pending);
           attempts = 0;
           authorization = '';
@@ -486,7 +512,7 @@
             ? `已确认退出当前账号，正在通过官方接口直接登录“${pending.label || pending.email}”…`
             : `已确认退出当前账号，正在准备登录“${pending.label || pending.email}”…`;
           if (panel) render();
-          if (storedPassword) {
+          if (pending.useDirectLogin) {
             clearInterval(timer);
             attemptDirectAccountLogin(pending, storedPassword);
             return;
@@ -583,8 +609,16 @@
   }
 
   function finishAccountLogout(pending) {
-    const next = { ...pending, phase: 'verify-logout', logoutRequestedAt: Date.now() };
+    const next = {
+      ...pending,
+      phase: pending.useDirectLogin ? 'direct-login' : 'verify-logout',
+      logoutRequestedAt: Date.now()
+    };
     savePendingAccountSwitch(next);
+    if (next.useDirectLogin) {
+      authorization = '';
+      return attemptDirectAccountLogin(next, savedAccountPassword(next.id));
+    }
     pageWindow.location.assign('/');
   }
 
@@ -606,7 +640,7 @@
       const success = response.ok && (Number(body?.code) === 200 || String(body?.reason || '').toLowerCase() === 'success');
       if (!success) throw new Error(`官方 logout 失败（HTTP ${response.status}${body?.reason ? `：${body.reason}` : ''}）`);
       appendRunLog('info', '已通过 POST /api/users/logout 正式退出当前账号。');
-      finishAccountLogout(pending);
+      await finishAccountLogout(pending);
     } catch (error) {
       try { sessionStorage.removeItem(ACCOUNT_SWITCH_PENDING_KEY); } catch (_) {}
       state.status = `切换已停止：${explainFailure(error)}。当前账号不会被清除。`;
@@ -618,16 +652,43 @@
     }
   }
 
-  function switchToSavedAccount(accountId) {
+  function switchToSavedAccount(accountId, directRetry = false) {
     if (accountLogoutRequesting || accountDirectLoginRequesting) return;
     const row = loadAccountSwitchProfiles().find(item => item.id === String(accountId || ''));
     if (!row) return;
-    const hasStoredPassword = Boolean(savedAccountPassword(row.id));
-    const useDirectLogin = accountLoginMode(row) === 'direct' && hasStoredPassword;
-    const pending = { id: row.id, email: row.email, label: row.label, targetScope: row.scope || '', sourceScope: maskAccountScope || accountIdentityFromAuthorization().scope, useDirectLogin, authStorageSlot: useDirectLogin ? findAuthorizationStorageSlot() : null, phase: 'logout', startedAt: Date.now() };
+    const direct = accountLoginMode(row) === 'direct';
+    const password = direct ? savedAccountPassword(row.id) : '';
+    if (direct && !password) {
+      stopPendingAccountSwitch('此账号的已存密码无法读取。请编辑并重新保存密码后再切换。');
+      return;
+    }
+    const signedOut = websiteSignInVisible();
+    const retryCurrent = directRetry && password && row.id === currentAccountSwitchId();
+    const skipLogout = signedOut || retryCurrent;
+    const pending = {
+      id: row.id,
+      email: row.email,
+      label: row.label,
+      targetScope: row.scope || '',
+      sourceScope: skipLogout ? '' : maskAccountScope || accountIdentityFromAuthorization().scope,
+      useDirectLogin: Boolean(password),
+      authStorageSlot: password ? findAuthorizationStorageSlot() : null,
+      phase: skipLogout ? (password ? 'direct-login' : 'login') : 'logout',
+      startedAt: Date.now()
+    };
     savePendingAccountSwitch(pending);
+    if (skipLogout) {
+      authorization = '';
+      if (password) attemptDirectAccountLogin(pending, password);
+      else {
+        officialLoginControl()?.click();
+        installAccountSwitchLoginAssist();
+      }
+      return;
+    }
     state.status = `正在切换到“${row.label}”…`;
     showManualAutoChatToast(`正在退出当前账号，然后切换到“${row.label}”…`, { tone: 'info', duration: 5000 });
+    if (panel) render();
     attemptOfficialAccountLogout(pending);
   }
 
@@ -651,7 +712,8 @@
   async function checkForScriptUpdate(force = false) {
     if (state.updateChecking) return state.updateAvailable;
     const cached = loadUpdateCheckSnapshot();
-    if (!force && cached.checkedAt && Date.now() - Number(cached.checkedAt) < UPDATE_CHECK_INTERVAL_MS) {
+    if (!force && cached.checkedAt && Number.isSafeInteger(cached.requestedAt) && Date.now() - Number(cached.checkedAt) < UPDATE_CHECK_INTERVAL_MS) {
+      state.updateInstallUrl = `${STABLE_UPDATE_URL}?check=${cached.requestedAt}`;
       state.latestScriptVersion = String(cached.latestVersion || '');
       state.updateAvailable = compareScriptVersions(state.latestScriptVersion, SCRIPT_VERSION) > 0;
       render();
@@ -661,7 +723,9 @@
     state.updateError = '';
     render();
     try {
-      const response = await pageWindow.fetch(`${STABLE_UPDATE_URL}?check=${Date.now()}`, { cache: 'no-store', credentials: 'omit' });
+      const requestedAt = Date.now();
+      const installUrl = `${STABLE_UPDATE_URL}?check=${requestedAt}`;
+      const response = await pageWindow.fetch(installUrl, { cache: 'no-store', credentials: 'omit' });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const header = (await response.text()).slice(0, 3000);
       const latestVersion = String(header.match(/^\/\/\s*@version\s+([^\s]+)\s*$/mi)?.[1] || '');
@@ -669,7 +733,8 @@
       const wasAvailable = state.updateAvailable;
       state.latestScriptVersion = latestVersion;
       state.updateAvailable = compareScriptVersions(latestVersion, SCRIPT_VERSION) > 0;
-      localStorage.setItem(UPDATE_CHECK_KEY, JSON.stringify({ latestVersion, checkedAt: Date.now() }));
+      state.updateInstallUrl = installUrl;
+      localStorage.setItem(UPDATE_CHECK_KEY, JSON.stringify({ latestVersion, requestedAt, checkedAt: Date.now() }));
       if (state.updateAvailable && !wasAvailable) {
         showManualAutoChatToast(`发现正式版更新 ${latestVersion}，打开脚本后点击“检查更新”即可安装。`, { tone: 'success', duration: 9000 });
       }
@@ -685,9 +750,9 @@
   }
 
   async function handleScriptUpdateEntry() {
-    const available = state.updateAvailable || await checkForScriptUpdate(true);
-    if (available) {
-      pageWindow.open(STABLE_UPDATE_URL, '_blank', 'noopener');
+    const available = (state.updateAvailable && state.updateInstallUrl) || await checkForScriptUpdate(true);
+    if (available && state.updateInstallUrl) {
+      pageWindow.open(state.updateInstallUrl, '_blank', 'noopener');
       state.status = `已打开 ${state.latestScriptVersion || '最新正式版'} 安装页；请在篡改猴页面确认更新。`;
     } else if (state.updateError) {
       state.status = `检查更新失败：${state.updateError}。可稍后重试。`;
@@ -1091,7 +1156,29 @@
     } catch (_) { return []; }
   }
   function saveManualFavoriteChats(rows) {
-    try { localStorage.setItem(accountStorageKey(MANUAL_FAVORITE_CHAT_KEY), JSON.stringify(rows)); } catch (_) {}
+    try {
+      localStorage.setItem(accountStorageKey(MANUAL_FAVORITE_CHAT_KEY), JSON.stringify(rows));
+      return true;
+    } catch (error) {
+      appendRunLog('error', '普通待聊列表保存失败', error);
+      return false;
+    }
+  }
+
+  function enqueueManualFavoriteChats(rows) {
+    const knownSessions = new Set([...state.chatted, ...state.roleHistory]
+      .filter(row => row.lastSessionId).map(row => String(row.characterId)));
+    const queued = new Map([...state.manualFavoriteChats, ...loadManualFavoriteChats()]
+      .map(row => [String(row.characterId), row]));
+    const previousSize = queued.size;
+    for (const row of rows) {
+      const id = String(row?.characterId || '');
+      if (!id || row.lastSessionId || knownSessions.has(id) || queued.has(id)) continue;
+      queued.set(id, { ...row, isFavorite: true, favoriteKnown: true, manualChatAddedAt: new Date().toISOString() });
+    }
+    if (!saveManualFavoriteChats([...queued.values()])) return null;
+    state.manualFavoriteChats = [...queued.values()];
+    return queued.size - previousSize;
   }
 
   function loadManualFavoriteNextDismissed() {
@@ -1378,17 +1465,25 @@
       currentId = scopeMatches.length === 1 ? scopeMatches[0].id : '';
       if (currentId) setCurrentAccountSwitchId(currentId);
     }
+    const signedOut = websiteSignInVisible();
     const currentSaved = state.accountSwitchProfiles.find(row => row.id === currentId);
     const currentBox = panel.querySelector('#mufy-recovery-account-current');
     if (currentBox) {
-      currentBox.hidden = Boolean(currentSaved);
-      currentBox.textContent = currentSaved ? '' : `当前账号：${current.label || current.email || maskAccountLabel()}`;
+      currentBox.hidden = !signedOut && Boolean(currentSaved);
+      currentBox.textContent = signedOut ? '网站当前未登录' : currentSaved ? '' : `当前账号：${current.label || current.email || maskAccountLabel()}`;
     }
     list.innerHTML = state.accountSwitchProfiles.map(row => {
-      const active = row.id === currentId;
+      const active = !signedOut && row.id === currentId;
       const hasPassword = Boolean(savedAccountPassword(row.id));
       const loginMode = accountLoginMode(row);
-      return `<article class="mufy-account-card ${active ? 'is-current' : ''}"><div><strong>${esc(row.label)}</strong><small>${esc(row.email)}</small><span class="mufy-account-badges">${active ? '<em>当前登录</em>' : ''}<em class="login-mode ${loginMode}">${loginMode === 'direct' ? '接口直登' : '官方表单'}</em>${hasPassword ? '<em class="has-password">已存密码</em>' : ''}</span></div><span>${active ? '' : `<button data-account-mark-current="${esc(row.id)}" title="网站已经登录此账号时，用它纠正当前标记">设为当前</button><button data-account-switch="${esc(row.id)}">切换</button>`}<button data-account-mode="${esc(row.id)}">${loginMode === 'direct' ? '改用表单' : '启用直登'}</button><button data-account-edit="${esc(row.id)}">编辑</button><button data-account-delete="${esc(row.id)}">删除</button></span></article>`;
+      const signIn = signedOut
+        ? `<button data-account-switch="${esc(row.id)}">${loginMode === 'direct' && hasPassword ? '直接登录' : '登录'}</button>`
+        : active
+        ? (loginMode === 'direct' && hasPassword
+          ? `<button data-account-switch="${esc(row.id)}" data-account-retry title="Mufy 掉线时用保存的密码重新登录">直接登录</button>`
+          : '')
+        : `<button data-account-mark-current="${esc(row.id)}" title="网站已经登录此账号时，用它纠正当前标记">设为当前</button><button data-account-switch="${esc(row.id)}">切换</button>`;
+      return `<article class="mufy-account-card ${active ? 'is-current' : ''}"><div><strong>${esc(row.label)}</strong><small>${esc(row.email)}</small><span class="mufy-account-badges">${active ? '<em>当前登录</em>' : ''}<em class="login-mode ${loginMode}">${loginMode === 'direct' ? '接口直登' : '官方表单'}</em>${hasPassword ? '<em class="has-password">已存密码</em>' : ''}</span></div><span>${signIn}<button data-account-mode="${esc(row.id)}">${loginMode === 'direct' ? '改用表单' : '启用直登'}</button><button data-account-edit="${esc(row.id)}">编辑</button><button data-account-delete="${esc(row.id)}">删除</button></span></article>`;
     }).join('') || '<div class="mufy-recovery-empty">还没有保存账号。可添加其他账号，或保存当前登录账号。</div>';
   }
 
@@ -1811,6 +1906,7 @@
     favoriteFolderDeleteRows: [],
     selectedFavoriteFolderIds: new Set(),
     favoriteFolderDeleteEmptyOnly: true,
+    updateInstallUrl: '',
     latestScriptVersion: loadUpdateCheckSnapshot().latestVersion || '',
     updateAvailable: compareScriptVersions(loadUpdateCheckSnapshot().latestVersion, SCRIPT_VERSION) > 0,
     updateChecking: false,
@@ -2485,7 +2581,7 @@ roleStateReady = true;
       return;
     }
     if (!state.manualFavoriteChats.length) {
-      state.status = '普通待聊列表为空，没有需要一键扣数的角色。';
+      state.status = '普通待聊为空。可在「网站角色」勾选已收藏角色，再点「加入普通待聊」。';
       render();
       return;
     }
@@ -6677,17 +6773,16 @@ roleStateReady = true;
     }
   }
 
-  function favoriteFolderCharacterRows(body) {
+  function favoriteFolderCharacterLists(body) {
     const data = body?.data;
-    const candidates = [
+    return [
       data?.characters, data?.data, data?.items, data?.list, data?.rows,
-      body?.characters, body?.items, body?.list, body?.rows
-    ];
-    return candidates.find(rows => Array.isArray(rows)) || [];
+      body?.characters, body?.items, body?.list, body?.rows, data
+    ].filter(Array.isArray);
   }
 
   function favoriteFolderCharacterIds(body) {
-    return new Set(favoriteFolderCharacterRows(body).map(item => String(
+    return new Set((favoriteFolderCharacterLists(body)[0] || []).map(item => String(
       item?.characterId || item?.characterID || item?.roleId || item?.id
         || item?.character?.id || item?.character?.characterId || item?.character?.characterID || ''
     ).trim()).filter(Boolean));
@@ -6747,8 +6842,22 @@ roleStateReady = true;
   }
 
   function favoriteFolderCount(folder) {
-    const value = folder?._characterCount ?? folder?.characterCount ?? folder?.charactersCount ?? folder?.count ?? folder?.total ?? folder?.characterNum;
-    return Number.isFinite(Number(value)) ? Number(value) : null;
+    for (const value of [folder?._characterCount, folder?.characterCount, folder?.charactersCount,
+      folder?.characterCnt, folder?.characterNum, folder?.character_count, folder?.characters_count, folder?.roleCount, folder?.role_count]) {
+      if (typeof value !== 'number' && (typeof value !== 'string' || !/^\d+$/.test(value.trim()))) continue;
+      const count = Number(value);
+      if (Number.isSafeInteger(count) && count >= 0) return count;
+    }
+    return null;
+  }
+
+  function verifiedFavoriteFolderDetailCount(body) {
+    if (!body || (body.code != null && Number(body.code) !== 200)) return null;
+    const counts = [
+      favoriteFolderCount(body.data), favoriteFolderCount(body),
+      ...favoriteFolderCharacterLists(body).map(rows => rows.length)
+    ].filter(count => count != null);
+    return counts.length ? Math.max(...counts) : null;
   }
 
   function renderFavoriteFolderDeleteModal() {
@@ -6760,12 +6869,15 @@ roleStateReady = true;
     const emptyRows = rows.filter(folder => folder?._countVerified === true && favoriteFolderCount(folder) === 0);
     const visibleRows = state.favoriteFolderDeleteEmptyOnly ? emptyRows : rows;
     const selectedCount = rows.filter(folder => selected.has(favoriteFolderId(folder))).length;
+    const unverifiedCount = rows.filter(folder => folder?._countVerified !== true).length;
     if (state.favoriteFolderDeleteLoading && !rows.length) {
       list.innerHTML = '<div class="mufy-recovery-folder-delete-empty">正在读取收藏夹……</div>';
     } else if (!rows.length) {
       list.innerHTML = '<div class="mufy-recovery-folder-delete-empty">没有可删除的收藏夹</div>';
     } else if (!visibleRows.length) {
-      list.innerHTML = '<div class="mufy-recovery-folder-delete-empty">当前没有空收藏夹；关闭“只看空收藏夹”可管理全部收藏夹</div>';
+      list.innerHTML = unverifiedCount
+        ? '<div class="mufy-recovery-folder-delete-empty">暂未确认空收藏夹，部分数量未读到。可以重新打开重试。</div>'
+        : '<div class="mufy-recovery-folder-delete-empty">当前没有空收藏夹；关闭“只看空收藏夹”可管理全部收藏夹</div>';
     } else {
       list.innerHTML = visibleRows.map(folder => {
         const id = favoriteFolderId(folder);
@@ -6774,7 +6886,7 @@ roleStateReady = true;
       }).join('');
     }
     const summary = modal.querySelector('#mufy-recovery-folder-delete-summary');
-    if (summary) summary.textContent = `共 ${rows.length} 个收藏夹，其中空收藏夹 ${emptyRows.length} 个，已选择 ${selectedCount} 个。删除收藏夹不会取消其中角色的收藏。`;
+    if (summary) summary.textContent = `共 ${rows.length} 个收藏夹，其中空收藏夹 ${emptyRows.length} 个${unverifiedCount ? `，未核验 ${unverifiedCount} 个` : ''}，已选择 ${selectedCount} 个。删除收藏夹不会取消其中角色的收藏。`;
     const emptyOnly = modal.querySelector('#mufy-recovery-folder-delete-empty-only');
     if (emptyOnly) {
       emptyOnly.checked = state.favoriteFolderDeleteEmptyOnly;
@@ -6817,19 +6929,28 @@ roleStateReady = true;
         if (id && !unique.has(id)) unique.set(id, folder);
       });
       const folderRows = [...unique.values()];
+      const detailRows = folderRows.filter(folder => {
+        const count = favoriteFolderCount(folder);
+        if (count == null) return true;
+        folder._characterCount = count;
+        folder._countVerified = true;
+        return false;
+      });
       let nextFolderIndex = 0;
-      let completedFolders = 0;
+      let completedFolders = folderRows.length - detailRows.length;
       let rateLimited = false;
       const scanWorker = async () => {
         while (!rateLimited) {
           const index = nextFolderIndex;
           nextFolderIndex += 1;
-          if (index >= folderRows.length) return;
-          const folder = folderRows[index];
+          if (index >= detailRows.length) return;
+          const folder = detailRows[index];
           try {
             const body = await requestFavoriteFolder(favoriteFolderId(folder));
-            folder._characterCount = favoriteFolderCharacterIds(body).size;
-            folder._countVerified = true;
+            const count = verifiedFavoriteFolderDetailCount(body);
+            folder._characterCount = count;
+            folder._countVerified = count != null;
+            if (count == null) folder._countError = '接口未提供可核验的角色数量';
           } catch (error) {
             folder._countVerified = false;
             folder._countError = explainFailure(error);
@@ -6841,9 +6962,10 @@ roleStateReady = true;
             const status = panel?.querySelector('#mufy-recovery-status');
             if (status) status.textContent = state.status;
           }
+          if (!rateLimited && nextFolderIndex < detailRows.length) await wait(250);
         }
       };
-      const workerCount = Math.min(4, folderRows.length);
+      const workerCount = Math.min(2, detailRows.length);
       await Promise.all(Array.from({ length: workerCount }, () => scanWorker()));
       state.favoriteFolderDeleteRows = folderRows;
       const emptyCount = folderRows.filter(folder => folder?._countVerified === true && favoriteFolderCount(folder) === 0).length;
@@ -6887,7 +7009,7 @@ roleStateReady = true;
     }
   }
 
-  async function deleteSelectedFavoriteFolders() {
+  async function deleteSelectedFavoriteFolders(onlyEmpty = false) {
     if (state.favoriteFolderDeleteLoading) return;
     const targets = state.favoriteFolderDeleteRows.filter(folder => state.selectedFavoriteFolderIds.has(favoriteFolderId(folder)));
     if (!targets.length) return;
@@ -6909,6 +7031,12 @@ roleStateReady = true;
       state.status = `正在删除收藏夹 ${index + 1}/${targets.length}：“${favoriteFolderName(folder)}”……`;
       render();
       try {
+        if (onlyEmpty === true) {
+          const count = verifiedFavoriteFolderDetailCount(await requestFavoriteFolder(id));
+          folder._characterCount = count;
+          folder._countVerified = count != null;
+          if (count !== 0) throw new Error(count == null ? '无法确认收藏夹为空' : '复核发现收藏夹仍有角色');
+        }
         await deleteFavoriteFolder(id);
         deletedIds.add(id);
         appendRunLog('info', `已删除收藏夹：${favoriteFolderName(folder)}`, { folderId: id });
@@ -6944,7 +7072,7 @@ roleStateReady = true;
     state.selectedFavoriteFolderIds.clear();
     emptyRows.forEach(folder => state.selectedFavoriteFolderIds.add(favoriteFolderId(folder)));
     renderFavoriteFolderDeleteModal();
-    await deleteSelectedFavoriteFolders();
+    await deleteSelectedFavoriteFolders(true);
   }
 
   function loadAuthorFolderMap() {
@@ -7417,15 +7545,10 @@ roleStateReady = true;
   }
 
   async function finishShareFavoriteJob(job) {
-    const manualRows = new Map(state.manualFavoriteChats.map(row => [String(row.characterId), row]));
-    (job.normalFallback || []).forEach(item => {
-      const source = (job.rows || []).find(row => String(row.characterId) === String(item.characterId));
-      if (source && (job.favoritedIds || []).some(id => String(id) === String(item.characterId)) && !state.chatted.some(row => String(row.characterId) === String(item.characterId))) {
-        manualRows.set(String(item.characterId), { ...source, isFavorite: true, favoriteKnown: true, manualChatAddedAt: new Date().toISOString() });
-      }
-    });
-    state.manualFavoriteChats = [...manualRows.values()];
-    saveManualFavoriteChats(state.manualFavoriteChats);
+    const normalIds = new Set((job.normalFallback || []).map(item => String(item.characterId)));
+    const favoritedIds = new Set((job.favoritedIds || []).map(String));
+    const manualRows = (job.rows || []).filter(row => normalIds.has(String(row.characterId)) && favoritedIds.has(String(row.characterId)));
+    if (manualRows.length && (!job.accountScope || job.accountScope === maskAccountScope)) enqueueManualFavoriteChats(manualRows);
     const result = {
       label: job.label,
       shareSuccess: job.shareSuccess || 0,
@@ -7573,6 +7696,7 @@ roleStateReady = true;
           applyFavoriteState(row.characterId, true);
           job.favoritedIds = [...new Set([...(job.favoritedIds || []), String(row.characterId)])];
           job.normalSuccess = (job.normalSuccess || 0) + 1;
+          if (!job.accountScope || job.accountScope === maskAccountScope) enqueueManualFavoriteChats([row]);
           job.index += 1;
           job.activeCharacterId = '';
           job.activeShareCode = '';
@@ -8137,6 +8261,21 @@ roleStateReady = true;
     render();
   }
 
+  function queueSelectedSiteRowsForChat() {
+    if (!maskAccountScope) {
+      state.status = '请先登录 Mufy，打开一个角色页面识别账号后再加入普通待聊。';
+      render();
+      return;
+    }
+    const rows = selectedSiteRows().filter(row => row.favoriteKnown === true && row.isFavorite);
+    const added = enqueueManualFavoriteChats(rows);
+    state.status = added == null ? '普通待聊保存失败，请检查浏览器存储后重试。'
+      : added ? `已将 ${added} 个已收藏角色加入普通待聊。`
+      : '选中的已收藏角色已在待聊列表里，或已经聊过。';
+    if (added) state.active = 'manualFavoriteChats';
+    render();
+  }
+
   async function favoriteSelectedSiteRows() {
     if (state.favoriteRunning || state.shareRecoveryLoading || state.siteFavoriteStateLoading) return;
     const selected = selectedSiteRows();
@@ -8267,6 +8406,7 @@ roleStateReady = true;
 
   const CHAT_EXPORT_FAST_PAGE_SIZE = 100;
   const CHAT_EXPORT_SAFE_PAGE_SIZE = 16;
+  const CHAT_EXPORT_PART_SIZE = 100;
 
   function dialogRowsFromPage(data) {
     if (Array.isArray(data)) return data;
@@ -8353,6 +8493,267 @@ roleStateReady = true;
       totals: [...totals].sort((a, b) => a - b),
       pageSize
     };
+  }
+
+
+  const CHAT_BACKUP_STORE = 'sessions';
+  let chatBackupDatabase;
+  let chatBackupBusy = false;
+  let chatBackupTimer = 0;
+
+  function chatBackupContext() {
+    const { characterId, sessionId } = currentRoleContext();
+    if (pageWindow.location.pathname !== '/chat' || !maskAccountScope || !characterId || !sessionId) return null;
+    return { characterId, sessionId, key: JSON.stringify([maskAccountScope, characterId, sessionId]) };
+  }
+
+  function openChatBackupDatabase() {
+    if (!chatBackupDatabase) {
+      const request = pageWindow.indexedDB.open('mufy-recovery-chat-backup', 1);
+      request.onupgradeneeded = () => request.result.createObjectStore(CHAT_BACKUP_STORE, { keyPath: 'key' });
+      chatBackupDatabase = requestResult(request).catch(error => {
+        chatBackupDatabase = null;
+        throw error;
+      });
+    }
+    return chatBackupDatabase;
+  }
+
+  async function chatBackupRecord(context, record) {
+    const database = await openChatBackupDatabase();
+    const transaction = database.transaction(CHAT_BACKUP_STORE, record ? 'readwrite' : 'readonly');
+    const store = transaction.objectStore(CHAT_BACKUP_STORE);
+    const done = transactionDone(transaction);
+    const result = requestResult(record ? store.put(record) : store.get(context.key));
+    const [value] = await Promise.all([result, done]);
+    return value;
+  }
+
+  function chatBackupDialogKey(row) {
+    return JSON.stringify([row.dialogsId || row.dialogId || row.id || '', row.role || '',
+      row.createdTime || row.updatedTime || '', row.content ?? null]);
+  }
+
+  async function chatBackupCursor(row) {
+    const bytes = new TextEncoder().encode(chatBackupDialogKey(row));
+    const hash = await pageWindow.crypto.subtle.digest('SHA-256', bytes);
+    return Array.from(new Uint8Array(hash), byte => byte.toString(16).padStart(2, '0')).join('');
+  }
+
+  function chatBackupReplyCount(rows) {
+    return rows.filter(row => row.role === 'assistant').length;
+  }
+
+  function setChatBackupNotice(context, message) {
+    if (chatBackupContext()?.key !== context.key) return;
+    const notice = panel?.querySelector('#mufy-recovery-chat-backup-status');
+    if (notice) notice.textContent = message;
+  }
+
+  async function withChatBackupLock(task, showErrors = false) {
+    const context = chatBackupContext();
+    if (!context || chatBackupBusy) return;
+    const locks = pageWindow.navigator.locks;
+    if (!locks) {
+      if (showErrors) setChatBackupNotice(context, '这个浏览器无法安全协调多个标签页，当前无法启用自动分卷。');
+      return;
+    }
+    chatBackupBusy = true;
+    try {
+      await locks.request('mufy-chat-backup:' + context.key, async () => {
+        if (chatBackupContext()?.key !== context.key) return;
+        await task(context, await chatBackupRecord(context));
+      });
+    } catch (error) {
+      if (showErrors) setChatBackupNotice(context, '备份操作未完成。请确认仍在登录，并检查保存目录。');
+      appendRunLog('warn', '自动聊天备份操作未完成', error);
+    } finally {
+      chatBackupBusy = false;
+    }
+  }
+
+  async function readChatBackupDelta(context, cursor, baseline = false) {
+    const rows = [];
+    const seen = new Set();
+    const maxPages = baseline ? 1 : 24;
+    let latest = '';
+    for (let page = 1; page <= maxPages; page += 1) {
+      const data = await requestDialogPage(context, page, CHAT_EXPORT_SAFE_PAGE_SIZE);
+      const pageRows = dialogRowsFromPage(data);
+      for (const row of pageRows) {
+        if (!row || typeof row !== 'object') continue;
+        const key = await chatBackupCursor(row);
+        if (!latest) latest = key;
+        if (cursor && key === cursor) return { rows: rows.reverse(), cursor: latest };
+        if (!seen.has(key)) {
+          seen.add(key);
+          rows.push(row);
+        }
+      }
+      if (baseline) return { rows: [], cursor: latest };
+      if ((data?.hasNext ?? data?.hasMore) === false || !pageRows.length) {
+        return cursor ? null : { rows: rows.reverse(), cursor: latest };
+      }
+      await wait(80);
+    }
+    return null;
+  }
+
+  function chatBackupCharacterName(context) {
+    const known = [...state.chatted, ...state.favoriteOnly, ...state.roleHistory, ...state.siteSearchRows]
+      .find(row => String(row?.characterId || '') === context.characterId);
+    return known?.name || document.querySelector('h1,h2')?.textContent?.trim() || '当前角色';
+  }
+
+  async function writeChatBackupVolume(context, record, count, manual) {
+    const rows = record.rows.slice(0, count);
+    const rounds = chatBackupReplyCount(rows);
+    const number = String(record.volume).padStart(3, '0');
+    const name = `Mufy-${chatExportName(record.name)}-${record.startedAt}-卷${number}.zip`;
+    const files = makeChatExportFiles({
+      rows,
+      backupNote: `本地增量备份 · 第 ${record.volume} 卷 · ${rounds} 条角色回复 · 会话内已备份消息 ${record.saved + 1}–${record.saved + rows.length}`
+    }, record.name);
+    const blob = storedZip(files);
+    if (record.directory && await record.directory.queryPermission({ mode: 'readwrite' }) === 'granted') {
+      const handle = await record.directory.getFileHandle(name, { create: true });
+      const writer = await handle.createWritable();
+      try {
+        await writer.write(blob);
+        await writer.close();
+      } catch (error) {
+        try { await writer.abort(); } catch (_) {}
+        throw error;
+      }
+      if ((await handle.getFile()).size !== blob.size) throw new Error('备份文件大小校验失败');
+    } else {
+      if (record.directory && !manual) return false;
+      record.pending = count;
+      await chatBackupRecord(context, record);
+      downloadBlob(name, blob);
+      return false;
+    }
+    record.rows = record.rows.slice(count);
+    record.saved += count;
+    record.volume += 1;
+    record.pending = 0;
+    await chatBackupRecord(context, record);
+    return true;
+  }
+
+  function showChatBackupRecord(context, record) {
+    if (chatBackupContext()?.key !== context.key) return;
+    const controls = panel?.querySelector('#mufy-recovery-chat-backup');
+    if (!controls) return;
+    const confirm = controls.querySelector('[data-backup-confirm]');
+    confirm.hidden = !record?.pending;
+    controls.querySelector('[data-backup-toggle]').textContent = record?.enabled ? '暂停备份' : '开始备份';
+    if (document.activeElement !== controls.querySelector('input') && record?.rounds) {
+      controls.querySelector('input').value = record.rounds;
+    }
+    const count = chatBackupReplyCount(record?.rows || []);
+    const saved = (record?.volume || 1) - 1;
+    const folder = record?.pending ? '下载后请确认已保存，可重试下载' : record?.directory ? '已选目录' : '浏览器下载模式';
+    setChatBackupNotice(context, `${record?.enabled ? '备份中' : '备份已暂停'} · 待保存 ${count} 轮 · 已保存 ${saved} 卷 · ${folder}`);
+  }
+
+  async function pollChatBackup() {
+    if (document.visibilityState === 'hidden' || state.chatExportLoading || pendingAccountSwitch()) return;
+    await withChatBackupLock(async (context, record) => {
+      if (!record?.enabled) {
+        if (record) showChatBackupRecord(context, record);
+        return;
+      }
+      const update = await readChatBackupDelta(context, record.cursor);
+      if (chatBackupContext()?.key !== context.key) return;
+      if (!update) {
+        setChatBackupNotice(context, '找不到上次的接续位置，已保留待保存内容。');
+        return;
+      }
+      if (update.cursor && update.cursor !== record.cursor) {
+        record.cursor = update.cursor;
+        record.rows.push(...update.rows);
+        await chatBackupRecord(context, record);
+      }
+      if (!record.pending) {
+        let replies = 0;
+        const end = record.rows.findIndex(row => row.role === 'assistant' && ++replies === record.rounds);
+        if (end >= 0) {
+          const saved = await writeChatBackupVolume(context, record, end + 1, false);
+          if (!saved && !record.pending) {
+            setChatBackupNotice(context, '保存目录需要重新授权。已保留浏览器里的待保存内容。');
+            return;
+          }
+        }
+      }
+      showChatBackupRecord(context, record);
+    }, true);
+  }
+
+  function installChatBackupControls(controls) {
+    const threshold = controls.querySelector('input');
+    controls.querySelector('[data-backup-toggle]').onclick = () => withChatBackupLock(async (context, record) => {
+      if (!record) {
+        const baseline = await readChatBackupDelta(context, '', true);
+        if (chatBackupContext()?.key !== context.key) return;
+        record = { key: context.key, cursor: baseline.cursor, rows: [], startedAt: Date.now(),
+          volume: 1, saved: 0, pending: 0, name: chatBackupCharacterName(context) };
+      }
+      record.enabled = !record.enabled;
+      record.rounds = Math.max(1, Math.min(1000, Math.floor(Number(threshold.value)) || 100));
+      await chatBackupRecord(context, record);
+      showChatBackupRecord(context, record);
+    }, true);
+    controls.querySelector('[data-backup-folder]').onclick = async () => {
+      const context = chatBackupContext();
+      if (!context) return;
+      if (typeof pageWindow.showDirectoryPicker !== 'function') {
+        setChatBackupNotice(context, '这个浏览器不能自动写入目录。备份会保留，下载后可手动确认清理。');
+        return;
+      }
+      try {
+        const directory = await pageWindow.showDirectoryPicker({ mode: 'readwrite' });
+        if (chatBackupContext()?.key !== context.key) return;
+        await withChatBackupLock(async (current, record) => {
+          if (!record) {
+            setChatBackupNotice(current, '请先点「开始备份」，再选择保存目录。');
+            return;
+          }
+          record.directory = directory;
+          await chatBackupRecord(current, record);
+          showChatBackupRecord(current, record);
+        }, true);
+      } catch (error) {
+        if (error?.name !== 'AbortError') setChatBackupNotice(context, '无法使用此目录。待保存内容仍在浏览器里。');
+      }
+    };
+    controls.querySelector('[data-backup-export]').onclick = () => withChatBackupLock(async (context, record) => {
+      if (!record?.rows.length) {
+        setChatBackupNotice(context, '当前会话还没有待保存的新消息。');
+        return;
+      }
+      const replies = chatBackupReplyCount(record.rows);
+      let count = record.pending || record.rows.length;
+      if (!record.pending && replies >= record.rounds) {
+        let seen = 0;
+        count = record.rows.findIndex(row => row.role === 'assistant' && ++seen === record.rounds) + 1;
+      }
+      await writeChatBackupVolume(context, record, count, true);
+      showChatBackupRecord(context, record);
+    }, true);
+    controls.querySelector('[data-backup-confirm]').onclick = () => withChatBackupLock(async (context, record) => {
+      if (!record?.pending || !pageWindow.confirm('确认 ZIP 已下载并能打开？确认后会清理这卷已导出的浏览器正文。')) return;
+      record.rows = record.rows.slice(record.pending);
+      record.saved += record.pending;
+      record.volume += 1;
+      record.pending = 0;
+      await chatBackupRecord(context, record);
+      showChatBackupRecord(context, record);
+    }, true);
+    clearInterval(chatBackupTimer);
+    chatBackupTimer = setInterval(pollChatBackup, 25000);
+    addMountedGlobalListener(document, 'visibilitychange', pollChatBackup);
+    setTimeout(pollChatBackup, 1000);
   }
 
   function plainDialogContent(row) {
@@ -8662,27 +9063,43 @@ roleStateReady = true;
     return String(value || '当前聊天').replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 60) || '当前聊天';
   }
 
-  function makeChatExportFiles(result, context, characterName) {
-    const exportedAt = new Date().toISOString();
-    const warning = result.complete
+  function makeChatExportFiles(result, characterName) {
+    const exportedAt = new Date().toLocaleString('zh-CN');
+    const warning = result.backupNote || (result.complete
       ? '完整性校验通过：已到达分页末尾，去重后的消息数与服务器 total 完全一致。'
-      : '警告：完整性校验未通过。页面仍保留已读取内容，但不能视为完整导出。';
-    const checkText = `分页末尾：${result.reachedEnd ? '已到达' : '未确认'} · 数量一致：${result.countMatchesTotal ? '是' : '否'} · 总数稳定：${result.totals.length === 1 ? '是' : '否'} · 去重：${result.duplicates} 条`;
-    const text = [
-      `角色：${characterName}`,
-      `导出时间：${new Date(exportedAt).toLocaleString('zh-CN')}`,
-      `消息：${result.rows.length}/${result.expectedTotal ?? '未知'}`,
-      warning,
-      checkText,
-      '',
-      ...result.rows.flatMap(row => [`[${row.createdTime || row.updatedTime || ''}] ${chatRoleLabel(row.role)}`, plainDialogContent(row), ''])
-    ].join('\n');
-    const articles = result.rows.map(row => `<article class="message ${esc(row.role || '')}"><header><b>${esc(chatRoleLabel(row.role))}</b><time>${esc(row.createdTime || row.updatedTime || '')}</time></header><div class="content">${safeDialogHtml(row)}</div></article>`).join('\n');
-    const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(characterName)} - Mufy 聊天导出</title><style>body{max-width:960px;margin:auto;padding:24px;background:#17171b;color:#eee;font:15px/1.65 system-ui}h1{font-size:22px}.summary,.message{padding:14px 16px;margin:12px 0;border:1px solid #444;border-radius:10px;background:#23232a}.summary.ok{border-color:#398b5d}.summary.warn{border-color:#b88435}.checks{margin-top:8px;color:#aaa;font-size:12px}.message header{display:flex;justify-content:space-between;gap:12px;color:#bdb8ef}.message.user{border-left:4px solid #6d9df7}.message.assistant{border-left:4px solid #a879e8}.content{overflow-wrap:anywhere}.content img{max-width:100%;height:auto}time{font-size:12px;color:#999}pre{white-space:pre-wrap}@media(max-width:600px){body{padding:10px}.message{padding:11px 12px}}</style></head><body><h1>${esc(characterName)}</h1><section class="summary ${result.complete ? 'ok' : 'warn'}"><b>${esc(warning)}</b><div>消息：${result.rows.length}/${result.expectedTotal ?? '未知'} · 导出：${esc(new Date(exportedAt).toLocaleString('zh-CN'))}</div><div class="checks">${esc(checkText)}</div></section>${articles}</body></html>`;
-    return [
-      { name: '聊天记录.html', content: html },
-      { name: '聊天记录.txt', content: text }
-    ];
+      : '警告：完整性校验未通过。页面仍保留已读取内容，但不能视为完整导出。');
+    const checkText = result.backupNote ? '增量备份从开启时起接续保存。' : `分页末尾：${result.reachedEnd ? '已到达' : '未确认'} · 数量一致：${result.countMatchesTotal ? '是' : '否'} · 总数稳定：${result.totals.length === 1 ? '是' : '否'} · 去重：${result.duplicates} 条`;
+    const files = [];
+    const partCount = Math.max(1, Math.ceil(result.rows.length / CHAT_EXPORT_PART_SIZE));
+    const partDigits = Math.max(2, String(partCount).length);
+    const messageDigits = Math.max(4, String(result.rows.length).length);
+    for (let part = 0; part < partCount; part += 1) {
+      const start = part * CHAT_EXPORT_PART_SIZE;
+      const rows = result.rows.slice(start, start + CHAT_EXPORT_PART_SIZE);
+      const partNumber = String(part + 1).padStart(partDigits, '0');
+      const firstMessage = String(start + 1).padStart(messageDigits, '0');
+      const lastMessage = String(start + rows.length).padStart(messageDigits, '0');
+      const range = rows.length ? `${firstMessage}-${lastMessage}` : '无消息';
+      const fileName = `聊天记录-${partNumber}-${range}`;
+      const partLabel = `第 ${part + 1}/${partCount} 份 · 导出消息序号 ${range}（本份 ${rows.length} 条）`;
+      const text = [
+        `角色：${characterName}`,
+        `导出时间：${exportedAt}`,
+        partLabel,
+        `消息：${result.rows.length}${result.backupNote ? '' : `/${result.expectedTotal ?? '未知'}`}`,
+        warning,
+        checkText,
+        '',
+        ...rows.flatMap((row, index) => [`#${start + index + 1} [${row.createdTime || row.updatedTime || ''}] ${chatRoleLabel(row.role)}`, plainDialogContent(row), ''])
+      ].join('\n');
+      const articles = rows.map((row, index) => `<article class="message ${esc(row.role || '')}"><header><b>#${start + index + 1} ${esc(chatRoleLabel(row.role))}</b><time>${esc(row.createdTime || row.updatedTime || '')}</time></header><div class="content">${safeDialogHtml(row)}</div></article>`).join('\n');
+      const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(characterName)} - Mufy 聊天导出</title><style>body{max-width:960px;margin:auto;padding:24px;background:#17171b;color:#eee;font:15px/1.65 system-ui}h1{font-size:22px}.summary,.message{padding:14px 16px;margin:12px 0;border:1px solid #444;border-radius:10px;background:#23232a}.summary.ok{border-color:#398b5d}.summary.warn{border-color:#b88435}.checks{margin-top:8px;color:#aaa;font-size:12px}.message header{display:flex;justify-content:space-between;gap:12px;color:#bdb8ef}.message.user{border-left:4px solid #6d9df7}.message.assistant{border-left:4px solid #a879e8}.content{overflow-wrap:anywhere}.content img{max-width:100%;height:auto}time{font-size:12px;color:#999}pre{white-space:pre-wrap}@media(max-width:600px){body{padding:10px}.message{padding:11px 12px}}</style></head><body><h1>${esc(characterName)}</h1><section class="summary ${result.complete ? 'ok' : 'warn'}"><b>${esc(warning)}</b><div>${esc(partLabel)}</div><div>消息：${result.rows.length}${result.backupNote ? '' : `/${result.expectedTotal ?? '未知'}`} · 导出：${esc(exportedAt)}</div><div class="checks">${esc(checkText)}</div></section>${articles}</body></html>`;
+      files.push(
+        { name: `${fileName}.html`, content: html },
+        { name: `${fileName}.txt`, content: text }
+      );
+    }
+    return files;
   }
 
   async function exportCurrentChat() {
@@ -8715,12 +9132,13 @@ roleStateReady = true;
       const known = [...state.chatted, ...state.favoriteOnly, ...state.roleHistory, ...state.siteSearchRows]
         .find(row => String(row?.characterId || '') === context.characterId);
       const characterName = known?.name || document.querySelector('h1,h2')?.textContent?.trim() || '当前角色';
-      const files = makeChatExportFiles(result, context, characterName);
+      const files = makeChatExportFiles(result, characterName);
+      const partCount = files.length / 2;
       const date = new Date().toISOString().slice(0, 10);
       downloadBlob(`mufy-chat-${chatExportName(characterName)}-${date}.zip`, storedZip(files));
       state.status = result.complete
-        ? `当前聊天已完整导出：${result.rows.length}/${result.expectedTotal} 条，分页末尾和服务器总数校验均通过。`
-        : `聊天导出完成但校验未通过：读取 ${result.rows.length}/${result.expectedTotal ?? '未知'} 条；HTML 和 TXT 顶部均已标明不完整。`;
+        ? `当前聊天已完整导出：${result.rows.length}/${result.expectedTotal} 条，分为 ${partCount} 份，分页末尾和服务器总数校验均通过。`
+        : `聊天导出完成但校验未通过：读取 ${result.rows.length}/${result.expectedTotal ?? '未知'} 条，分为 ${partCount} 份；每份开头均已标明不完整。`;
       appendRunLog(result.complete ? 'info' : 'warn', state.status);
     } catch (error) {
       if (error?.name === 'AbortError' || state.chatExportStopRequested) state.status = '已停止聊天导出，未生成不完整文件。';
@@ -9886,6 +10304,11 @@ roleStateReady = true;
       const button = panel.querySelector(selector);
       if (button) button.disabled = state.favoriteRunning || state.shareRecoveryLoading || state.siteFavoriteStateLoading || !state.siteSearchRows.length;
     });
+    const queueForChat = panel.querySelector('#mufy-recovery-queue-site-for-chat');
+    if (queueForChat) {
+      queueForChat.disabled = state.favoriteRunning || state.siteFavoriteStateLoading
+        || !selectedSiteRows().some(row => row.favoriteKnown === true && row.isFavorite);
+    }
     const refreshFavoriteStates = panel.querySelector('#mufy-recovery-refresh-favorite-states');
     if (refreshFavoriteStates) {
       refreshFavoriteStates.hidden = !isAuthorProfilePage();
@@ -10964,7 +11387,7 @@ roleStateReady = true;
           </div>
           <div id="mufy-recovery-favorite-actions"><button id="mufy-recovery-folder-organize">按作者整理</button><button id="mufy-recovery-folder-manage">新建 / 删除收藏夹</button><button id="mufy-recovery-stop-action" hidden>停止找回</button></div>
           <label id="mufy-recovery-auto-folder-label"><input id="mufy-recovery-auto-add-favorite-folder" type="checkbox"><span>收藏后自动放入收藏夹<small>关闭后仍会正常收藏角色，只是不再自动按作者归入收藏夹；手动整理功能不受影响。</small></span></label>
-          <div id="mufy-recovery-site-actions"><button id="mufy-recovery-refresh-favorite-states">获取收藏状态</button><button id="mufy-recovery-select-unfavorite-site">全选未收藏</button><button id="mufy-recovery-clear-site-selection">清空勾选</button><button id="mufy-recovery-refresh-site-rows" title="刷新当前网站页面并重新捕获，之后翻页会继续自动获取">重新获取</button><button id="mufy-recovery-clear-site-rows">清空结果</button></div>
+          <div id="mufy-recovery-site-actions"><button id="mufy-recovery-refresh-favorite-states">获取收藏状态</button><button id="mufy-recovery-select-unfavorite-site">全选未收藏</button><button id="mufy-recovery-queue-site-for-chat">加入普通待聊</button><button id="mufy-recovery-clear-site-selection">清空勾选</button><button id="mufy-recovery-refresh-site-rows" title="刷新当前网站页面并重新捕获，之后翻页会继续自动获取">重新获取</button><button id="mufy-recovery-clear-site-rows">清空结果</button></div>
           <div id="mufy-recovery-manual-auto-actions" hidden><input id="mufy-recovery-manual-auto-message" type="text" maxlength="500" value="${esc(state.manualAutoChatMessage)}" aria-label="一键扣数发送内容"><label class="mufy-recovery-auto-delay">间隔 <input id="mufy-recovery-manual-auto-delay-min" type="number" min="0" max="300" step="1" value="${esc(state.manualAutoChatDelayMin)}" aria-label="随机冷却最短秒数">～<input id="mufy-recovery-manual-auto-delay-max" type="number" min="0" max="300" step="1" value="${esc(state.manualAutoChatDelayMax)}" aria-label="随机冷却最长秒数"> 秒</label><button id="mufy-recovery-manual-auto-start">一键扣数</button><button id="mufy-recovery-manual-auto-cancel" hidden>取消任务</button><button id="mufy-recovery-manual-chat-next" title="按普通待聊列表顺序打开角色；再次点击视为当前角色已处理并前往下一个">下一个</button></div>
         </div>
         <div id="mufy-recovery-chat-section" hidden>
@@ -10972,6 +11395,17 @@ roleStateReady = true;
             <div class="mufy-chat-query-row"><input id="mufy-recovery-chat-search-query" type="search" maxlength="500" placeholder="输入聊天关键词" aria-label="聊天关键词"><button id="mufy-recovery-chat-search" type="submit">搜索</button></div>
             <div class="mufy-chat-search-options"><label>范围 <select id="mufy-recovery-chat-search-scope"><option value="all">所有角色</option><option value="one">指定角色</option></select></label><label id="mufy-recovery-chat-search-role-label" hidden>角色 <select id="mufy-recovery-chat-search-role"></select></label></div>
           </form>
+          <details id="mufy-recovery-chat-backup">
+            <summary>自动分卷备份</summary>
+            <div class="mufy-chat-search-options">
+              <label>每 <input type="number" min="1" max="1000" step="1" value="100" aria-label="每卷轮数" style="width:5em"> 轮</label>
+              <button type="button" data-backup-toggle>开始备份</button>
+              <button type="button" data-backup-folder>选择保存目录</button>
+              <button type="button" data-backup-export>导出待保存</button>
+              <button type="button" data-backup-confirm hidden>确认已保存</button>
+            </div>
+            <div id="mufy-recovery-chat-backup-status" class="mufy-recovery-muted" aria-live="polite">进入具体聊天并登录后可启用。每条角色回复算一轮。</div>
+          </details>
           <div id="mufy-recovery-chat-result-count" class="mufy-recovery-muted">搜索结果 · 0</div>
         </div>
         <div id="mufy-recovery-account-section" hidden>
@@ -11101,6 +11535,7 @@ roleStateReady = true;
       roleMore.textContent = roleMoreOptions.hidden ? '▸ 更多' : '▾ 更多';
     };
     panel.querySelector('#mufy-recovery-export-chat').onclick = exportCurrentChat;
+    installChatBackupControls(panel.querySelector('#mufy-recovery-chat-backup'));
     panel.querySelector('#mufy-recovery-quote-entry').onclick = openQuoteLibraryModal;
     const panelBeautyModal = panel.querySelector('#mufy-recovery-panel-beauty-modal');
     const closePanelBeauty = () => { panelBeautyModal.hidden = true; };
@@ -11257,7 +11692,7 @@ roleStateReady = true;
       const markButton = event.target.closest?.('[data-account-mark-current]');
       if (markButton) { markSavedAccountCurrent(String(markButton.dataset.accountMarkCurrent || '')); return; }
       const switchButton = event.target.closest?.('[data-account-switch]');
-      if (switchButton) { switchToSavedAccount(String(switchButton.dataset.accountSwitch || '')); return; }
+      if (switchButton) { switchToSavedAccount(String(switchButton.dataset.accountSwitch || ''), switchButton.hasAttribute('data-account-retry')); return; }
       const modeButton = event.target.closest?.('[data-account-mode]');
       if (modeButton) { toggleAccountLoginMode(String(modeButton.dataset.accountMode || '')); return; }
       const editButton = event.target.closest?.('[data-account-edit]');
@@ -11302,8 +11737,9 @@ roleStateReady = true;
       openModelMonitor();
     };
     panel.querySelector('#mufy-recovery-history-entry').onclick = () => {
+      const isIndexOpen = state.section === 'roles' && state.active === 'roleHistory';
       state.section = 'roles';
-      state.active = 'roleHistory';
+      state.active = isIndexOpen ? 'allRoles' : 'roleHistory';
       state.roleQuery = '';
       render();
     };
@@ -11443,6 +11879,7 @@ roleStateReady = true;
       searchRolesByChatRecord();
     };
     panel.querySelector('#mufy-recovery-refresh-favorite-states').onclick = refreshCapturedFavoriteStates;
+    panel.querySelector('#mufy-recovery-queue-site-for-chat').onclick = queueSelectedSiteRowsForChat;
     panel.querySelector('#mufy-recovery-site-manage').onclick = () => {
       state.siteRoleManaging = !state.siteRoleManaging;
       render();
@@ -11474,7 +11911,7 @@ roleStateReady = true;
       button.onclick = () => {
         const nextSection = button.dataset.section;
         state.section = ['roles', 'favorites', 'chats', 'accounts', 'materials', 'masks'].includes(nextSection) ? nextSection : 'roles';
-        if (state.section === 'roles' && !['allRoles', 'chatted', 'chattedNotFavorite', 'favoriteOnly', 'roleHistory', 'authors'].includes(state.active)) state.active = 'allRoles';
+        if (state.section === 'roles' && !['allRoles', 'chatted', 'chattedNotFavorite', 'favoriteOnly', 'authors'].includes(state.active)) state.active = 'allRoles';
         if (state.section === 'favorites' && !['manualFavoriteChats', 'siteSearch', 'siteAuthors'].includes(state.active)) state.active = 'manualFavoriteChats';
         if (state.section === 'chats' && state.active !== 'chatMatches') state.active = 'chatMatches';
         if (state.section === 'chats') refreshChatSearchDialogRoles();
