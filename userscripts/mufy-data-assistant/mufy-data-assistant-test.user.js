@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.116
+// @version      3.0.0-dev.117
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,7 +21,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.116';
+    : '3.0.0-dev.117';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -1096,6 +1096,7 @@
   function normalizeRoleCacheSnapshot(cached) {
     if (!cached || typeof cached !== 'object' || !Array.isArray(cached.chatted)) return null;
     const valid = value => Array.isArray(value) ? value.filter(row => row && row.characterId).map(row => {
+      row = clearLegacyRoleInteractionTime(row);
       if (typeof row.favoriteKnown === 'boolean') return row;
       const favoriteState = favoriteStatusFrom(row);
       return {
@@ -3448,14 +3449,23 @@ roleStateReady = true;
     return true;
   }
 
+  function clearLegacyRoleInteractionTime(row) {
+    return row.lastInteracted && row.interactionTimeVerified !== true && !row.archive
+      ? { ...row, lastInteracted: '', interactionTimeVerified: false }
+      : row;
+  }
+
   function compactRoleHistoryRow(row, previous = null) {
     const characterId = String(row?.characterId || '').trim();
     if (!characterId) return null;
     const now = new Date().toISOString();
     const name = String(row?.name || '').trim();
     const authorName = String(row?.authorName || '').trim();
-    const incomingTime = Date.parse(String(row?.lastInteracted || '')) || 0;
-    const previousTime = Date.parse(String(previous?.lastInteracted || '')) || 0;
+    const incomingInteraction = row?.interactionTimeVerified === true ? row.lastInteracted : '';
+    const previousInteraction = previous?.interactionTimeVerified === true ? previous.lastInteracted : '';
+    const incomingTime = Date.parse(incomingInteraction) || 0;
+    const previousTime = Date.parse(previousInteraction) || 0;
+    const lastInteracted = incomingTime >= previousTime ? incomingInteraction : previousInteraction;
     const useIncomingSession = Boolean(row?.lastSessionId) && (!previous?.lastSessionId || incomingTime >= previousTime);
     return {
       characterId,
@@ -3464,7 +3474,8 @@ roleStateReady = true;
       authorId: String(row?.authorId || previous?.authorId || ''),
       tags: normalizeRoleTags(previous?.tags, row?.tags),
       lastSessionId: String(useIncomingSession ? row.lastSessionId : (previous?.lastSessionId || row?.lastSessionId || '')),
-      lastInteracted: String(incomingTime >= previousTime ? (row?.lastInteracted || previous?.lastInteracted || '') : previous?.lastInteracted || ''),
+      lastInteracted,
+      interactionTimeVerified: Boolean(lastInteracted),
       firstSeenAt: previous?.firstSeenAt || now,
       lastSeenAt: now
     };
@@ -3474,7 +3485,7 @@ roleStateReady = true;
     if (!scope) return [];
     const database = await openMaskDatabase();
     const record = await readMaskDatabaseRecord(database, `${ROLE_HISTORY_RECORD_PREFIX}${scope}`);
-    return Array.isArray(record?.rows) ? record.rows.filter(row => row?.characterId) : [];
+    return Array.isArray(record?.rows) ? record.rows.filter(row => row?.characterId).map(clearLegacyRoleInteractionTime) : [];
   }
 
   async function initializeRoleHistoryForAccount(scope) {
@@ -4051,6 +4062,9 @@ roleStateReady = true;
       || row?.createdBy || row?.createdByUser || character?.author || character?.authorInfo || character?.creator || character?.creatorInfo
       || character?.user || character?.userInfo || character?.owner || character?.createdBy || {};
     const value = (...keys) => keys.map(key => row?.[key] ?? character?.[key]).find(item => item != null && item !== '');
+    const lastInteracted = row?.interactionTimeVerified === false || row?.archive
+      ? ''
+      : [row?.lastChatAt, row?.lastInteracted].find(value => typeof value === 'string' && Number.isFinite(Date.parse(value))) || '';
     // 已经标准化过的记录必须保持幂等：favoriteKnown=false 表示来源没有提供收藏状态，
     // 不能因为内部补出的 isFavorite=false，在第二次 normalize 时变成“明确未收藏”。
     const favoriteState = row?.favoriteKnown === false
@@ -4063,7 +4077,8 @@ roleStateReady = true;
       lastSessionId: realChatSessionId(value('lastSessionId', 'sessionId')),
       name: String(value('name', 'characterName', 'character_name', 'roleName', 'role_name', 'charName', 'characterTitle', 'displayName', 'title') || '未命名角色'),
       avatarUrl: String(value('avatarUrl', 'avatar', 'imageUrl', 'coverUrl', 'cover', 'icon') || ''),
-      lastInteracted: String(value('lastInteracted', 'updatedAt', 'lastChatAt') || ''),
+      lastInteracted,
+      interactionTimeVerified: Boolean(lastInteracted),
       isFollowed: favoriteState === true,
       isFavorite: favoriteState === true,
       favoriteKnown: favoriteState !== null,
@@ -4134,13 +4149,18 @@ roleStateReady = true;
   function mergeRole(existing, incoming) {
     if (!incoming || typeof incoming !== 'object') return existing || {};
     if (!existing || typeof existing !== 'object') return normalize(incoming);
+    const previousInteraction = existing.interactionTimeVerified === true ? existing.lastInteracted : '';
+    const incomingInteraction = incoming.interactionTimeVerified === true ? incoming.lastInteracted : '';
+    const lastInteracted = (Date.parse(incomingInteraction) || 0) > (Date.parse(previousInteraction) || 0)
+      ? incomingInteraction : previousInteraction;
     return {
       ...existing,
       ...incoming,
       name: existing.name || incoming.name,
       avatarUrl: existing.avatarUrl || incoming.avatarUrl,
       lastSessionId: existing.lastSessionId || incoming.lastSessionId,
-      lastInteracted: existing.lastInteracted || incoming.lastInteracted,
+      lastInteracted,
+      interactionTimeVerified: Boolean(lastInteracted),
       authorId: existing.authorId || incoming.authorId,
       authorName: existing.authorName || incoming.authorName,
       tags: normalizeRoleTags(existing?.tags, incoming?.tags),
@@ -4370,16 +4390,6 @@ roleStateReady = true;
       favorite: text(source?.favorite),
       command: text(source?.command)
     };
-  }
-
-  function isOlderThanTwoMonths(dateText) {
-    const date = new Date(dateText);
-    if (Number.isNaN(date.getTime())) return false;
-    const boundary = new Date();
-    boundary.setMonth(boundary.getMonth() - 2);
-    boundary.setDate(1);
-    boundary.setHours(0, 0, 0, 0);
-    return date < boundary;
   }
 
   async function requestPage(pageNum, isFollowed, pageParameter = 'pageNum') {
@@ -6017,7 +6027,7 @@ roleStateReady = true;
       .filter(row => !chatted.has(row.characterId) && !row.lastSessionId)
       .map(row => [String(row.characterId), { ...row, isFavorite: true, isFollowed: true, favoriteKnown: true }])).values()];
     const nextChatted = [...chatted.values()]
-      .sort((a, b) => new Date(b.lastInteracted) - new Date(a.lastInteracted));
+      .sort((a, b) => (Date.parse(b.lastInteracted) || 0) - (Date.parse(a.lastInteracted) || 0));
     state.chatted = nextChatted;
     // 普通待聊只保留尚未出现在会话列表中的角色；
     // 用户手动发送消息后，下一次读取角色链接即可自动从待办中移除。
@@ -6087,8 +6097,7 @@ roleStateReady = true;
       applyRoleFetchResults(state.rolePendingRecent, state.rolePendingFavorites, state.roleReadMode === 'full');
       saveRoleCache();
       const historySaved = await queueRoleHistoryPersist(state.rolePendingRecent);
-      const hidden = state.chatted.filter(row => isOlderThanTwoMonths(row.lastInteracted)).length;
-      state.status = `角色链接已经更新完毕：聊过 ${state.chatted.length} 个；聊过未收藏 ${state.chattedNotFavorite.length} 个；收藏未聊 ${state.favoriteOnly.length} 个${hidden ? `；旧会话约 ${hidden} 个` : ''}。${historySaved ? `本账号历史索引累计 ${state.roleHistory.length} 个角色。` : '历史索引未保存，请查看运行日志。'}`;
+      state.status = `角色链接已经更新完毕：聊过 ${state.chatted.length} 个；聊过未收藏 ${state.chattedNotFavorite.length} 个；收藏未聊 ${state.favoriteOnly.length} 个。${historySaved ? `本账号历史索引累计 ${state.roleHistory.length} 个角色。` : '历史索引未保存，请查看运行日志。'}`;
       promptMetadata = pendingMetadataRows().length > 0;
       state.rolePendingRecent = [];
       state.rolePendingFavorites = [];
@@ -9789,7 +9798,6 @@ roleStateReady = true;
   }
 
   function roleCard(row, index) {
-    const old = isOlderThanTwoMonths(row.lastInteracted);
     const binding = `<span class="mufy-recovery-mask-binding-info">${esc(characterMaskLabel(row))}</span>`;
     const hasLocalBinding = Boolean(localBindingForCharacter(row.characterId));
     const manualDoneButton = state.active === 'manualFavoriteChats' ? `<button data-action="manual-chat-done" data-character-id="${esc(row.characterId)}">已完成</button>` : '';
@@ -9823,11 +9831,11 @@ roleStateReady = true;
     return `<div class="mufy-recovery-row">
       ${row.avatarUrl ? `<img src="${esc(row.avatarUrl)}" alt="">` : ''}
       <div class="mufy-recovery-info">
-        <div class="mufy-recovery-row-title"><b>${index + 1}. ${esc(row.name)}</b>${old ? '<span class="mufy-recovery-old" title="记录时间较早，不能据此判断是否聊过">时间较早</span>' : ''}${rowTools}</div>
+        <div class="mufy-recovery-row-title"><b>${index + 1}. ${esc(row.name)}</b>${rowTools}</div>
         <div class="mufy-recovery-muted">作者：${esc(authorLabel(row))} ${visibilityBadge(row)}</div>
         ${state.section === 'roles'
-          ? `<details class="mufy-role-record"><summary>记录详情</summary><div>${esc(row.lastInteracted || '时间未知')} · ${esc(row.characterId)}</div></details>`
-          : `<div class="mufy-recovery-muted">${esc(row.lastInteracted || '时间未知')} · ${esc(row.characterId)}</div>`}
+          ? `<details class="mufy-role-record"><summary>记录详情</summary><div>${esc(row.characterId)}</div></details>`
+          : `<div class="mufy-recovery-muted">${esc(row.characterId)}</div>`}
         ${roleTagButtons(row)}
         ${matchSnippet}
         ${archiveList}
@@ -9841,7 +9849,6 @@ roleStateReady = true;
     return `<div class="mufy-recovery-row"><div class="mufy-recovery-info">
       <div class="mufy-recovery-row-title"><b>${index + 1}. ${esc(row.name || '未命名角色')}</b></div>
       <div class="mufy-recovery-muted">${esc(row.authorName || '作者未知')} · ${esc(row.characterId)}</div>
-      <div class="mufy-recovery-muted">最后记录：${esc(row.lastInteracted || row.lastSeenAt || '时间未知')}</div>
       ${roleTagButtons(row)}
       <div class="mufy-recovery-row-actions"><a href="${esc(roleUrl(row.characterId))}" rel="noreferrer">打开角色</a>${row.lastSessionId ? `<a href="${esc(sessionUrl(row))}" rel="noreferrer">打开记录的会话</a>` : ''}${shareCode ? `<a href="${esc(shareUrlFromCode(shareCode))}" rel="noreferrer">打开分享链接</a>` : ''}</div>
     </div></div>`;
@@ -11129,7 +11136,6 @@ roleStateReady = true;
       .mufy-recovery-mask-binding-info{color:#898995;font-size:10px;white-space:nowrap}
       .mufy-recovery-share-select{flex:none;border:0!important;background:transparent!important;color:#aaa1ff!important;font-size:18px!important;line-height:1;padding:2px 5px!important}
       .mufy-recovery-share-select.is-selected{color:#cabfff!important}
-      .mufy-recovery-old{display:inline-block;margin-left:7px;border-radius:10px;background:#614d30;color:#ffd99a;padding:1px 6px;font-size:10px}
       .mufy-recovery-empty{padding:22px;text-align:center;color:#999}
       .mufy-quote-action-separator{height:14px;width:1px;flex:none;border-radius:999px;background:#ffffff33}
       .mufy-quote-action-button{display:flex;align-items:center;gap:4px;padding-right:16px;color:#e9c77f;font-size:14px;line-height:1;cursor:pointer;white-space:nowrap;user-select:none}
