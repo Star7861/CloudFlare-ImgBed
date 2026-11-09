@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.106
+// @version      3.0.0-dev.107
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,7 +21,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.106';
+    : '3.0.0-dev.107';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -8356,6 +8356,267 @@ roleStateReady = true;
     };
   }
 
+
+  const CHAT_BACKUP_STORE = 'sessions';
+  let chatBackupDatabase;
+  let chatBackupBusy = false;
+  let chatBackupTimer = 0;
+
+  function chatBackupContext() {
+    const { characterId, sessionId } = currentRoleContext();
+    if (pageWindow.location.pathname !== '/chat' || !maskAccountScope || !characterId || !sessionId) return null;
+    return { characterId, sessionId, key: JSON.stringify([maskAccountScope, characterId, sessionId]) };
+  }
+
+  function openChatBackupDatabase() {
+    if (!chatBackupDatabase) {
+      const request = pageWindow.indexedDB.open('mufy-recovery-chat-backup', 1);
+      request.onupgradeneeded = () => request.result.createObjectStore(CHAT_BACKUP_STORE, { keyPath: 'key' });
+      chatBackupDatabase = requestResult(request).catch(error => {
+        chatBackupDatabase = null;
+        throw error;
+      });
+    }
+    return chatBackupDatabase;
+  }
+
+  async function chatBackupRecord(context, record) {
+    const database = await openChatBackupDatabase();
+    const transaction = database.transaction(CHAT_BACKUP_STORE, record ? 'readwrite' : 'readonly');
+    const store = transaction.objectStore(CHAT_BACKUP_STORE);
+    const done = transactionDone(transaction);
+    const result = requestResult(record ? store.put(record) : store.get(context.key));
+    const [value] = await Promise.all([result, done]);
+    return value;
+  }
+
+  function chatBackupDialogKey(row) {
+    return JSON.stringify([row.dialogsId || row.dialogId || row.id || '', row.role || '',
+      row.createdTime || row.updatedTime || '', row.content ?? null]);
+  }
+
+  async function chatBackupCursor(row) {
+    const bytes = new TextEncoder().encode(chatBackupDialogKey(row));
+    const hash = await pageWindow.crypto.subtle.digest('SHA-256', bytes);
+    return Array.from(new Uint8Array(hash), byte => byte.toString(16).padStart(2, '0')).join('');
+  }
+
+  function chatBackupReplyCount(rows) {
+    return rows.filter(row => row.role === 'assistant').length;
+  }
+
+  function setChatBackupNotice(context, message) {
+    if (chatBackupContext()?.key !== context.key) return;
+    const notice = panel?.querySelector('#mufy-recovery-chat-backup-status');
+    if (notice) notice.textContent = message;
+  }
+
+  async function withChatBackupLock(task, showErrors = false) {
+    const context = chatBackupContext();
+    if (!context || chatBackupBusy) return;
+    const locks = pageWindow.navigator.locks;
+    if (!locks) {
+      if (showErrors) setChatBackupNotice(context, '这个浏览器无法安全协调多个标签页，当前无法启用自动分卷。');
+      return;
+    }
+    chatBackupBusy = true;
+    try {
+      await locks.request('mufy-chat-backup:' + context.key, async () => {
+        if (chatBackupContext()?.key !== context.key) return;
+        await task(context, await chatBackupRecord(context));
+      });
+    } catch (error) {
+      if (showErrors) setChatBackupNotice(context, '备份操作未完成。请确认仍在登录，并检查保存目录。');
+      appendRunLog('warn', '自动聊天备份操作未完成', error);
+    } finally {
+      chatBackupBusy = false;
+    }
+  }
+
+  async function readChatBackupDelta(context, cursor, baseline = false) {
+    const rows = [];
+    const seen = new Set();
+    const maxPages = baseline ? 1 : 24;
+    let latest = '';
+    for (let page = 1; page <= maxPages; page += 1) {
+      const data = await requestDialogPage(context, page, CHAT_EXPORT_SAFE_PAGE_SIZE);
+      const pageRows = dialogRowsFromPage(data);
+      for (const row of pageRows) {
+        if (!row || typeof row !== 'object') continue;
+        const key = await chatBackupCursor(row);
+        if (!latest) latest = key;
+        if (cursor && key === cursor) return { rows: rows.reverse(), cursor: latest };
+        if (!seen.has(key)) {
+          seen.add(key);
+          rows.push(row);
+        }
+      }
+      if (baseline) return { rows: [], cursor: latest };
+      if ((data?.hasNext ?? data?.hasMore) === false || !pageRows.length) {
+        return cursor ? null : { rows: rows.reverse(), cursor: latest };
+      }
+      await wait(80);
+    }
+    return null;
+  }
+
+  function chatBackupCharacterName(context) {
+    const known = [...state.chatted, ...state.favoriteOnly, ...state.roleHistory, ...state.siteSearchRows]
+      .find(row => String(row?.characterId || '') === context.characterId);
+    return known?.name || document.querySelector('h1,h2')?.textContent?.trim() || '当前角色';
+  }
+
+  async function writeChatBackupVolume(context, record, count, manual) {
+    const rows = record.rows.slice(0, count);
+    const rounds = chatBackupReplyCount(rows);
+    const number = String(record.volume).padStart(3, '0');
+    const name = `Mufy-${chatExportName(record.name)}-${record.startedAt}-卷${number}.zip`;
+    const files = makeChatExportFiles({
+      rows,
+      backupNote: `本地增量备份 · 第 ${record.volume} 卷 · ${rounds} 条角色回复 · 会话内已备份消息 ${record.saved + 1}–${record.saved + rows.length}`
+    }, record.name);
+    const blob = storedZip(files);
+    if (record.directory && await record.directory.queryPermission({ mode: 'readwrite' }) === 'granted') {
+      const handle = await record.directory.getFileHandle(name, { create: true });
+      const writer = await handle.createWritable();
+      try {
+        await writer.write(blob);
+        await writer.close();
+      } catch (error) {
+        try { await writer.abort(); } catch (_) {}
+        throw error;
+      }
+      if ((await handle.getFile()).size !== blob.size) throw new Error('备份文件大小校验失败');
+    } else {
+      if (record.directory && !manual) return false;
+      record.pending = count;
+      await chatBackupRecord(context, record);
+      downloadBlob(name, blob);
+      return false;
+    }
+    record.rows = record.rows.slice(count);
+    record.saved += count;
+    record.volume += 1;
+    record.pending = 0;
+    await chatBackupRecord(context, record);
+    return true;
+  }
+
+  function showChatBackupRecord(context, record) {
+    if (chatBackupContext()?.key !== context.key) return;
+    const controls = panel?.querySelector('#mufy-recovery-chat-backup');
+    if (!controls) return;
+    const confirm = controls.querySelector('[data-backup-confirm]');
+    confirm.hidden = !record?.pending;
+    controls.querySelector('[data-backup-toggle]').textContent = record?.enabled ? '暂停备份' : '开始备份';
+    if (document.activeElement !== controls.querySelector('input') && record?.rounds) {
+      controls.querySelector('input').value = record.rounds;
+    }
+    const count = chatBackupReplyCount(record?.rows || []);
+    const saved = (record?.volume || 1) - 1;
+    const folder = record?.pending ? '下载后请确认已保存，可重试下载' : record?.directory ? '已选目录' : '浏览器下载模式';
+    setChatBackupNotice(context, `${record?.enabled ? '备份中' : '备份已暂停'} · 待保存 ${count} 轮 · 已保存 ${saved} 卷 · ${folder}`);
+  }
+
+  async function pollChatBackup() {
+    if (document.visibilityState === 'hidden' || state.chatExportLoading || pendingAccountSwitch()) return;
+    await withChatBackupLock(async (context, record) => {
+      if (!record?.enabled) {
+        if (record) showChatBackupRecord(context, record);
+        return;
+      }
+      const update = await readChatBackupDelta(context, record.cursor);
+      if (chatBackupContext()?.key !== context.key) return;
+      if (!update) {
+        setChatBackupNotice(context, '找不到上次的接续位置，已保留待保存内容。');
+        return;
+      }
+      if (update.cursor && update.cursor !== record.cursor) {
+        record.cursor = update.cursor;
+        record.rows.push(...update.rows);
+        await chatBackupRecord(context, record);
+      }
+      if (!record.pending) {
+        let replies = 0;
+        const end = record.rows.findIndex(row => row.role === 'assistant' && ++replies === record.rounds);
+        if (end >= 0) {
+          const saved = await writeChatBackupVolume(context, record, end + 1, false);
+          if (!saved && !record.pending) {
+            setChatBackupNotice(context, '保存目录需要重新授权。已保留浏览器里的待保存内容。');
+            return;
+          }
+        }
+      }
+      showChatBackupRecord(context, record);
+    }, true);
+  }
+
+  function installChatBackupControls(controls) {
+    const threshold = controls.querySelector('input');
+    controls.querySelector('[data-backup-toggle]').onclick = () => withChatBackupLock(async (context, record) => {
+      if (!record) {
+        const baseline = await readChatBackupDelta(context, '', true);
+        if (chatBackupContext()?.key !== context.key) return;
+        record = { key: context.key, cursor: baseline.cursor, rows: [], startedAt: Date.now(),
+          volume: 1, saved: 0, pending: 0, name: chatBackupCharacterName(context) };
+      }
+      record.enabled = !record.enabled;
+      record.rounds = Math.max(1, Math.min(1000, Math.floor(Number(threshold.value)) || 100));
+      await chatBackupRecord(context, record);
+      showChatBackupRecord(context, record);
+    }, true);
+    controls.querySelector('[data-backup-folder]').onclick = async () => {
+      const context = chatBackupContext();
+      if (!context) return;
+      if (typeof pageWindow.showDirectoryPicker !== 'function') {
+        setChatBackupNotice(context, '这个浏览器不能自动写入目录。备份会保留，下载后可手动确认清理。');
+        return;
+      }
+      try {
+        const directory = await pageWindow.showDirectoryPicker({ mode: 'readwrite' });
+        if (chatBackupContext()?.key !== context.key) return;
+        await withChatBackupLock(async (current, record) => {
+          if (!record) {
+            setChatBackupNotice(current, '请先点「开始备份」，再选择保存目录。');
+            return;
+          }
+          record.directory = directory;
+          await chatBackupRecord(current, record);
+          showChatBackupRecord(current, record);
+        }, true);
+      } catch (error) {
+        if (error?.name !== 'AbortError') setChatBackupNotice(context, '无法使用此目录。待保存内容仍在浏览器里。');
+      }
+    };
+    controls.querySelector('[data-backup-export]').onclick = () => withChatBackupLock(async (context, record) => {
+      if (!record?.rows.length) {
+        setChatBackupNotice(context, '当前会话还没有待保存的新消息。');
+        return;
+      }
+      const replies = chatBackupReplyCount(record.rows);
+      let count = record.pending || record.rows.length;
+      if (!record.pending && replies >= record.rounds) {
+        let seen = 0;
+        count = record.rows.findIndex(row => row.role === 'assistant' && ++seen === record.rounds) + 1;
+      }
+      await writeChatBackupVolume(context, record, count, true);
+      showChatBackupRecord(context, record);
+    }, true);
+    controls.querySelector('[data-backup-confirm]').onclick = () => withChatBackupLock(async (context, record) => {
+      if (!record?.pending || !pageWindow.confirm('确认 ZIP 已下载并能打开？确认后会清理这卷已导出的浏览器正文。')) return;
+      record.rows = record.rows.slice(record.pending);
+      record.saved += record.pending;
+      record.volume += 1;
+      record.pending = 0;
+      await chatBackupRecord(context, record);
+      showChatBackupRecord(context, record);
+    }, true);
+    clearInterval(chatBackupTimer);
+    chatBackupTimer = setInterval(pollChatBackup, 25000);
+    addMountedGlobalListener(document, 'visibilitychange', pollChatBackup);
+    setTimeout(pollChatBackup, 1000);
+  }
+
   function plainDialogContent(row) {
     const pieces = Array.isArray(row?.content) ? row.content : [row?.content];
     return pieces.filter(item => item != null).map(item => {
@@ -8665,10 +8926,10 @@ roleStateReady = true;
 
   function makeChatExportFiles(result, characterName) {
     const exportedAt = new Date().toLocaleString('zh-CN');
-    const warning = result.complete
+    const warning = result.backupNote || (result.complete
       ? '完整性校验通过：已到达分页末尾，去重后的消息数与服务器 total 完全一致。'
-      : '警告：完整性校验未通过。页面仍保留已读取内容，但不能视为完整导出。';
-    const checkText = `分页末尾：${result.reachedEnd ? '已到达' : '未确认'} · 数量一致：${result.countMatchesTotal ? '是' : '否'} · 总数稳定：${result.totals.length === 1 ? '是' : '否'} · 去重：${result.duplicates} 条`;
+      : '警告：完整性校验未通过。页面仍保留已读取内容，但不能视为完整导出。');
+    const checkText = result.backupNote ? '增量备份从开启时起接续保存。' : `分页末尾：${result.reachedEnd ? '已到达' : '未确认'} · 数量一致：${result.countMatchesTotal ? '是' : '否'} · 总数稳定：${result.totals.length === 1 ? '是' : '否'} · 去重：${result.duplicates} 条`;
     const files = [];
     const partCount = Math.max(1, Math.ceil(result.rows.length / CHAT_EXPORT_PART_SIZE));
     const partDigits = Math.max(2, String(partCount).length);
@@ -8686,14 +8947,14 @@ roleStateReady = true;
         `角色：${characterName}`,
         `导出时间：${exportedAt}`,
         partLabel,
-        `消息：${result.rows.length}/${result.expectedTotal ?? '未知'}`,
+        `消息：${result.rows.length}${result.backupNote ? '' : `/${result.expectedTotal ?? '未知'}`}`,
         warning,
         checkText,
         '',
         ...rows.flatMap((row, index) => [`#${start + index + 1} [${row.createdTime || row.updatedTime || ''}] ${chatRoleLabel(row.role)}`, plainDialogContent(row), ''])
       ].join('\n');
       const articles = rows.map((row, index) => `<article class="message ${esc(row.role || '')}"><header><b>#${start + index + 1} ${esc(chatRoleLabel(row.role))}</b><time>${esc(row.createdTime || row.updatedTime || '')}</time></header><div class="content">${safeDialogHtml(row)}</div></article>`).join('\n');
-      const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(characterName)} - Mufy 聊天导出</title><style>body{max-width:960px;margin:auto;padding:24px;background:#17171b;color:#eee;font:15px/1.65 system-ui}h1{font-size:22px}.summary,.message{padding:14px 16px;margin:12px 0;border:1px solid #444;border-radius:10px;background:#23232a}.summary.ok{border-color:#398b5d}.summary.warn{border-color:#b88435}.checks{margin-top:8px;color:#aaa;font-size:12px}.message header{display:flex;justify-content:space-between;gap:12px;color:#bdb8ef}.message.user{border-left:4px solid #6d9df7}.message.assistant{border-left:4px solid #a879e8}.content{overflow-wrap:anywhere}.content img{max-width:100%;height:auto}time{font-size:12px;color:#999}pre{white-space:pre-wrap}@media(max-width:600px){body{padding:10px}.message{padding:11px 12px}}</style></head><body><h1>${esc(characterName)}</h1><section class="summary ${result.complete ? 'ok' : 'warn'}"><b>${esc(warning)}</b><div>${esc(partLabel)}</div><div>消息：${result.rows.length}/${result.expectedTotal ?? '未知'} · 导出：${esc(exportedAt)}</div><div class="checks">${esc(checkText)}</div></section>${articles}</body></html>`;
+      const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(characterName)} - Mufy 聊天导出</title><style>body{max-width:960px;margin:auto;padding:24px;background:#17171b;color:#eee;font:15px/1.65 system-ui}h1{font-size:22px}.summary,.message{padding:14px 16px;margin:12px 0;border:1px solid #444;border-radius:10px;background:#23232a}.summary.ok{border-color:#398b5d}.summary.warn{border-color:#b88435}.checks{margin-top:8px;color:#aaa;font-size:12px}.message header{display:flex;justify-content:space-between;gap:12px;color:#bdb8ef}.message.user{border-left:4px solid #6d9df7}.message.assistant{border-left:4px solid #a879e8}.content{overflow-wrap:anywhere}.content img{max-width:100%;height:auto}time{font-size:12px;color:#999}pre{white-space:pre-wrap}@media(max-width:600px){body{padding:10px}.message{padding:11px 12px}}</style></head><body><h1>${esc(characterName)}</h1><section class="summary ${result.complete ? 'ok' : 'warn'}"><b>${esc(warning)}</b><div>${esc(partLabel)}</div><div>消息：${result.rows.length}${result.backupNote ? '' : `/${result.expectedTotal ?? '未知'}`} · 导出：${esc(exportedAt)}</div><div class="checks">${esc(checkText)}</div></section>${articles}</body></html>`;
       files.push(
         { name: `${fileName}.html`, content: html },
         { name: `${fileName}.txt`, content: text }
@@ -10990,6 +11251,17 @@ roleStateReady = true;
             <div class="mufy-chat-query-row"><input id="mufy-recovery-chat-search-query" type="search" maxlength="500" placeholder="输入聊天关键词" aria-label="聊天关键词"><button id="mufy-recovery-chat-search" type="submit">搜索</button></div>
             <div class="mufy-chat-search-options"><label>范围 <select id="mufy-recovery-chat-search-scope"><option value="all">所有角色</option><option value="one">指定角色</option></select></label><label id="mufy-recovery-chat-search-role-label" hidden>角色 <select id="mufy-recovery-chat-search-role"></select></label></div>
           </form>
+          <details id="mufy-recovery-chat-backup">
+            <summary>自动分卷备份</summary>
+            <div class="mufy-chat-search-options">
+              <label>每 <input type="number" min="1" max="1000" step="1" value="100" aria-label="每卷轮数" style="width:5em"> 轮</label>
+              <button type="button" data-backup-toggle>开始备份</button>
+              <button type="button" data-backup-folder>选择保存目录</button>
+              <button type="button" data-backup-export>导出待保存</button>
+              <button type="button" data-backup-confirm hidden>确认已保存</button>
+            </div>
+            <div id="mufy-recovery-chat-backup-status" class="mufy-recovery-muted" aria-live="polite">进入具体聊天并登录后可启用。每条角色回复算一轮。</div>
+          </details>
           <div id="mufy-recovery-chat-result-count" class="mufy-recovery-muted">搜索结果 · 0</div>
         </div>
         <div id="mufy-recovery-account-section" hidden>
@@ -11119,6 +11391,7 @@ roleStateReady = true;
       roleMore.textContent = roleMoreOptions.hidden ? '▸ 更多' : '▾ 更多';
     };
     panel.querySelector('#mufy-recovery-export-chat').onclick = exportCurrentChat;
+    installChatBackupControls(panel.querySelector('#mufy-recovery-chat-backup'));
     panel.querySelector('#mufy-recovery-quote-entry').onclick = openQuoteLibraryModal;
     const panelBeautyModal = panel.querySelector('#mufy-recovery-panel-beauty-modal');
     const closePanelBeauty = () => { panelBeautyModal.hidden = true; };
