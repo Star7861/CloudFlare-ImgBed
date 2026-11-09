@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手
 // @namespace    local.mufy.session-recovery
-// @version      3.0.1
+// @version      3.0.2
 // @description  管理 Mufy 角色、收藏、聊天记录、摘录和面具。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,7 +21,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.1';
+    : '3.0.2';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const STABLE_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-stable-update-check-v2';
@@ -2297,47 +2297,84 @@ roleStateReady = true;
       itemText: null,
       skipRedPacket: false
     };
-    const response = await pageWindow.fetch(new URL('/api/v1/chat/completions', location.origin).href, {
-      method: 'POST',
-      credentials: 'include',
-      headers,
-      body: JSON.stringify(payload)
-    });
-    if (response.status === 401 || response.status === 403) throw new Error(loginErrorMessage(response.status, '自动发送消息'));
-    if (!response.ok) {
-      const raw = await response.text().catch(() => '');
-      throw new Error(`自动发送消息失败（HTTP ${response.status}${raw ? `：${raw.slice(0, 240)}` : ''}）`);
-    }
-    if (!response.body?.getReader) throw new Error('聊天接口没有返回可读取的 EventStream');
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    let doneReceived = false;
-    const inspectLine = line => {
-      const trimmed = String(line || '').trim();
-      if (!trimmed || trimmed.startsWith(':') || /^(?:event|id|retry):/i.test(trimmed)) return;
-      const dataText = trimmed.replace(/^data:\s*/i, '');
-      if (dataText === '[DONE]') { doneReceived = true; return; }
-      try {
-        const event = JSON.parse(dataText);
-        if (String(event?.type || '').toLowerCase() === 'done' || String(event?.content || '').trim() === '[DONE]') doneReceived = true;
-      } catch (_) {}
+    const controller = new (pageWindow.AbortController || globalThis.AbortController)();
+    const deadline = setTimeout(() => controller.abort(), 7 * 60 * 1000);
+    const startedAt = Date.now();
+    let contentParts = 0;
+    let lastContentAt = 0;
+    let reader = null;
+    const updateProgress = () => {
+      if (job.accountScope && job.accountScope !== maskAccountScope) return;
+      const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+      const quiet = lastContentAt ? Math.floor((Date.now() - lastContentAt) / 1000) : 0;
+      const current = loadManualAutoChatJob();
+      if (current && current.startedAt !== job.startedAt) return;
+      const prefix = current
+        ? current.paused ? '已暂停，收尾中' : `一键扣数 ${Number(job.completed || 0) + 1}/${job.total}`
+        : '已取消，收尾中';
+      const progress = !contentParts ? '等待首段回复'
+        : quiet < 3 ? `正在接收回复 · ${contentParts} 段`
+        : `已收到 ${contentParts} 段 · ${quiet} 秒无新内容`;
+      state.status = `${prefix} · ${progress} · ${elapsed} 秒`;
+      const status = panel?.querySelector('#mufy-recovery-status');
+      if (status) status.textContent = state.status;
+      showManualAutoChatToast(state.status, { tone: !current || current.paused ? 'warn' : 'progress' });
     };
-    while (true) {
-      if (manualAutoChatWasStopped()) {
-        try { await reader.cancel(); } catch (_) {}
-        throw new ManualAutoChatPausedError('任务已暂停；当前接口回复流已停止读取');
+    const progressTimer = setInterval(updateProgress, 1000);
+    try {
+      updateProgress();
+      const response = await pageWindow.fetch(new URL('/api/v1/chat/completions', location.origin).href, {
+        method: 'POST',
+        credentials: 'include',
+        signal: controller.signal,
+        headers,
+        body: JSON.stringify(payload)
+      });
+      if (response.status === 401 || response.status === 403) throw new Error(loginErrorMessage(response.status, '自动发送消息'));
+      if (!response.ok) {
+        const raw = await response.text().catch(() => '');
+        throw new Error(`自动发送消息失败（HTTP ${response.status}${raw ? `：${raw.slice(0, 240)}` : ''}）`);
       }
-      const chunk = await reader.read();
-      buffer += decoder.decode(chunk.value || new Uint8Array(), { stream: !chunk.done });
-      const lines = buffer.split(/\r?\n/);
-      buffer = lines.pop() || '';
-      lines.forEach(inspectLine);
-      if (chunk.done) break;
+      if (!response.body?.getReader) throw new Error('聊天接口没有返回可读取的 EventStream');
+      reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let doneReceived = false;
+      const inspectLine = line => {
+        const trimmed = String(line || '').trim();
+        if (!trimmed || trimmed.startsWith(':') || /^(?:event|id|retry):/i.test(trimmed)) return;
+        const dataText = trimmed.replace(/^data:\s*/i, '');
+        if (dataText === '[DONE]') { doneReceived = true; return; }
+        try {
+          const event = JSON.parse(dataText);
+          const type = String(event?.type || '').toLowerCase();
+          if (type === 'done' || String(event?.content || '').trim() === '[DONE]') {
+            doneReceived = true;
+          } else if (type === 'content' && typeof event.content === 'string' && event.content.length) {
+            contentParts += 1;
+            lastContentAt = Date.now();
+          }
+        } catch (_) {}
+      };
+      while (!doneReceived) {
+        const chunk = await reader.read();
+        buffer += decoder.decode(chunk.value || new Uint8Array(), { stream: !chunk.done });
+        const lines = buffer.split(/\r?\n/);
+        buffer = lines.pop() || '';
+        lines.forEach(inspectLine);
+        if (chunk.done) break;
+      }
+      if (buffer) inspectLine(buffer);
+      if (!doneReceived) throw new Error('EventStream 已结束，但没有收到 done/[DONE] 完成标记');
+      return true;
+    } catch (error) {
+      if (controller.signal.aborted) throw new Error('等待角色回复完成超过 7 分钟，请在对话里核对这一条');
+      throw error;
+    } finally {
+      clearTimeout(deadline);
+      clearInterval(progressTimer);
+      if (reader) reader.cancel().catch(() => {});
     }
-    if (buffer) inspectLine(buffer);
-    if (!doneReceived) throw new Error('EventStream 已结束，但没有收到 done/[DONE] 完成标记');
-    return true;
   }
 
   async function waitForManualChatResponse(job) {
@@ -2439,6 +2476,18 @@ roleStateReady = true;
     showManualAutoChatToast(state.status, { tone: 'success', duration: 12000 });
   }
 
+  function reportManualAutoChatCancelResult(job, completed) {
+    if (!state.manualAutoChatStopRequested || (job.accountScope && job.accountScope !== maskAccountScope)) return;
+    state.status = completed
+      ? '一键扣数已取消，当前角色已回复完毕。'
+      : completed === false
+      ? '一键扣数已取消，当前回复未确认完成，请在对话中核对。'
+      : '一键扣数已取消，未发送当前消息。';
+    appendRunLog(completed === false ? 'warn' : 'info', state.status);
+    render();
+    showManualAutoChatToast(state.status, { tone: completed ? 'success' : 'warn', duration: 12000 });
+  }
+
   async function processManualAutoChatJob() {
     if (manualAutoChatProcessing) return;
     let job = loadManualAutoChatJob();
@@ -2507,8 +2556,22 @@ roleStateReady = true;
         if (!saveManualAutoChatJob(job)) throw new Error('发送前无法保存任务状态');
         showManualAutoChatToast(`一键扣数 ${Number(job.completed || 0) + 1}/${job.total}：消息发送中，正在等待完整回复…`);
         const sent = await sendManualChatViaApi(job);
+        const latest = loadManualAutoChatJob();
+        if (!latest) {
+          reportManualAutoChatCancelResult(job, sent ? true : null);
+          return;
+        }
+        if (latest.startedAt !== job.startedAt || latest.activeCharacterId !== job.activeCharacterId
+            || (job.accountScope && job.accountScope !== maskAccountScope)) return;
+        job = latest;
         job.phase = sent ? 'response-complete' : 'already-chatted';
         if (!saveManualAutoChatJob(job)) throw new Error('无法保存当前角色的处理结果');
+        if (job.paused) {
+          state.status = sent ? '当前角色已回复完毕，一键扣数保持暂停。继续时会从下一位开始。' : '一键扣数保持暂停。';
+          render();
+          showManualAutoChatToast(state.status, { tone: 'warn', duration: 10000 });
+          return;
+        }
         if (String(textarea.value || '') === String(job.message || DEFAULT_MANUAL_AUTO_CHAT_MESSAGE)) {
           setManualChatTextareaValue(textarea, '');
         }
@@ -2548,9 +2611,12 @@ roleStateReady = true;
       const persistedJob = loadManualAutoChatJob();
       if (!persistedJob) {
         state.manualAutoChatRunning = false;
+        if (job.phase === 'sending') reportManualAutoChatCancelResult(job, error instanceof ManualAutoChatPausedError ? null : false);
         render();
         return;
       }
+      if (persistedJob.startedAt !== job.startedAt || persistedJob.activeCharacterId !== job.activeCharacterId
+          || (job.accountScope && job.accountScope !== maskAccountScope)) return;
       job = persistedJob;
       job.paused = true;
       job.pauseReason = String(error?.message || error || '未知错误');
@@ -2576,8 +2642,17 @@ roleStateReady = true;
       saveManualAutoChatJob(existing);
       state.manualAutoChatStopRequested = true;
       state.manualAutoChatRunning = false;
-      state.status = '已请求停止一键扣数；当前已经发送的回复不会被打断，脚本不会再进入下一个角色。';
+      state.status = existing.phase === 'sending'
+        ? '一键扣数已暂停。正在收完当前回复，之后会显示结果。'
+        : '一键扣数已暂停，剩余角色已保留。';
       render();
+      showManualAutoChatToast(state.status, { tone: 'warn', duration: 10000 });
+      return;
+    }
+    if (manualAutoChatProcessing) {
+      state.status = '正在收尾上一条消息，请等提示后再开始或继续。';
+      render();
+      showManualAutoChatToast(state.status, { tone: 'warn', duration: 7000 });
       return;
     }
     if (!state.manualFavoriteChats.length) {
@@ -2642,8 +2717,11 @@ roleStateReady = true;
     state.manualAutoChatStopRequested = true;
     state.manualFavoriteChatCurrentId = '';
     try { localStorage.removeItem(accountStorageKey(MANUAL_FAVORITE_CHAT_CURRENT_KEY)); } catch (_) {}
-    state.status = '已取消一键扣数任务；未处理角色仍保留在普通待聊列表。';
+    state.status = manualAutoChatProcessing && job.phase === 'sending'
+      ? '已取消后续任务，正在等当前回复收尾。'
+      : '已取消一键扣数任务；未处理角色仍保留在普通待聊列表。';
     render();
+    showManualAutoChatToast(state.status, { tone: 'warn', duration: 10000 });
   }
 
   async function favoriteFetch(url, options = {}, label = '收藏请求', timeoutMs = 20000) {
