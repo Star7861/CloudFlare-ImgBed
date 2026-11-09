@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.107
+// @version      3.0.0-dev.108
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,7 +21,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.107';
+    : '3.0.0-dev.108';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v1';
@@ -362,6 +362,17 @@
     render();
   }
 
+  function websiteSignInVisible() {
+    const loginForm = officialAccountEmailInput()?.closest('form,[role="dialog"]');
+    const password = loginForm?.querySelector('input[type="password"]');
+    if (password && visibleWebsiteElement(password)) return true;
+    return [...document.querySelectorAll('button,a,[role="button"]')].some(control => {
+      const labels = [control.textContent, control.getAttribute('aria-label'), control.getAttribute('title')];
+      return labels.some(label => /^(登录|登入|log in|login|sign in)$/i.test(String(label || '').trim()))
+        && visibleWebsiteElement(control);
+    });
+  }
+
   function setWebsiteInputValue(input, value) {
     const descriptor = Object.getOwnPropertyDescriptor(pageWindow.HTMLInputElement.prototype, 'value');
     descriptor?.set?.call(input, value);
@@ -622,10 +633,29 @@
     if (accountLogoutRequesting || accountDirectLoginRequesting) return;
     const row = loadAccountSwitchProfiles().find(item => item.id === String(accountId || ''));
     if (!row) return;
-    const hasStoredPassword = Boolean(savedAccountPassword(row.id));
-    const useDirectLogin = accountLoginMode(row) === 'direct' && hasStoredPassword;
-    const pending = { id: row.id, email: row.email, label: row.label, targetScope: row.scope || '', sourceScope: maskAccountScope || accountIdentityFromAuthorization().scope, useDirectLogin, authStorageSlot: useDirectLogin ? findAuthorizationStorageSlot() : null, phase: 'logout', startedAt: Date.now() };
+    const password = accountLoginMode(row) === 'direct' ? savedAccountPassword(row.id) : '';
+    const signedOut = websiteSignInVisible();
+    const pending = {
+      id: row.id,
+      email: row.email,
+      label: row.label,
+      targetScope: row.scope || '',
+      sourceScope: signedOut ? '' : maskAccountScope || accountIdentityFromAuthorization().scope,
+      useDirectLogin: Boolean(password),
+      authStorageSlot: password ? findAuthorizationStorageSlot() : null,
+      phase: signedOut ? (password ? 'direct-login' : 'login') : 'logout',
+      startedAt: Date.now()
+    };
     savePendingAccountSwitch(pending);
+    if (signedOut) {
+      authorization = '';
+      if (password) attemptDirectAccountLogin(pending, password);
+      else {
+        officialLoginControl()?.click();
+        installAccountSwitchLoginAssist();
+      }
+      return;
+    }
     state.status = `正在切换到“${row.label}”…`;
     showManualAutoChatToast(`正在退出当前账号，然后切换到“${row.label}”…`, { tone: 'info', duration: 5000 });
     attemptOfficialAccountLogout(pending);
@@ -1378,17 +1408,23 @@
       currentId = scopeMatches.length === 1 ? scopeMatches[0].id : '';
       if (currentId) setCurrentAccountSwitchId(currentId);
     }
+    const signedOut = websiteSignInVisible();
     const currentSaved = state.accountSwitchProfiles.find(row => row.id === currentId);
     const currentBox = panel.querySelector('#mufy-recovery-account-current');
     if (currentBox) {
-      currentBox.hidden = Boolean(currentSaved);
-      currentBox.textContent = currentSaved ? '' : `当前账号：${current.label || current.email || maskAccountLabel()}`;
+      currentBox.hidden = !signedOut && Boolean(currentSaved);
+      currentBox.textContent = signedOut ? '网站当前未登录' : currentSaved ? '' : `当前账号：${current.label || current.email || maskAccountLabel()}`;
     }
     list.innerHTML = state.accountSwitchProfiles.map(row => {
-      const active = row.id === currentId;
+      const active = !signedOut && row.id === currentId;
       const hasPassword = Boolean(savedAccountPassword(row.id));
       const loginMode = accountLoginMode(row);
-      return `<article class="mufy-account-card ${active ? 'is-current' : ''}"><div><strong>${esc(row.label)}</strong><small>${esc(row.email)}</small><span class="mufy-account-badges">${active ? '<em>当前登录</em>' : ''}<em class="login-mode ${loginMode}">${loginMode === 'direct' ? '接口直登' : '官方表单'}</em>${hasPassword ? '<em class="has-password">已存密码</em>' : ''}</span></div><span>${active ? '' : `<button data-account-mark-current="${esc(row.id)}" title="网站已经登录此账号时，用它纠正当前标记">设为当前</button><button data-account-switch="${esc(row.id)}">切换</button>`}<button data-account-mode="${esc(row.id)}">${loginMode === 'direct' ? '改用表单' : '启用直登'}</button><button data-account-edit="${esc(row.id)}">编辑</button><button data-account-delete="${esc(row.id)}">删除</button></span></article>`;
+      const signIn = signedOut
+        ? `<button data-account-switch="${esc(row.id)}">${loginMode === 'direct' && hasPassword ? '直接登录' : '登录'}</button>`
+        : active
+        ? ''
+        : `<button data-account-mark-current="${esc(row.id)}" title="网站已经登录此账号时，用它纠正当前标记">设为当前</button><button data-account-switch="${esc(row.id)}">切换</button>`;
+      return `<article class="mufy-account-card ${active ? 'is-current' : ''}"><div><strong>${esc(row.label)}</strong><small>${esc(row.email)}</small><span class="mufy-account-badges">${active ? '<em>当前登录</em>' : ''}<em class="login-mode ${loginMode}">${loginMode === 'direct' ? '接口直登' : '官方表单'}</em>${hasPassword ? '<em class="has-password">已存密码</em>' : ''}</span></div><span>${signIn}<button data-account-mode="${esc(row.id)}">${loginMode === 'direct' ? '改用表单' : '启用直登'}</button><button data-account-edit="${esc(row.id)}">编辑</button><button data-account-delete="${esc(row.id)}">删除</button></span></article>`;
     }).join('') || '<div class="mufy-recovery-empty">还没有保存账号。可添加其他账号，或保存当前登录账号。</div>';
   }
 
