@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.113
+// @version      3.0.0-dev.114
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,7 +21,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.113';
+    : '3.0.0-dev.114';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -2299,8 +2299,30 @@ roleStateReady = true;
     };
     const controller = new (pageWindow.AbortController || globalThis.AbortController)();
     const deadline = setTimeout(() => controller.abort(), 7 * 60 * 1000);
+    const startedAt = Date.now();
+    let contentParts = 0;
+    let lastContentAt = 0;
     let reader = null;
+    const updateProgress = () => {
+      if (job.accountScope && job.accountScope !== maskAccountScope) return;
+      const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+      const quiet = lastContentAt ? Math.floor((Date.now() - lastContentAt) / 1000) : 0;
+      const current = loadManualAutoChatJob();
+      if (current && current.startedAt !== job.startedAt) return;
+      const prefix = current
+        ? current.paused ? '已暂停，收尾中' : `一键扣数 ${Number(job.completed || 0) + 1}/${job.total}`
+        : '已取消，收尾中';
+      const progress = !contentParts ? '等待首段回复'
+        : quiet < 3 ? `正在接收回复 · ${contentParts} 段`
+        : `已收到 ${contentParts} 段 · ${quiet} 秒无新内容`;
+      state.status = `${prefix} · ${progress} · ${elapsed} 秒`;
+      const status = panel?.querySelector('#mufy-recovery-status');
+      if (status) status.textContent = state.status;
+      showManualAutoChatToast(state.status, { tone: !current || current.paused ? 'warn' : 'progress' });
+    };
+    const progressTimer = setInterval(updateProgress, 1000);
     try {
+      updateProgress();
       const response = await pageWindow.fetch(new URL('/api/v1/chat/completions', location.origin).href, {
         method: 'POST',
         credentials: 'include',
@@ -2325,7 +2347,13 @@ roleStateReady = true;
         if (dataText === '[DONE]') { doneReceived = true; return; }
         try {
           const event = JSON.parse(dataText);
-          if (String(event?.type || '').toLowerCase() === 'done' || String(event?.content || '').trim() === '[DONE]') doneReceived = true;
+          const type = String(event?.type || '').toLowerCase();
+          if (type === 'done' || String(event?.content || '').trim() === '[DONE]') {
+            doneReceived = true;
+          } else if (type === 'content' && typeof event.content === 'string' && event.content.length) {
+            contentParts += 1;
+            lastContentAt = Date.now();
+          }
         } catch (_) {}
       };
       while (!doneReceived) {
@@ -2344,6 +2372,7 @@ roleStateReady = true;
       throw error;
     } finally {
       clearTimeout(deadline);
+      clearInterval(progressTimer);
       if (reader) reader.cancel().catch(() => {});
     }
   }
@@ -2447,6 +2476,18 @@ roleStateReady = true;
     showManualAutoChatToast(state.status, { tone: 'success', duration: 12000 });
   }
 
+  function reportManualAutoChatCancelResult(job, completed) {
+    if (!state.manualAutoChatStopRequested || (job.accountScope && job.accountScope !== maskAccountScope)) return;
+    state.status = completed
+      ? '一键扣数已取消，当前角色已回复完毕。'
+      : completed === false
+      ? '一键扣数已取消，当前回复未确认完成，请在对话中核对。'
+      : '一键扣数已取消，未发送当前消息。';
+    appendRunLog(completed === false ? 'warn' : 'info', state.status);
+    render();
+    showManualAutoChatToast(state.status, { tone: completed ? 'success' : 'warn', duration: 12000 });
+  }
+
   async function processManualAutoChatJob() {
     if (manualAutoChatProcessing) return;
     let job = loadManualAutoChatJob();
@@ -2516,7 +2557,11 @@ roleStateReady = true;
         showManualAutoChatToast(`一键扣数 ${Number(job.completed || 0) + 1}/${job.total}：消息发送中，正在等待完整回复…`);
         const sent = await sendManualChatViaApi(job);
         const latest = loadManualAutoChatJob();
-        if (!latest || latest.startedAt !== job.startedAt || latest.activeCharacterId !== job.activeCharacterId
+        if (!latest) {
+          reportManualAutoChatCancelResult(job, sent ? true : null);
+          return;
+        }
+        if (latest.startedAt !== job.startedAt || latest.activeCharacterId !== job.activeCharacterId
             || (job.accountScope && job.accountScope !== maskAccountScope)) return;
         job = latest;
         job.phase = sent ? 'response-complete' : 'already-chatted';
@@ -2566,6 +2611,7 @@ roleStateReady = true;
       const persistedJob = loadManualAutoChatJob();
       if (!persistedJob) {
         state.manualAutoChatRunning = false;
+        if (job.phase === 'sending') reportManualAutoChatCancelResult(job, error instanceof ManualAutoChatPausedError ? null : false);
         render();
         return;
       }
@@ -2671,7 +2717,9 @@ roleStateReady = true;
     state.manualAutoChatStopRequested = true;
     state.manualFavoriteChatCurrentId = '';
     try { localStorage.removeItem(accountStorageKey(MANUAL_FAVORITE_CHAT_CURRENT_KEY)); } catch (_) {}
-    state.status = '已取消一键扣数任务；未处理角色仍保留在普通待聊列表。';
+    state.status = manualAutoChatProcessing && job.phase === 'sending'
+      ? '已取消后续任务，正在等当前回复收尾。'
+      : '已取消一键扣数任务；未处理角色仍保留在普通待聊列表。';
     render();
     showManualAutoChatToast(state.status, { tone: 'warn', duration: 10000 });
   }
