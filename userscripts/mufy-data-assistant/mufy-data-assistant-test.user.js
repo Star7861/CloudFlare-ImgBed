@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.118
+// @version      3.0.0-dev.119
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,7 +21,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.118';
+    : '3.0.0-dev.119';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -78,6 +78,12 @@
   const SESSIONLESS_ROLE_IDS_KEY = 'mufy-role-links-only-sessionless-role-ids-v1';
   const ROLE_FALLBACK_PENDING_KEY = 'mufy-role-links-only-role-fallback-pending-v1';
   const DEFAULT_MANUAL_AUTO_CHAT_MESSAGE = '≽^⚈⩊⚈^≼';
+  // 一键扣数使用固定的低价非直连模型，不请求模型目录，也不跟随角色页当前选择。
+  const MANUAL_AUTO_CHAT_MODEL_CONFIGS = [
+    { name: 'MUMU-1.5', modelId: 25, modelTemplateId: 67 },
+    { name: '快速二哈3.0', modelId: 23, modelTemplateId: 140 },
+    { name: '快速二哈3.7', modelId: 111, modelTemplateId: 183 }
+  ];
   const AUTHOR_FOLDER_MIGRATION_KEY = 'mufy-recovery-author-folder-migration-v1';
   const AUTHOR_FOLDER_MAP_KEY = 'mufy-recovery-author-folder-map-v1';
   const AUTO_ADD_FAVORITE_FOLDER_KEY = 'mufy-recovery-auto-add-favorite-folder-v1';
@@ -869,8 +875,9 @@
     } catch (_) {}
   }
 
-  function scanStoredAuthorization() {
-    if (authorization) return authorization;
+  function scanStoredAuthorization(force = false) {
+    if (authorization && !force) return authorization;
+    const previousAuthorization = authorization;
     const storages = [];
     try { if (pageWindow.localStorage) storages.push(pageWindow.localStorage); } catch (_) {}
     try { if (pageWindow.sessionStorage) storages.push(pageWindow.sessionStorage); } catch (_) {}
@@ -898,7 +905,7 @@
         }
       } catch (_) {}
     }
-    return authorization;
+    return authorization || previousAuthorization;
   }
 
   function findAuthorizationStorageSlot() {
@@ -2298,64 +2305,8 @@ roleStateReady = true;
     throw new Error(`发送按钮已启用，但页面的点击、框架事件、表单提交和 Enter 都没有生效${failures.length ? `（${[...new Set(failures)].join('；')}）` : ''}`);
   }
 
-  async function resolveManualChatModelConfig(characterId, timeoutMs = 12000) {
-    const id = String(characterId || '');
-    const startedAt = Date.now();
-    while (Date.now() - startedAt < Math.min(timeoutMs, 1800)) {
-      const cached = chatModelConfigCache.get(id);
-      if (cached?.modelId && cached?.modelTemplateId) return cached;
-      await wait(250);
-    }
-    try {
-      const headers = { Accept: 'application/json' };
-      if (authorization) headers.Authorization = authorization;
-      const response = await pageWindow.fetch(new URL('/api/models/tree', location.origin).href, {
-        method: 'GET', credentials: 'include', cache: 'no-store', headers
-      });
-      const body = await response.json();
-      const rows = flattenModelMonitorRows(body?.data || body);
-      const normalizeLabel = value => String(value || '').toLocaleLowerCase('zh-CN').replace(/[\s·•—_()（）【】\[\]]+/g, '');
-      const composerRect = findManualChatComposer().textarea?.getBoundingClientRect?.();
-      const visibleLabels = [...document.querySelectorAll('button,[role="button"]')]
-        .filter(element => !element.closest('#mufy-recovery-panel') && isVisibleElement(element))
-        .map(element => {
-          const text = String(element.textContent || element.getAttribute('aria-label') || element.title || '').trim();
-          const rect = element.getBoundingClientRect?.();
-          const distance = composerRect && rect
-            ? Math.abs((rect.top + rect.bottom) / 2 - (composerRect.top + composerRect.bottom) / 2)
-            : 9999;
-          return { text, distance };
-        })
-        .filter(item => item.text && item.text.length <= 80 && item.distance <= 240);
-      const matches = rows.map(row => {
-        const name = normalizeLabel(row.name);
-        const score = visibleLabels.reduce((best, item) => {
-          const normalized = normalizeLabel(item.text);
-          if (!normalized || !name) return best;
-          if (normalized === name) return Math.max(best, 2000 + name.length - item.distance);
-          if (normalized.includes(name) || name.includes(normalized)) return Math.max(best, 1000 + name.length - item.distance);
-          return best;
-        }, 0);
-        return { row, score };
-      }).filter(item => item.score > 0 && item.row.modelId && item.row.templateId)
-        .sort((a, b) => b.score - a.score);
-      if (matches.length) {
-        const selected = { modelId: Number(matches[0].row.modelId), modelTemplateId: Number(matches[0].row.templateId) };
-        rememberChatModelConfig(id, selected);
-        appendRunLog('info', `一键扣数已按页面模型名称“${matches[0].row.name}”匹配 modelId=${selected.modelId}、modelTemplateId=${selected.modelTemplateId}。`);
-        return selected;
-      }
-    } catch (error) {
-      appendRunLog('warn', '一键扣数自动匹配当前模型失败', error);
-    }
-    const recent = chatModelConfigCache.get('__last__');
-    if (recent?.modelId && recent?.modelTemplateId) return recent;
-    while (Date.now() - startedAt < timeoutMs) {
-      const cached = chatModelConfigCache.get(id);
-      if (cached?.modelId && cached?.modelTemplateId) return cached;
-      await wait(250);
-    }
-    throw new Error('没有获取到当前角色所选模型的 modelId/modelTemplateId；请刷新该角色页面，等待模型名称显示后再继续');
+  function manualAutoChatModelConfigs() {
+    return MANUAL_AUTO_CHAT_MODEL_CONFIGS.map(config => ({ ...config }));
   }
 
   function realChatSessionId(value) {
@@ -2404,26 +2355,15 @@ roleStateReady = true;
     scanStoredAuthorization();
     const characterId = String(job.activeCharacterId || '');
     if (await confirmExistingManualChatSession(job, verifiedEmptySessions)) return false;
-    const config = await resolveManualChatModelConfig(characterId);
+    const configs = manualAutoChatModelConfigs();
     if (manualAutoChatWasStopped()) throw new ManualAutoChatPausedError('任务已暂停');
     if (await confirmExistingManualChatSession(job, verifiedEmptySessions)) return false;
-    const headers = { Accept: 'text/event-stream', 'Content-Type': 'application/json' };
-    if (authorization) headers.Authorization = authorization;
-    const payload = {
-      userInput: String(job.message || DEFAULT_MANUAL_AUTO_CHAT_MESSAGE),
-      sessionId: '00000000-0000-0000-0000-000000000000',
-      modelId: Number(config.modelId),
-      modelTemplateId: Number(config.modelTemplateId),
-      characterId,
-      itemText: null,
-      skipRedPacket: false
-    };
     const controller = new (pageWindow.AbortController || globalThis.AbortController)();
     const deadline = setTimeout(() => controller.abort(), 7 * 60 * 1000);
     const startedAt = Date.now();
     let contentParts = 0;
     let lastContentAt = 0;
-    let reader = null;
+    let activeModelName = configs[0]?.name || '';
     const updateProgress = () => {
       if (job.accountScope && job.accountScope !== maskAccountScope) return;
       const elapsed = Math.floor((Date.now() - startedAt) / 1000);
@@ -2431,12 +2371,12 @@ roleStateReady = true;
       const current = loadManualAutoChatJob();
       if (current && current.startedAt !== job.startedAt) return;
       const prefix = current
-        ? current.paused ? '已暂停，收尾中' : `一键扣数 ${Number(job.completed || 0) + 1}/${job.total}`
+        ? current.paused ? '已暂停，收尾中' : '一键扣数 ' + (Number(job.completed || 0) + 1) + '/' + job.total
         : '已取消，收尾中';
-      const progress = !contentParts ? '等待首段回复'
-        : quiet < 3 ? `正在接收回复 · ${contentParts} 段`
-        : `已收到 ${contentParts} 段 · ${quiet} 秒无新内容`;
-      state.status = `${prefix} · ${progress} · ${elapsed} 秒`;
+      const progress = !contentParts ? '等待“' + activeModelName + '”首段回复'
+        : quiet < 3 ? '正在接收回复 · ' + contentParts + ' 段'
+        : '已收到 ' + contentParts + ' 段 · ' + quiet + ' 秒无新内容';
+      state.status = prefix + ' · ' + progress + ' · ' + elapsed + ' 秒';
       const status = panel?.querySelector('#mufy-recovery-status');
       if (status) status.textContent = state.status;
       showManualAutoChatToast(state.status, { tone: !current || current.paused ? 'warn' : 'progress' });
@@ -2444,60 +2384,155 @@ roleStateReady = true;
     const progressTimer = setInterval(updateProgress, 1000);
     try {
       updateProgress();
-      const response = await pageWindow.fetch(new URL('/api/v1/chat/completions', location.origin).href, {
-        method: 'POST',
-        credentials: 'include',
-        signal: controller.signal,
-        headers,
-        body: JSON.stringify(payload)
-      });
-      if (response.status === 401 || response.status === 403) throw new Error(loginErrorMessage(response.status, '自动发送消息'));
-      if (!response.ok) {
-        const raw = await response.text().catch(() => '');
-        throw new Error(`自动发送消息失败（HTTP ${response.status}${raw ? `：${raw.slice(0, 240)}` : ''}）`);
-      }
-      if (!response.body?.getReader) throw new Error('聊天接口没有返回可读取的 EventStream');
-      reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let doneReceived = false;
-      const inspectLine = line => {
-        const trimmed = String(line || '').trim();
-        if (!trimmed || trimmed.startsWith(':') || /^(?:event|id|retry):/i.test(trimmed)) return;
-        const dataText = trimmed.replace(/^data:\s*/i, '');
-        if (dataText === '[DONE]') { doneReceived = true; return; }
+      let lastError = null;
+      for (let configIndex = 0; configIndex < configs.length; configIndex += 1) {
+        const config = configs[configIndex];
+        activeModelName = config.name;
+        let reader = null;
         try {
-          const event = JSON.parse(dataText);
-          const type = String(event?.type || '').toLowerCase();
-          if (type === 'done' || String(event?.content || '').trim() === '[DONE]') {
-            doneReceived = true;
-          } else if (type === 'content' && typeof event.content === 'string' && event.content.length) {
-            contentParts += 1;
-            lastContentAt = Date.now();
+          const createHeaders = () => {
+            const headers = { Accept: 'text/event-stream', 'Content-Type': 'application/json' };
+            if (authorization) headers.Authorization = authorization;
+            return headers;
+          };
+          const payload = {
+            userInput: String(job.message || DEFAULT_MANUAL_AUTO_CHAT_MESSAGE),
+            sessionId: '00000000-0000-0000-0000-000000000000',
+            modelId: Number(config.modelId),
+            modelTemplateId: Number(config.modelTemplateId),
+            characterId,
+            itemText: null,
+            skipRedPacket: false
+          };
+          const request = headers => pageWindow.fetch(new URL('/api/v1/chat/completions', location.origin).href, {
+            method: 'POST',
+            credentials: 'include',
+            signal: controller.signal,
+            headers,
+            body: JSON.stringify(payload)
+          });
+
+          let headers = createHeaders();
+          let response = await request(headers);
+          if (response.status === 401 && authorization) {
+            const previousAuthorization = authorization;
+            scanStoredAuthorization(true);
+            if (authorization && authorization !== previousAuthorization) {
+              headers = createHeaders();
+              response = await request(headers);
+              appendRunLog('info', '一键扣数遇到 401 后已改用网页存储中的最新登录令牌重试。');
+            }
           }
-        } catch (_) {}
-      };
-      while (!doneReceived) {
-        const chunk = await reader.read();
-        buffer += decoder.decode(chunk.value || new Uint8Array(), { stream: !chunk.done });
-        const lines = buffer.split(/\r?\n/);
-        buffer = lines.pop() || '';
-        lines.forEach(inspectLine);
-        if (chunk.done) break;
+          if ((response.status === 401 || response.status === 403) && authorization) {
+            const cookieHeaders = createHeaders();
+            delete cookieHeaders.Authorization;
+            response = await request(cookieHeaders);
+            if (response.ok) appendRunLog('warn', '一键扣数的旧令牌被拒绝，已改用当前登录 Cookie 发送成功。');
+          }
+          if (response.status === 401 || response.status === 403) {
+            throw new Error(loginErrorMessage(response.status, '自动发送消息'));
+          }
+          if (!response.ok) {
+            const raw = await response.text().catch(() => '');
+            const error = new Error('“' + config.name + '”发送失败（HTTP ' + response.status + (raw ? '：' + raw.slice(0, 240) : '') + '）');
+            error.manualAutoModelRetryable = true;
+            throw error;
+          }
+          if (!response.body?.getReader) throw new Error('聊天接口没有返回可读取的 EventStream');
+
+          reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = '';
+          let doneReceived = false;
+          let attemptContentParts = 0;
+          let failureMessage = '';
+          let lastEventText = '';
+          const inspectLine = line => {
+            const trimmed = String(line || '').trim();
+            if (!trimmed || trimmed.startsWith(':') || /^(?:event|id|retry):/i.test(trimmed)) return;
+            const dataText = trimmed.replace(/^data:\s*/i, '');
+            if (dataText === '[DONE]') {
+              doneReceived = true;
+              return;
+            }
+            lastEventText = dataText.slice(0, 300);
+            try {
+              const event = JSON.parse(dataText);
+              const type = String(event?.type || event?.event || '').toLowerCase();
+              const status = String(event?.status || '').toLowerCase();
+              const finishReason = event?.finishReason ?? event?.finish_reason ?? event?.choices?.[0]?.finish_reason;
+              if (['done', 'complete', 'completed', 'finish', 'finished', 'success', 'end'].includes(type)
+                  || ['done', 'complete', 'completed', 'success', 'finished'].includes(status)
+                  || event?.done === true || event?.completed === true || (finishReason != null && finishReason !== '')) {
+                doneReceived = true;
+              }
+              const fragments = [
+                event?.content,
+                event?.delta?.content,
+                event?.data?.content,
+                event?.message?.content,
+                event?.choices?.[0]?.delta?.content,
+                event?.choices?.[0]?.message?.content
+              ].filter(value => typeof value === 'string' && value && value !== '[DONE]');
+              if (fragments.length) {
+                attemptContentParts += fragments.length;
+                contentParts += fragments.length;
+                lastContentAt = Date.now();
+              }
+              const explicitFailure = event?.error?.message || event?.error || event?.reason || event?.message;
+              if (['error', 'failed', 'failure'].includes(type) || event?.success === false) {
+                failureMessage = typeof explicitFailure === 'string' ? explicitFailure : JSON.stringify(explicitFailure || event);
+              }
+            } catch (_) {}
+          };
+
+          while (!doneReceived && !failureMessage) {
+            const chunk = await reader.read();
+            buffer += decoder.decode(chunk.value || new Uint8Array(), { stream: !chunk.done });
+            const lines = buffer.split(/\r?\n/);
+            buffer = lines.pop() || '';
+            lines.forEach(inspectLine);
+            if (chunk.done) break;
+          }
+          if (buffer) inspectLine(buffer);
+          if (failureMessage) {
+            const error = new Error('“' + config.name + '”返回失败：' + failureMessage.slice(0, 300));
+            error.manualAutoModelRetryable = attemptContentParts === 0
+              && /模型|model|额度|配额|拥堵|中断|不可用|channel|供应|capacity|overload|rate.?limit/i.test(failureMessage);
+            throw error;
+          }
+          if (!doneReceived && attemptContentParts > 0) {
+            appendRunLog('warn', '一键扣数的 EventStream 未带完成标记，但已收到回复内容并正常结束；按完成处理。', {
+              model: config.name,
+              contentParts: attemptContentParts,
+              lastEvent: lastEventText
+            });
+          } else if (!doneReceived) {
+            const error = new Error('EventStream 已结束，既没有完成标记，也没有收到回复内容'
+              + (lastEventText ? '；最后事件：' + lastEventText : ''));
+            error.manualAutoModelRetryable = true;
+            throw error;
+          }
+          appendRunLog('info', '一键扣数已使用固定模型“' + config.name + '”完成发送。');
+          return true;
+        } catch (error) {
+          if (controller.signal.aborted) throw new Error('等待角色回复完成超过 7 分钟，请在对话里核对这一条');
+          lastError = error;
+          const hasBackup = configIndex + 1 < configs.length;
+          if (!error?.manualAutoModelRetryable || !hasBackup || contentParts > 0) throw error;
+          const nextConfig = configs[configIndex + 1];
+          appendRunLog('warn', '固定模型“' + config.name + '”不可用，改用备用“' + nextConfig.name + '”。', error);
+          showManualAutoChatToast('“' + config.name + '”不可用，正在改用备用“' + nextConfig.name + '”…', { tone: 'warn' });
+        } finally {
+          if (reader) reader.cancel().catch(() => {});
+        }
       }
-      if (buffer) inspectLine(buffer);
-      if (!doneReceived) throw new Error('EventStream 已结束，但没有收到 done/[DONE] 完成标记');
-      return true;
-    } catch (error) {
-      if (controller.signal.aborted) throw new Error('等待角色回复完成超过 7 分钟，请在对话里核对这一条');
-      throw error;
+      throw lastError || new Error('三个固定模型均未能发送');
     } finally {
       clearTimeout(deadline);
       clearInterval(progressTimer);
-      if (reader) reader.cancel().catch(() => {});
     }
   }
-
   async function waitForManualChatResponse(job) {
     const startedAt = Number(job.sentAt) || Date.now();
     let lastMutationAt = Date.now();
@@ -2796,7 +2831,7 @@ roleStateReady = true;
     const message = saveManualAutoChatMessage(state.manualAutoChatMessage);
     const delayRange = saveManualAutoChatDelayRange(state.manualAutoChatDelayMin, state.manualAutoChatDelayMax);
     if (!message) return;
-    if (!pageWindow.confirm(`将依次给 ${state.manualFavoriteChats.length} 个普通收藏角色发送：\n\n${message}\n\n每个角色会等待完整回复，再随机冷却 ${delayRange.min}～${delayRange.max} 秒后进入下一个。确定开始吗？`)) return;
+    if (!pageWindow.confirm(`将依次给 ${state.manualFavoriteChats.length} 个普通收藏角色发送：\n\n${message}\n\n固定低价模型：MUMU-1.5 → 快速二哈3.0 → 快速二哈3.7（仅前一个明确不可用时换备用，不含直连）。\n每个角色会等待完整回复，再随机冷却 ${delayRange.min}～${delayRange.max} 秒后进入下一个。确定开始吗？`)) return;
     const first = state.manualFavoriteChats[0];
     const job = {
       active: true,
@@ -4401,12 +4436,28 @@ roleStateReady = true;
 
     const headers = { Accept: 'application/json' };
     if (authorization) headers.Authorization = authorization;
-    const response = await pageWindow.fetch(url.href, {
+    const options = {
       method: 'GET',
       credentials: 'include',
       cache: 'no-store',
       headers
-    });
+    };
+    let response = await pageWindow.fetch(url.href, options);
+    if (response.status === 401 && authorization) {
+      const previousAuthorization = authorization;
+      scanStoredAuthorization(true);
+      if (authorization && authorization !== previousAuthorization) {
+        const refreshedHeaders = new pageWindow.Headers(headers);
+        refreshedHeaders.set('Authorization', authorization);
+        response = await pageWindow.fetch(url.href, { ...options, headers: refreshedHeaders });
+        appendRunLog('info', '角色列表读取遇到 401 后已改用网页存储中的最新登录令牌重试。');
+      }
+    }
+    if ((response.status === 401 || response.status === 403) && authorization) {
+      const cookieHeaders = new pageWindow.Headers(headers);
+      cookieHeaders.delete('Authorization');
+      response = await pageWindow.fetch(url.href, { ...options, headers: cookieHeaders });
+    }
     if (response.status === 429) throw new RateLimitError('角色列表');
     if (response.status === 401 || response.status === 403) {
       throw new Error(loginErrorMessage(response.status, '读取角色列表'));
@@ -8639,6 +8690,16 @@ roleStateReady = true;
       if (response.status !== 429 && response.status < 500) break;
       if (attempt < 2) await wait(1200 * (attempt + 1));
     }
+    if (response.status === 401 && authorization) {
+      const previousAuthorization = authorization;
+      scanStoredAuthorization(true);
+      if (authorization && authorization !== previousAuthorization) {
+        const refreshedHeaders = new pageWindow.Headers(headers);
+        refreshedHeaders.set('Authorization', authorization);
+        response = await pageWindow.fetch(url.href, { ...options, headers: refreshedHeaders });
+        appendRunLog('info', '聊天记录读取遇到 401 后已改用网页存储中的最新登录令牌重试。');
+      }
+    }
     if ((response.status === 401 || response.status === 403) && authorization) {
       const cookieHeaders = new pageWindow.Headers(headers);
       cookieHeaders.delete('Authorization');
@@ -11479,7 +11540,7 @@ roleStateReady = true;
 <li><strong>收藏作者的全部角色：</strong><ol><li>进入「角色」→「作者合集」，找到作者，点右侧收藏按钮。</li><li>打开作者主页，进入助手「收藏」→「网页」，依次点「获取收藏状态」「全选未收藏」「立即收藏」。</li></ol></li>
 <li><strong>整理或删除收藏夹：</strong>进入「收藏」→「收藏夹」，可按作者整理角色，也可筛选空收藏夹或批量删除。删除收藏夹会保留角色收藏。</li>
 <li><strong>收藏：</strong>点角色卡片上的星星收藏或取消收藏。有分享链接时优先用分享链接收藏。</li>
-<li><strong>普通角色一键扣数：</strong>进入「收藏」→「普通待聊」，可修改发送内容，再点「一键扣数」。任务可以停止、继续或取消，完成后可刷新查看结果。</li>
+<li><strong>普通角色一键扣数：</strong>进入「收藏」→「普通待聊」，可修改发送内容，再点「一键扣数」。接口发送固定使用 MUMU-1.5，明确不可用时依次换快速二哈3.0、快速二哈3.7，不使用任何直连模型。任务可以停止、继续或取消。</li>
 <li><strong>完整导出当前聊天：</strong>打开要导出的对话，再到助手「聊天记录」点「导出当前聊天」。下载的 ZIP 内含 HTML 和 TXT。再点一次可停止导出。</li>
 <li><strong>根据聊天内容找角色：</strong>进入「聊天记录」，输入关键词后点「搜索」。可选全部或指定角色。单角色至少输入 1 个字，全部角色至少 2 个字。点「打开并定位」回到原对话。</li>
 <li><strong>角色回复摘录：</strong>选中回复里的文字，点该条回复的「⋯」→「摘录」，再点「收藏到牌组」。直接点「摘录」可选中整条回复。进入助手「摘录」可查看、编辑或导出。
@@ -12434,4 +12495,3 @@ roleStateReady = true;
     mountGuard.observe(document.documentElement, { childList: true, subtree: true });
   } catch (_) {}
 })();
-
