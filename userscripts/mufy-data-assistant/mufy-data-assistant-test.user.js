@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.121
+// @version      3.0.0-dev.122
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,7 +21,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.121';
+    : '3.0.0-dev.122';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -37,7 +37,6 @@
   const ROLE_HISTORY_RECORD_PREFIX = 'role-history:';
   const ROLE_CACHE_RECORD_PREFIX = 'role-cache:';
   const AUTO_SWITCH_KEY = 'mufy-recovery-auto-switch-v1';
-  const AUTO_SWITCH_RELOAD_KEY = 'mufy-recovery-auto-switch-reload-v1';
   const TOGGLE_POSITION_KEY = 'mufy-recovery-toggle-position-v1';
   const TOGGLE_HINT_KEY = 'mufy-recovery-toggle-hint-v1';
   const PANEL_HEIGHT_KEY = 'mufy-recovery-panel-height-v1';
@@ -125,16 +124,21 @@
   let authCaptureLogged = false;
   const observedChatApiSignatures = new Set();
 
-  function chatApiObservationTarget(requestUrl) {
+  function mufyApiUrl(requestUrl) {
     try {
       const url = new URL(String(requestUrl || ''), location.href);
       const hostname = String(url.hostname || '').toLowerCase();
       const isMufyHost = hostname === 'mufy.ai' || hostname.endsWith('.mufy.ai')
         || hostname === 'mufyai.com' || hostname.endsWith('.mufyai.com');
       if (!isMufyHost || !/(?:^|\/)api(?:\/|$)/i.test(url.pathname)) return null;
-      if (!/(conversation|message|chat|sessions?\/(?:history|detail|messages?))/i.test(url.pathname)) return null;
       return url;
     } catch (_) { return null; }
+  }
+
+  function chatApiObservationTarget(requestUrl) {
+    const url = mufyApiUrl(requestUrl);
+    if (!url || !/(conversation|message|chat|sessions?\/(?:history|detail|messages?))/i.test(url.pathname)) return null;
+    return url;
   }
 
   function chatRequestFieldSummary(url, body) {
@@ -226,6 +230,17 @@
     } catch (_) {
       return null;
     }
+  }
+
+  function loadScopedFlag(key, fallback = false) {
+    try {
+      const value = loadAndMigrateScopedValue(key);
+      return value == null ? fallback : value === '1';
+    } catch (_) { return fallback; }
+  }
+
+  function saveScopedFlag(key, enabled) {
+    try { localStorage.setItem(accountStorageKey(key), enabled ? '1' : '0'); } catch (_) {}
   }
 
   function maskAccountLabel() {
@@ -458,8 +473,7 @@
         cache: 'no-store',
         body: JSON.stringify({ email: String(pending.email), password: String(password) })
       });
-      let body = null;
-      try { body = await response.json(); } catch (_) {}
+      const body = await readJsonResponse(response);
       const success = response.ok && (Number(body?.code) === 200 || String(body?.reason || '').toLowerCase() === 'success');
       if (!success) throw new Error(`官方 login 失败（HTTP ${response.status}${body?.reason ? `：${body.reason}` : body?.message ? `：${body.message}` : ''}）`);
       const data = body?.data?.data || body?.data || body || {};
@@ -643,8 +657,7 @@
         credentials: 'include',
         cache: 'no-store'
       });
-      let body = null;
-      try { body = await response.json(); } catch (_) {}
+      const body = await readJsonResponse(response);
       const success = response.ok && (Number(body?.code) === 200 || String(body?.reason || '').toLowerCase() === 'success');
       if (!success) throw new Error(`官方 logout 失败（HTTP ${response.status}${body?.reason ? `：${body.reason}` : ''}）`);
       appendRunLog('info', '已通过 POST /api/users/logout 正式退出当前账号。');
@@ -856,11 +869,8 @@
 
   function captureAuthorization(headers, requestUrl) {
     try {
-      const url = new URL(String(requestUrl || ''), location.href);
-      const hostname = String(url.hostname || '').toLowerCase();
-      const isMufyHost = hostname === 'mufy.ai' || hostname.endsWith('.mufy.ai')
-        || hostname === 'mufyai.com' || hostname.endsWith('.mufyai.com');
-      if (!isMufyHost || !/(?:^|\/)api(?:\/|$)/i.test(url.pathname)) return;
+      const url = mufyApiUrl(requestUrl);
+      if (!url) return;
       const candidate = new pageWindow.Headers(headers || {}).get('authorization') || '';
       if (/^Bearer\s+\S+/i.test(candidate)) {
         authorization = candidate;
@@ -1187,14 +1197,11 @@
     return queued.size - previousSize;
   }
 
-  function loadManualFavoriteNextDismissed() {
-    try { return loadAndMigrateScopedValue(MANUAL_FAVORITE_NEXT_DISMISSED_KEY) === '1'; }
-    catch (_) { return false; }
-  }
+  function loadManualFavoriteNextDismissed() { return loadScopedFlag(MANUAL_FAVORITE_NEXT_DISMISSED_KEY); }
 
   function dismissManualFavoriteNext() {
     state.manualFavoriteNextDismissed = true;
-    try { localStorage.setItem(accountStorageKey(MANUAL_FAVORITE_NEXT_DISMISSED_KEY), '1'); } catch (_) {}
+    saveScopedFlag(MANUAL_FAVORITE_NEXT_DISMISSED_KEY, true);
     render();
   }
 
@@ -1759,24 +1766,25 @@
     }
   }
 
-  function loadModelMonitorSelection() {
+  function loadScopedIdSet(key) {
     try {
-      const ids = JSON.parse(loadAndMigrateScopedValue(MODEL_MONITOR_SELECTION_KEY) || '[]');
+      const ids = JSON.parse(loadAndMigrateScopedValue(key) || '[]');
       return new Set(Array.isArray(ids) ? ids.map(String).filter(Boolean) : []);
     } catch (_) { return new Set(); }
   }
 
-  function saveModelMonitorSelection() {
-    try { localStorage.setItem(accountStorageKey(MODEL_MONITOR_SELECTION_KEY), JSON.stringify([...state.modelMonitorSelectedIds])); } catch (_) {}
+  function saveScopedIdSet(key, values) {
+    try { localStorage.setItem(accountStorageKey(key), JSON.stringify([...values])); } catch (_) {}
   }
 
-  function loadModelMonitorNotify() {
-    try { return loadAndMigrateScopedValue(MODEL_MONITOR_NOTIFY_KEY) === '1'; }
-    catch (_) { return false; }
-  }
+  function loadModelMonitorSelection() { return loadScopedIdSet(MODEL_MONITOR_SELECTION_KEY); }
+
+  function saveModelMonitorSelection() { saveScopedIdSet(MODEL_MONITOR_SELECTION_KEY, state.modelMonitorSelectedIds); }
+
+  function loadModelMonitorNotify() { return loadScopedFlag(MODEL_MONITOR_NOTIFY_KEY); }
 
   function saveModelMonitorNotify(enabled) {
-    try { localStorage.setItem(accountStorageKey(MODEL_MONITOR_NOTIFY_KEY), enabled ? '1' : '0'); } catch (_) {}
+    saveScopedFlag(MODEL_MONITOR_NOTIFY_KEY, enabled);
   }
 
   function loadModelMonitorSnapshot() {
@@ -1790,16 +1798,9 @@
     try { localStorage.setItem(accountStorageKey(MODEL_MONITOR_SNAPSHOT_KEY), JSON.stringify({ rows, checkedAt })); } catch (_) {}
   }
 
-  function loadSessionlessRoleIds() {
-    try {
-      const ids = JSON.parse(loadAndMigrateScopedValue(SESSIONLESS_ROLE_IDS_KEY) || '[]');
-      return new Set(Array.isArray(ids) ? ids.map(String).filter(Boolean) : []);
-    } catch (_) { return new Set(); }
-  }
+  function loadSessionlessRoleIds() { return loadScopedIdSet(SESSIONLESS_ROLE_IDS_KEY); }
 
-  function saveSessionlessRoleIds() {
-    try { localStorage.setItem(accountStorageKey(SESSIONLESS_ROLE_IDS_KEY), JSON.stringify([...state.sessionlessRoleIds])); } catch (_) {}
-  }
+  function saveSessionlessRoleIds() { saveScopedIdSet(SESSIONLESS_ROLE_IDS_KEY, state.sessionlessRoleIds); }
 
 
   function goToNextManualFavoriteChat() {
@@ -1830,6 +1831,10 @@
   const cachedRoles = legacyRoleCache?.snapshot;
   const authorProfileCache = loadAuthorProfileCache();
   const shareCodeCache = loadShareCodeCache();
+  const initialManualAutoChatDelay = loadManualAutoChatDelayRange();
+  const initialManualAutoChatJob = loadManualAutoChatJob();
+  const initialModelMonitorSnapshot = loadModelMonitorSnapshot();
+  const initialUpdateCheckSnapshot = loadUpdateCheckSnapshot();
 
   const state = {
     chatted: cachedRoles?.chatted || [],
@@ -1839,9 +1844,9 @@
     manualFavoriteChatCurrentId: (() => { try { return loadAndMigrateScopedValue(MANUAL_FAVORITE_CHAT_CURRENT_KEY) || ''; } catch (_) { return ''; } })(),
     manualFavoriteNextDismissed: loadManualFavoriteNextDismissed(),
     manualAutoChatMessage: loadManualAutoChatMessage(),
-    manualAutoChatDelayMin: loadManualAutoChatDelayRange().min,
-    manualAutoChatDelayMax: loadManualAutoChatDelayRange().max,
-    manualAutoChatRunning: Boolean(loadManualAutoChatJob() && !loadManualAutoChatJob()?.paused),
+    manualAutoChatDelayMin: initialManualAutoChatDelay.min,
+    manualAutoChatDelayMax: initialManualAutoChatDelay.max,
+    manualAutoChatRunning: Boolean(initialManualAutoChatJob && !initialManualAutoChatJob.paused),
     manualAutoChatStopRequested: false,
     chatExportLoading: false,
     chatExportStopRequested: false,
@@ -1862,10 +1867,10 @@
     materialKind: 'prompt',
     materialEditingId: '',
     accountSwitchProfiles: loadAccountSwitchProfiles(),
-    modelMonitorRows: loadModelMonitorSnapshot().rows || [],
+    modelMonitorRows: initialModelMonitorSnapshot.rows || [],
     modelMonitorSelectedIds: loadModelMonitorSelection(),
     modelMonitorLoading: false,
-    modelMonitorLastChecked: loadModelMonitorSnapshot().checkedAt || '',
+    modelMonitorLastChecked: initialModelMonitorSnapshot.checkedAt || '',
     modelMonitorError: '',
     modelMonitorNotify: loadModelMonitorNotify(),
     sessionlessRoleIds: loadSessionlessRoleIds(),
@@ -1918,8 +1923,8 @@
     selectedFavoriteFolderIds: new Set(),
     favoriteFolderDeleteEmptyOnly: true,
     updateInstallUrl: '',
-    latestScriptVersion: loadUpdateCheckSnapshot().latestVersion || '',
-    updateAvailable: compareScriptVersions(loadUpdateCheckSnapshot().latestVersion, SCRIPT_VERSION) > 0,
+    latestScriptVersion: initialUpdateCheckSnapshot.latestVersion || '',
+    updateAvailable: compareScriptVersions(initialUpdateCheckSnapshot.latestVersion, SCRIPT_VERSION) > 0,
     updateChecking: false,
     updateError: '',
     favoritePendingIds: new Set(),
@@ -2194,119 +2199,10 @@ roleStateReady = true;
     while (Date.now() - startedAt < timeoutMs) {
       if (manualAutoChatWasStopped()) throw new ManualAutoChatPausedError('任务已暂停');
       const composer = findManualChatComposer();
-      if (composer.textarea && composer.button && !composer.textarea.disabled && !composer.textarea.readOnly) return composer;
+      if (composer.textarea && !composer.textarea.disabled && !composer.textarea.readOnly) return composer;
       await wait(300);
     }
     throw new Error('等待聊天输入框超过 60 秒');
-  }
-
-  async function waitForEnabledManualChatButton(textarea, timeoutMs = 15000) {
-    const startedAt = Date.now();
-    while (Date.now() - startedAt < timeoutMs) {
-      if (manualAutoChatWasStopped()) throw new ManualAutoChatPausedError('任务已暂停');
-      const composer = findManualChatComposer();
-      if (composer.textarea === textarea && composer.button && !composer.button.disabled && composer.button.getAttribute('aria-disabled') !== 'true') {
-        return composer.button;
-      }
-      await wait(150);
-    }
-    throw new Error('消息已写入，但发送按钮在 15 秒内没有启用');
-  }
-
-  async function manualChatSendStarted(textarea, expectedText, previousSessionId, timeoutMs = 2200) {
-    const startedAt = Date.now();
-    while (Date.now() - startedAt < timeoutMs) {
-      const current = currentRoleContext();
-      const composer = findManualChatComposer();
-      const draftCleared = String(textarea?.value || '').trim() !== String(expectedText || '').trim();
-      const sessionCreated = Boolean(current.sessionId && current.sessionId !== String(previousSessionId || ''));
-      const sendControlChanged = Boolean(composer.button && !isManualChatSendButton(composer.button));
-      if (draftCleared || sessionCreated || sendControlChanged || hasVisibleChatStopControl()) return true;
-      await wait(120);
-    }
-    return false;
-  }
-
-  function reactPropsOf(element) {
-    if (!element) return null;
-    try {
-      const key = Reflect.ownKeys(element).find(name => String(name).startsWith('__reactProps$'));
-      return key ? element[key] : null;
-    } catch (_) { return null; }
-  }
-
-  function callReactEventHandler(element, handlerNames, eventValues = {}) {
-    const props = reactPropsOf(element);
-    const handlerName = handlerNames.find(name => typeof props?.[name] === 'function');
-    if (!handlerName) return false;
-    let defaultPrevented = false;
-    const event = {
-      target: element,
-      currentTarget: element,
-      nativeEvent: null,
-      bubbles: true,
-      cancelable: true,
-      defaultPrevented: false,
-      preventDefault() { defaultPrevented = true; this.defaultPrevented = true; },
-      stopPropagation() {},
-      persist() {},
-      isDefaultPrevented() { return defaultPrevented; },
-      isPropagationStopped() { return false; },
-      ...eventValues
-    };
-    event.nativeEvent = event;
-    props[handlerName](event);
-    return true;
-  }
-
-  async function activateManualChatSend(textarea, button, message) {
-    const previousSessionId = currentRoleContext().sessionId;
-    const attempts = [
-      () => {
-        const nativeClick = pageWindow.HTMLElement?.prototype?.click;
-        if (nativeClick) nativeClick.call(button);
-        else button.click();
-      },
-      () => {
-        if (!callReactEventHandler(button, ['onClick', 'onPointerUp', 'onMouseUp'], { type: 'click', button: 0, buttons: 0 })) {
-          throw new Error('发送按钮上没有找到页面框架的点击处理器');
-        }
-      },
-      () => {
-        const form = textarea.closest('form') || button.closest('form');
-        if (!form) throw new Error('聊天输入区没有可提交的表单');
-        if (typeof form.requestSubmit === 'function') form.requestSubmit(button);
-        else form.dispatchEvent(new pageWindow.Event('submit', { bubbles: true, cancelable: true }));
-      },
-      () => {
-        const PointerEventCtor = pageWindow.PointerEvent || pageWindow.MouseEvent;
-        const MouseEventCtor = pageWindow.MouseEvent;
-        button.dispatchEvent(new PointerEventCtor('pointerdown', { bubbles: true, cancelable: true, pointerType: 'mouse', button: 0 }));
-        button.dispatchEvent(new PointerEventCtor('pointerup', { bubbles: true, cancelable: true, pointerType: 'mouse', button: 0 }));
-        button.dispatchEvent(new MouseEventCtor('click', { bubbles: true, cancelable: true, view: pageWindow, button: 0 }));
-      },
-      () => {
-        textarea.focus();
-        if (callReactEventHandler(textarea, ['onKeyDown', 'onKeyPress'], {
-          type: 'keydown', key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
-          shiftKey: false, ctrlKey: false, altKey: false, metaKey: false
-        })) return;
-        const KeyboardEventCtor = pageWindow.KeyboardEvent;
-        textarea.dispatchEvent(new KeyboardEventCtor('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
-        textarea.dispatchEvent(new KeyboardEventCtor('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
-      }
-    ];
-    const failures = [];
-    for (let index = 0; index < attempts.length; index += 1) {
-      try { attempts[index](); } catch (error) { failures.push(String(error?.message || error)); }
-      if (await manualChatSendStarted(textarea, message, previousSessionId)) return;
-      if (index + 1 < attempts.length) {
-        const composer = findManualChatComposer();
-        if (!composer.textarea || String(composer.textarea.value || '').trim() !== String(message || '').trim()) return;
-        button = composer.button || button;
-      }
-    }
-    throw new Error(`发送按钮已启用，但页面的点击、框架事件、表单提交和 Enter 都没有生效${failures.length ? `（${[...new Set(failures)].join('；')}）` : ''}`);
   }
 
   function manualAutoChatModelConfigs() {
@@ -2711,7 +2607,6 @@ roleStateReady = true;
           throw new Error('输入框中已有其他草稿，为避免覆盖已暂停任务');
         }
         setManualChatTextareaValue(textarea, String(job.message || DEFAULT_MANUAL_AUTO_CHAT_MESSAGE));
-        await waitForEnabledManualChatButton(textarea);
         job.phase = 'sending';
         job.sentAt = Date.now();
         if (!saveManualAutoChatJob(job)) throw new Error('发送前无法保存任务状态');
@@ -3995,8 +3890,7 @@ roleStateReady = true;
     if (response.status === 401 || response.status === 403) {
       throw new Error(loginErrorMessage(response.status, '归档记录查询'));
     }
-    let body = null;
-    try { body = await response.json(); } catch (_) {}
+    const body = await readJsonResponse(response);
     if (!response.ok || body?.code !== 200) {
       throw new Error(body?.reason || body?.message || `归档接口请求失败（HTTP ${response.status}）`);
     }
@@ -4401,9 +4295,7 @@ roleStateReady = true;
       persistMaskLibrary();
       if (siteRestore) {
         const refreshed = await fetchCurrentSiteMasks();
-        state.currentSiteMasks = refreshed.slice();
-        state.masks = refreshed;
-        state.siteMaskIds = state.masks.map(row => row.maskId);
+        updateSiteMaskState(refreshed);
       }
       state.status = `已撤回${label ? `：${label}` : '上一次本地变更'}。`;
     } catch (error) {
@@ -4431,6 +4323,65 @@ roleStateReady = true;
     };
   }
 
+  async function retryAuthenticatedRequest(response, url, options, refreshMessage) {
+    if (response.status === 401 && authorization) {
+      const previousAuthorization = authorization;
+      scanStoredAuthorization(true);
+      if (authorization && authorization !== previousAuthorization) {
+        const refreshedHeaders = new pageWindow.Headers(options.headers);
+        refreshedHeaders.set('Authorization', authorization);
+        response = await pageWindow.fetch(url, { ...options, headers: refreshedHeaders });
+        appendRunLog('info', refreshMessage);
+      }
+    }
+    if ((response.status === 401 || response.status === 403) && authorization) {
+      const cookieHeaders = new pageWindow.Headers(options.headers);
+      cookieHeaders.delete('Authorization');
+      response = await pageWindow.fetch(url, { ...options, headers: cookieHeaders });
+    }
+    return response;
+  }
+
+  async function fetchWithCookieFallback(url, options) {
+    let response = await pageWindow.fetch(url, options);
+    const headers = new pageWindow.Headers(options.headers);
+    if ((response.status === 401 || response.status === 403) && headers.has('Authorization')) {
+      authorization = '';
+      headers.delete('Authorization');
+      response = await pageWindow.fetch(url, { ...options, headers });
+    }
+    return response;
+  }
+
+  async function readJsonResponseText(response) {
+    const raw = await response.text();
+    let body = null;
+    try { body = raw ? JSON.parse(raw) : null; } catch (_) {}
+    return { raw, body };
+  }
+
+  async function readJsonResponse(response) { try { return await response.json(); } catch (_) { return null; } }
+
+  async function postJsonResponse(url, payload, wrapNetworkError = true) {
+    const headers = { Accept: 'application/json', 'Content-Type': 'application/json' };
+    if (authorization) headers.Authorization = authorization;
+    let response;
+    try {
+      response = await pageWindow.fetch(url, {
+        method: 'POST',
+        credentials: 'include',
+        headers,
+        body: JSON.stringify(payload)
+      });
+    } catch (error) {
+      if (!wrapNetworkError) throw error;
+      throw new Error(`请求未发出：${error?.message || error}`);
+    }
+    const { raw, body } = await readJsonResponseText(response);
+    const detail = body?.reason || body?.message || body?.error || raw || '服务器没有返回错误说明';
+    return { response, body, detail };
+  }
+
   async function requestPage(pageNum, isFollowed, pageParameter = 'pageNum') {
     scanStoredAuthorization();
     const url = new URL('/api/characters/query_session', location.origin);
@@ -4447,21 +4398,7 @@ roleStateReady = true;
       headers
     };
     let response = await pageWindow.fetch(url.href, options);
-    if (response.status === 401 && authorization) {
-      const previousAuthorization = authorization;
-      scanStoredAuthorization(true);
-      if (authorization && authorization !== previousAuthorization) {
-        const refreshedHeaders = new pageWindow.Headers(headers);
-        refreshedHeaders.set('Authorization', authorization);
-        response = await pageWindow.fetch(url.href, { ...options, headers: refreshedHeaders });
-        appendRunLog('info', '角色列表读取遇到 401 后已改用网页存储中的最新登录令牌重试。');
-      }
-    }
-    if ((response.status === 401 || response.status === 403) && authorization) {
-      const cookieHeaders = new pageWindow.Headers(headers);
-      cookieHeaders.delete('Authorization');
-      response = await pageWindow.fetch(url.href, { ...options, headers: cookieHeaders });
-    }
+    response = await retryAuthenticatedRequest(response, url.href, options, '角色列表读取遇到 401 后已改用网页存储中的最新登录令牌重试。');
     if (response.status === 429) throw new RateLimitError('角色列表');
     if (response.status === 401 || response.status === 403) {
       throw new Error(loginErrorMessage(response.status, '读取角色列表'));
@@ -4612,19 +4549,22 @@ roleStateReady = true;
     return { ...row, availability: '', metadataChecked: false, metadataError: '旧版把分享状态或 HTTP 状态误作角色状态，等待重新检测', metadataErrorCode: 0 };
   }
 
-  function explicitCharacterDeleted(body, raw = '') {
+  function responseErrorContext(body, raw = '') {
     const codes = [body?.error, body?.errorCode, body?.reasonCode, body?.data?.error, body?.data?.errorCode]
       .filter(value => value != null).map(value => String(value).trim().toLowerCase());
     const text = `${codes.join(' ')} ${String(raw || '')}`.toLowerCase();
+    return { codes, text };
+  }
+
+  function explicitCharacterDeleted(body, raw = '') {
+    const { codes, text } = responseErrorContext(body, raw);
     return codes.some(code => ['character_deleted', 'character_not_found', 'role_deleted', 'role_not_found', 'character removed by creator'].includes(code))
       || /角色.{0,18}(?:已被.{0,10}删除|已删除|不存在|找不到|已下架)/.test(text)
       || /(?:character|role).{0,30}(?:removed by creator|deleted|not found|does not exist)/i.test(text);
   }
 
   function isShareLinkResponse(body, raw = '') {
-    const codes = [body?.error, body?.errorCode, body?.reasonCode, body?.data?.error, body?.data?.errorCode]
-      .filter(value => value != null).map(value => String(value).trim().toLowerCase());
-    const text = `${codes.join(' ')} ${String(raw || '')}`.toLowerCase();
+    const { codes, text } = responseErrorContext(body, raw);
     return codes.some(code => ['share_link_expired', 'share_expired', 'invalid_share_link'].includes(code))
       || /分享(?:链接|码).{0,12}(?:失效|过期|不存在)/.test(text)
       || /share.{0,16}(?:expired|invalid|not found)/i.test(text);
@@ -4636,21 +4576,11 @@ roleStateReady = true;
     const headers = { Accept: 'application/json' };
     if (authorization) headers.Authorization = authorization;
     try {
-      let response = await pageWindow.fetch(url.href, { method: 'GET', credentials: 'include', headers, signal });
+      const options = { method: 'GET', credentials: 'include', headers, signal };
       // 网页可能已经用 Cookie 刷新登录，但脚本内存里仍保留旧 Bearer。
       // 服务端会优先校验这个旧令牌并返回 401/403，因此去掉它后用当前 Cookie 重试一次。
-      if ((response.status === 401 || response.status === 403) && headers.Authorization) {
-        authorization = '';
-        response = await pageWindow.fetch(url.href, {
-          method: 'GET',
-          credentials: 'include',
-          headers: { Accept: 'application/json' },
-          signal
-        });
-      }
-      const raw = await response.text();
-      let body = null;
-      try { body = raw ? JSON.parse(raw) : null; } catch (_) {}
+      const response = await fetchWithCookieFallback(url.href, options);
+      const { raw, body } = await readJsonResponseText(response);
       const apiSucceeded = response.ok && (body?.code == null || Number(body.code) === 200);
       if (!apiSucceeded) {
         if (response.status === 429) throw new RateLimitError('角色详情');
@@ -4687,20 +4617,10 @@ roleStateReady = true;
     const headers = { Accept: 'application/json' };
     if (authorization) headers.Authorization = authorization;
     try {
-      let response = await pageWindow.fetch(url.href, { method: 'GET', credentials: 'include', headers, signal });
-      if ((response.status === 401 || response.status === 403) && headers.Authorization) {
-        authorization = '';
-        response = await pageWindow.fetch(url.href, {
-          method: 'GET',
-          credentials: 'include',
-          headers: { Accept: 'application/json' },
-          signal
-        });
-      }
+      const options = { method: 'GET', credentials: 'include', headers, signal };
+      const response = await fetchWithCookieFallback(url.href, options);
       if (response.status === 429) throw new RateLimitError('作者资料');
-      const raw = await response.text();
-      let body = null;
-      try { body = raw ? JSON.parse(raw) : null; } catch (_) {}
+      const { raw, body } = await readJsonResponseText(response);
       if (!response.ok || body?.code !== 200) {
         if (response.status !== 500 && response.status !== 503) {
           metadataFailureReasons.add(explainFailure(new Error(`作者资料返回 HTTP ${response.status}${body?.message ? `：${body.message}` : body?.reason ? `：${body.reason}` : ''}`)));
@@ -5030,24 +4950,7 @@ roleStateReady = true;
 
   async function updateMask(targetMaskId, source) {
     const url = new URL('/api/masks/update', location.origin);
-    const headers = { Accept: 'application/json', 'Content-Type': 'application/json' };
-    if (authorization) headers.Authorization = authorization;
-    const payload = maskUpdatePayload(targetMaskId, source);
-    let response;
-    try {
-      response = await pageWindow.fetch(url.href, {
-        method: 'POST',
-        credentials: 'include',
-        headers,
-        body: JSON.stringify(payload)
-      });
-    } catch (error) {
-      throw new Error(`请求未发出：${error?.message || error}`);
-    }
-    const raw = await response.text();
-    let body = null;
-    try { body = raw ? JSON.parse(raw) : null; } catch (_) {}
-    const detail = body?.reason || body?.message || body?.error || raw || '服务器没有返回错误说明';
+    const { response, body, detail } = await postJsonResponse(url.href, maskUpdatePayload(targetMaskId, source));
     if (!response.ok) {
       if (response.status === 401 || response.status === 403) {
         throw new Error(`HTTP ${response.status}：没有面具更新权限或登录令牌已失效。服务器：${detail}`);
@@ -5070,23 +4973,7 @@ roleStateReady = true;
 
   async function createMask(source) {
     const url = new URL('/api/masks/create', location.origin);
-    const headers = { Accept: 'application/json', 'Content-Type': 'application/json' };
-    if (authorization) headers.Authorization = authorization;
-    let response;
-    try {
-      response = await pageWindow.fetch(url.href, {
-        method: 'POST',
-        credentials: 'include',
-        headers,
-        body: JSON.stringify(maskContentPayload(source))
-      });
-    } catch (error) {
-      throw new Error(`请求未发出：${error?.message || error}`);
-    }
-    const raw = await response.text();
-    let body = null;
-    try { body = raw ? JSON.parse(raw) : null; } catch (_) {}
-    const detail = body?.reason || body?.message || body?.error || raw || '服务器没有返回错误说明';
+    const { response, body, detail } = await postJsonResponse(url.href, maskContentPayload(source));
     if (!response.ok) {
       if (response.status === 401 || response.status === 403) {
         throw new Error(`HTTP ${response.status}：没有新增面具权限或登录令牌已失效。服务器：${detail}`);
@@ -5100,18 +4987,8 @@ roleStateReady = true;
 
   async function deleteMask(maskId) {
     const url = new URL('/api/masks/delete', location.origin);
-    const headers = { Accept: 'application/json', 'Content-Type': 'application/json' };
-    if (authorization) headers.Authorization = authorization;
-    const response = await pageWindow.fetch(url.href, {
-      method: 'POST',
-      credentials: 'include',
-      headers,
-      body: JSON.stringify({ maskId: Number.isSafeInteger(Number(maskId)) ? Number(maskId) : String(maskId || '') })
-    });
-    const raw = await response.text();
-    let body = null;
-    try { body = raw ? JSON.parse(raw) : null; } catch (_) {}
-    const detail = body?.reason || body?.message || body?.error || raw || '服务器没有返回错误说明';
+    const payload = { maskId: Number.isSafeInteger(Number(maskId)) ? Number(maskId) : String(maskId || '') };
+    const { response, body, detail } = await postJsonResponse(url.href, payload, false);
     if (!response.ok || body?.code !== 200) {
       throw new Error(`删除面具失败（HTTP ${response.status}）：${detail}`);
     }
@@ -5522,28 +5399,12 @@ roleStateReady = true;
 
   async function setCharacterDefaultMask(characterId, maskId) {
     const url = new URL('/api/characters/mask', location.origin);
-    const headers = { Accept: 'application/json', 'Content-Type': 'application/json' };
-    if (authorization) headers.Authorization = authorization;
     const numericMaskId = Number(maskId);
     const payload = {
       characterId: String(characterId),
       maskId: Number.isSafeInteger(numericMaskId) ? numericMaskId : String(maskId)
     };
-    let response;
-    try {
-      response = await pageWindow.fetch(url.href, {
-        method: 'POST',
-        credentials: 'include',
-        headers,
-        body: JSON.stringify(payload)
-      });
-    } catch (error) {
-      throw new Error(`请求未发出：${error?.message || error}`);
-    }
-    const raw = await response.text();
-    let body = null;
-    try { body = raw ? JSON.parse(raw) : null; } catch (_) {}
-    const detail = body?.reason || body?.message || body?.error || raw || '服务器没有返回错误说明';
+    const { response, body, detail } = await postJsonResponse(url.href, payload);
     if (!response.ok) {
       if (response.status === 401 || response.status === 403) {
         throw new Error(`HTTP ${response.status}：没有角色面具绑定权限或登录令牌已失效。服务器：${detail}`);
@@ -5558,21 +5419,11 @@ roleStateReady = true;
   async function setSessionMask(sessionId, maskId) {
     if (!sessionId || !maskId) return;
     const url = new URL('/api/sessions/mask', location.origin);
-    const headers = { Accept: 'application/json', 'Content-Type': 'application/json' };
-    if (authorization) headers.Authorization = authorization;
-    const response = await pageWindow.fetch(url.href, {
-      method: 'POST',
-      credentials: 'include',
-      headers,
-      body: JSON.stringify({
-        sessionId: String(sessionId),
-        maskId: Number.isSafeInteger(Number(maskId)) ? Number(maskId) : String(maskId)
-      })
-    });
-    const raw = await response.text();
-    let body = null;
-    try { body = raw ? JSON.parse(raw) : null; } catch (_) {}
-    const detail = body?.reason || body?.message || body?.error || raw || '服务器没有返回错误说明';
+    const payload = {
+      sessionId: String(sessionId),
+      maskId: Number.isSafeInteger(Number(maskId)) ? Number(maskId) : String(maskId)
+    };
+    const { response, body, detail } = await postJsonResponse(url.href, payload, false);
     if (!response.ok || (body?.code != null && body.code !== 200)) {
       throw new Error(`当前会话面具切换失败（HTTP ${response.status}）：${detail}`);
     }
@@ -5635,15 +5486,7 @@ roleStateReady = true;
     const binding = localBindingForCharacter(context.characterId);
     if (!binding) return;
     const key = `${context.characterId}|${context.sessionId}|${binding.libraryId || binding.sourceMaskId || binding.savedAt}`;
-    const reloadKey = JSON.stringify([maskAccountScope, key, binding.savedAt || '']);
     if (!options.force && state.autoSwitchKey === key) return;
-    try {
-      const appliedKey = pageWindow.sessionStorage.getItem(AUTO_SWITCH_RELOAD_KEY);
-      if (!options.force && (appliedKey === reloadKey || appliedKey === key)) {
-        state.autoSwitchKey = key;
-        return;
-      }
-    } catch (_) {}
     const targetMask = resolveLocalBinding(binding);
     if (!targetMask) {
       state.status = `角色“${binding.characterName || context.characterId}”绑定的本地面具已不存在，请重新绑定。`;
@@ -5654,39 +5497,19 @@ roleStateReady = true;
     state.loading = true;
     state.status = `正在为当前角色准备绑定面具“${maskBindingLabel(targetMask)}”……`;
     render();
-    let reloadChat = false;
     try {
       const active = await ensureMaskAvailable(targetMask);
       if (!active?.maskId) throw new Error('网站没有返回可用的面具 ID');
       await setCharacterDefaultMask(context.characterId, active.maskId);
       if (context.sessionId) await setSessionMask(context.sessionId, active.maskId);
       state.autoSwitchKey = key;
-      const current = currentRoleContext();
-      const sameChat = Boolean(context.sessionId) && current.characterId === context.characterId && current.sessionId === context.sessionId;
-      const navigationType = pageWindow.performance?.getEntriesByType?.('navigation')?.[0]?.type;
-      if (sameChat) {
-        try {
-          pageWindow.sessionStorage.setItem(AUTO_SWITCH_RELOAD_KEY, reloadKey);
-          reloadChat = options.force || navigationType === 'navigate' || navigationType === 'back_forward';
-        } catch (_) {
-          // 无法留下跨刷新标记时，只同步网站面具，不主动刷新。
-        }
-      }
-      state.status = `已自动切换当前角色面具：“${maskBindingLabel(targetMask)}”${reloadChat ? '，正在同步聊天页选中状态……' : sameChat ? '。如需同步页面显示，可手动刷新。' : '。'}`;
+      state.status = `已自动切换当前角色面具：“${maskBindingLabel(targetMask)}”。`;
     } catch (error) {
       state.status = `自动切换面具失败：${explainFailure(error)}`;
     } finally {
       state.autoSwitchRunning = false;
       state.loading = false;
       render();
-    }
-    if (reloadChat) {
-      try {
-        pageWindow.location.reload();
-      } catch (_) {
-        state.status = `面具已切换为“${maskBindingLabel(targetMask)}”，请手动刷新聊天页以同步选中状态。`;
-        render();
-      }
     }
   }
 
@@ -5697,7 +5520,7 @@ roleStateReady = true;
     autoSwitchTimer = setTimeout(() => {
       autoSwitchTimer = null;
       try { syncSiteCaptureScope(); } catch (error) { console.warn('[Mufy 角色与面具找回助手] 网站角色页面切换同步失败，面板仍可继续使用。', error); }
-      try { render(); } catch (error) { console.warn('[Mufy 角色与面具找回助手] 自动面具刷新失败，面板仍可继续使用。', error); }
+      try { render(); } catch (error) { console.warn('[Mufy 角色与面具找回助手] 自动面具面板渲染失败，面板仍可继续使用。', error); }
       try { ensureAutoMaskForCurrentRole(); } catch (error) { console.warn('[Mufy 角色与面具找回助手] 自动面具切换失败，面板仍可继续使用。', error); }
       recordCurrentChatHistory();
     }, 700);
@@ -5906,9 +5729,7 @@ roleStateReady = true;
       return;
     }
     state.loading = false;
-    state.currentSiteMasks = siteMasks.slice();
-    state.masks = siteMasks;
-    state.siteMaskIds = siteMasks.map(row => row.maskId);
+    updateSiteMaskState(siteMasks);
     render();
     const emptySlots = Math.max(0, MAX_SITE_MASKS - siteMasks.length);
     if (!siteMasks.length && !emptySlots) {
@@ -5955,9 +5776,7 @@ roleStateReady = true;
       }
       persistMaskLibrary();
       const refreshed = await fetchCurrentSiteMasks();
-      state.currentSiteMasks = refreshed.slice();
-      state.masks = refreshed;
-      state.siteMaskIds = state.masks.map(row => row.maskId);
+      updateSiteMaskState(refreshed);
       state.status = existingBackup >= 0
         ? `置换完成：“${libraryItem.name}”已写入网站面具；被换出的“${target.name}”在面具库已有备份，未重复保存，原本地备份也已保留。请刷新聊天页。`
         : `置换完成：“${libraryItem.name}”已写入网站面具，“${target.name}”已保存回面具库。请刷新聊天页。`;
@@ -6156,6 +5975,15 @@ roleStateReady = true;
       .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
   }
 
+  async function finishPausedRoleRead(resuming, includeFavorites) {
+    state.rolePaused = true;
+    applyRoleFetchResults(state.rolePendingRecent, state.rolePendingFavorites, state.roleReadMode === 'full' && !resuming);
+    saveRoleCache();
+    const historySaved = await queueRoleHistoryPersist(state.rolePendingRecent);
+    const count = state.rolePendingRecent.length + (includeFavorites ? state.rolePendingFavorites.length : 0);
+    state.status = `已暂停角色链接读取，当前已读 ${count} ${includeFavorites ? '条记录' : '条会话记录'}。${historySaved ? '已保存到本账号历史索引。' : '历史索引未保存，请查看运行日志。'}点击“继续读取”可接着读取。`;
+  }
+
   async function recoverRoles() {
     if (state.roleLoading || state.metadataLoading || state.loading) return;
     scanStoredAuthorization();
@@ -6182,11 +6010,7 @@ roleStateReady = true;
         for (const row of result.rows) state.lastRoleReadIds.add(String(row.characterId));
         state.roleProgress.recentPage = result.nextPage;
         if (result.paused) {
-          state.rolePaused = true;
-          applyRoleFetchResults(state.rolePendingRecent, state.rolePendingFavorites, state.roleReadMode === 'full' && !resuming);
-          saveRoleCache();
-          const historySaved = await queueRoleHistoryPersist(state.rolePendingRecent);
-          state.status = `已暂停角色链接读取，当前已读 ${state.rolePendingRecent.length} 条会话记录。${historySaved ? '已保存到本账号历史索引。' : '历史索引未保存，请查看运行日志。'}点击“继续读取”可接着读取。`;
+          await finishPausedRoleRead(resuming, false);
           return;
         }
         state.roleProgress.phase = 'favorites';
@@ -6197,11 +6021,7 @@ roleStateReady = true;
         for (const row of result.rows) state.lastRoleReadIds.add(String(row.characterId));
         state.roleProgress.favoritePage = result.nextPage;
         if (result.paused) {
-          state.rolePaused = true;
-          applyRoleFetchResults(state.rolePendingRecent, state.rolePendingFavorites, state.roleReadMode === 'full' && !resuming);
-          saveRoleCache();
-          const historySaved = await queueRoleHistoryPersist(state.rolePendingRecent);
-          state.status = `已暂停角色链接读取，当前已读 ${state.rolePendingRecent.length + state.rolePendingFavorites.length} 条记录。${historySaved ? '已保存到本账号历史索引。' : '历史索引未保存，请查看运行日志。'}点击“继续读取”可接着读取。`;
+          await finishPausedRoleRead(resuming, true);
           return;
         }
       }
@@ -6243,6 +6063,15 @@ roleStateReady = true;
       else found.set(row.characterId, mergeRole(found.get(row.characterId), row));
     });
     return [...found.values()];
+  }
+
+  function updateCachedRoleRows(rows) {
+    const byId = new Map(rows.map(row => [row.characterId, row]));
+    const replace = row => byId.get(row.characterId) || row;
+    state.chatted = state.chatted.map(replace);
+    state.chattedNotFavorite = state.chattedNotFavorite.map(replace);
+    state.favoriteOnly = state.favoriteOnly.map(replace);
+    saveRoleCache();
   }
 
   function scopeRoleRows(rows) {
@@ -6297,6 +6126,14 @@ roleStateReady = true;
     render();
   }
 
+  function finishMetadataTask() {
+    state.metadataAbortControllers.clear();
+    state.metadataLoading = false;
+    state.metadataTask = null;
+    state.metadataStopRequested = false;
+    render();
+  }
+
   async function refreshCachedRoleMetadata() {
     if (state.loading || state.roleLoading || state.metadataLoading) return;
     const cachedRows = pendingMetadataRows();
@@ -6310,12 +6147,7 @@ roleStateReady = true;
     try {
       const result = await enrichRoles(cachedRows);
       const enriched = result.rows;
-      const byId = new Map(enriched.map(row => [row.characterId, row]));
-      const replace = row => byId.get(row.characterId) || row;
-      state.chatted = state.chatted.map(replace);
-      state.chattedNotFavorite = state.chattedNotFavorite.map(replace);
-      state.favoriteOnly = state.favoriteOnly.map(replace);
-      saveRoleCache();
+      updateCachedRoleRows(enriched);
       const remaining = pendingMetadataRows().length;
       if (result.stopped) {
         state.status = `已停止作者和状态更新：已保存已经完成的结果，剩余 ${remaining} 个角色没有继续请求。再次点击“更新状态”可继续。`;
@@ -6333,11 +6165,7 @@ roleStateReady = true;
       const remaining = pendingMetadataRows().length;
       state.status = `作者信息更新失败：${explainFailure(error)}仍有 ${remaining} 个角色待更新，可点击“更新状态”继续。`;
     } finally {
-      state.metadataAbortControllers.clear();
-      state.metadataLoading = false;
-      state.metadataTask = null;
-      state.metadataStopRequested = false;
-      render();
+      finishMetadataTask();
     }
   }
 
@@ -6389,12 +6217,7 @@ roleStateReady = true;
       }
 
       const refreshed = [...enriched.values()];
-      const byId = new Map(refreshed.map(row => [row.characterId, row]));
-      const replace = row => byId.get(row.characterId) || row;
-      state.chatted = state.chatted.map(replace);
-      state.chattedNotFavorite = state.chattedNotFavorite.map(replace);
-      state.favoriteOnly = state.favoriteOnly.map(replace);
-      saveRoleCache();
+      updateCachedRoleRows(refreshed);
       const counts = roleStatusCounts(refreshed);
       const reason = [...metadataFailureReasons].slice(0, 2).join('；');
       const stopped = queueResult.stopped || authorResult.stopped;
@@ -6407,11 +6230,7 @@ roleStateReady = true;
     } catch (error) {
       state.status = `作者和角色状态重新查询失败：${explainFailure(error)}`;
     } finally {
-      state.metadataAbortControllers.clear();
-      state.metadataLoading = false;
-      state.metadataTask = null;
-      state.metadataStopRequested = false;
-      render();
+      finishMetadataTask();
     }
   }
 
@@ -6420,9 +6239,7 @@ roleStateReady = true;
     const headers = { Accept: 'application/json', 'Content-Type': 'application/json' };
     if (authorization) headers.Authorization = authorization;
     const response = await favoriteFetch(url.href, { method: 'POST', credentials: 'include', headers, body: JSON.stringify({ characterId: String(characterId), isFavorite }) }, isFavorite ? '收藏请求' : '取消收藏请求');
-    const raw = await response.text();
-    let body = null;
-    try { body = raw ? JSON.parse(raw) : null; } catch (_) {}
+    const { raw, body } = await readJsonResponseText(response);
     if (response.status === 429) throw new RateLimitError('收藏请求');
     if (response.status === 401 || response.status === 403) throw new Error(loginErrorMessage(response.status, '收藏操作'));
     if (!response.ok || (body?.code != null && body.code !== 200)) throw new Error(body?.message || body?.reason || raw || `HTTP ${response.status}`);
@@ -6598,9 +6415,7 @@ roleStateReady = true;
         headers: { Accept: 'application/json' }
       }, '分享链接查询（Cookie 重试）');
     }
-    const raw = await response.text();
-    let body = null;
-    try { body = raw ? JSON.parse(raw) : null; } catch (_) {}
+    const { raw, body } = await readJsonResponseText(response);
     if (response.status === 429) throw new RateLimitError('分享链接查询');
     if (response.status === 401 || response.status === 403) return null;
     if (response.status === 404) return null;
@@ -7010,13 +6825,21 @@ roleStateReady = true;
     // 遇到鉴权拒绝时去掉旧令牌重试一次，避免把“登录状态正常”误判成收藏夹失败。
     if ((response.status === 401 || response.status === 403) && authorization) {
       const cookieHeaders = new Headers(options.headers || {});
+      cookieHeaders.delete('Authorization');
       response = await favoriteFetch(url, { ...options, headers: cookieHeaders, credentials: 'include' }, '收藏夹请求（Cookie 重试）');
     }
     return response;
   }
 
+  function validateFavoriteApiResponse(response, body, raw, label, requireSuccess = false) {
+    if (response.status === 429) throw new RateLimitError(label);
+    if (response.status === 401 || response.status === 403) throw new Error(loginErrorMessage(response.status, label));
+    if (!response.ok || (body?.code != null && Number(body.code) !== 200) || (requireSuccess && body?.data?.success === false)) {
+      throw new Error(body?.message || body?.reason || raw || `HTTP ${response.status}`);
+    }
+  }
+
   async function requestFavoriteFolders() {
-    scanStoredAuthorization();
     const folders = [];
     const pageSize = 20;
     const seenPageSignatures = new Set();
@@ -7026,16 +6849,9 @@ roleStateReady = true;
       url.searchParams.set('pageNum', String(page));
       url.searchParams.set('pageSize', String(pageSize));
       const headers = { Accept: 'application/json' };
-      if (authorization) headers.Authorization = authorization;
       const response = await fetchFavoriteApi(url.href, { method: 'GET', headers });
-      const raw = await response.text();
-      let body = null;
-      try { body = raw ? JSON.parse(raw) : null; } catch (_) {}
-      if (response.status === 429) throw new RateLimitError('收藏夹列表查询');
-      if (response.status === 401 || response.status === 403) throw new Error(loginErrorMessage(response.status, '收藏夹列表查询'));
-      if (!response.ok || (body?.code != null && Number(body.code) !== 200)) {
-        throw new Error(body?.message || body?.reason || raw || `HTTP ${response.status}`);
-      }
+      const { raw, body } = await readJsonResponseText(response);
+      validateFavoriteApiResponse(response, body, raw, '收藏夹列表查询');
       const data = body?.data || {};
       const rows = favoriteFolderRows(body);
       const signature = rows.map(folder => `${String(folder?.id || '')}:${String(folder?.name || '')}`).join('|');
@@ -7058,20 +6874,13 @@ roleStateReady = true;
   async function createFavoriteFolder(name) {
     const url = new URL('/api/favorites/', location.origin);
     const headers = { Accept: 'application/json', 'Content-Type': 'application/json' };
-    if (authorization) headers.Authorization = authorization;
     const response = await fetchFavoriteApi(url.href, {
       method: 'POST',
       headers,
       body: JSON.stringify({ name: String(name) })
     });
-    const raw = await response.text();
-    let body = null;
-    try { body = raw ? JSON.parse(raw) : null; } catch (_) {}
-    if (response.status === 429) throw new RateLimitError('创建收藏夹');
-    if (response.status === 401 || response.status === 403) throw new Error(loginErrorMessage(response.status, '创建收藏夹'));
-    if (!response.ok || (body?.code != null && Number(body.code) !== 200)) {
-      throw new Error(body?.message || body?.reason || raw || `HTTP ${response.status}`);
-    }
+    const { raw, body } = await readJsonResponseText(response);
+    validateFavoriteApiResponse(response, body, raw, '创建收藏夹');
     const folder = body?.data;
     if (!folder?.id) throw new Error('创建收藏夹成功，但返回结果没有收藏夹 ID。');
     return folder;
@@ -7082,20 +6891,13 @@ roleStateReady = true;
     if (!folderId || !ids.length) return;
     const url = new URL('/api/favorites/characters', location.origin);
     const headers = { Accept: 'application/json', 'Content-Type': 'application/json' };
-    if (authorization) headers.Authorization = authorization;
     const response = await fetchFavoriteApi(url.href, {
       method: 'PUT',
       headers,
       body: JSON.stringify({ folderId: Number(folderId) || folderId, addCharacterIds: ids })
     });
-    const raw = await response.text();
-    let body = null;
-    try { body = raw ? JSON.parse(raw) : null; } catch (_) {}
-    if (response.status === 429) throw new RateLimitError('加入收藏夹');
-    if (response.status === 401 || response.status === 403) throw new Error(loginErrorMessage(response.status, '加入收藏夹'));
-    if (!response.ok || (body?.code != null && Number(body.code) !== 200) || body?.data?.success === false) {
-      throw new Error(body?.message || body?.reason || raw || `HTTP ${response.status}`);
-    }
+    const { raw, body } = await readJsonResponseText(response);
+    validateFavoriteApiResponse(response, body, raw, '加入收藏夹', true);
   }
 
   function favoriteFolderCharacterLists(body) {
@@ -7114,48 +6916,31 @@ roleStateReady = true;
   }
 
   async function requestFavoriteFolder(folderId) {
-    scanStoredAuthorization();
     const url = new URL('/api/favorites/', location.origin);
     url.searchParams.set('id', String(folderId));
     const headers = { Accept: 'application/json' };
-    if (authorization) headers.Authorization = authorization;
     const response = await fetchFavoriteApi(url.href, { method: 'GET', headers });
-    const raw = await response.text();
-    let body = null;
-    try { body = raw ? JSON.parse(raw) : null; } catch (_) {}
-    if (response.status === 429) throw new RateLimitError('读取收藏夹内容');
-    if (response.status === 401 || response.status === 403) throw new Error(loginErrorMessage(response.status, '读取收藏夹内容'));
-    if (!response.ok || (body?.code != null && Number(body.code) !== 200)) {
-      throw new Error(body?.message || body?.reason || raw || `HTTP ${response.status}`);
-    }
+    const { raw, body } = await readJsonResponseText(response);
+    validateFavoriteApiResponse(response, body, raw, '读取收藏夹内容');
     return body;
   }
 
   async function deleteFavoriteFolder(folderId) {
-    scanStoredAuthorization();
     const headers = { Accept: 'application/json', 'Content-Type': 'application/json' };
-    if (authorization) headers.Authorization = authorization;
     const url = new URL('/api/favorites/', location.origin);
     let response = await fetchFavoriteApi(url.href, {
       method: 'DELETE', headers, body: JSON.stringify({ id: Number(folderId) || folderId })
     });
-    let raw = await response.text();
-    let body = null;
-    try { body = raw ? JSON.parse(raw) : null; } catch (_) {}
+    let { raw, body } = await readJsonResponseText(response);
     const succeeded = response.ok && (body?.code == null || Number(body.code) === 200) && body?.data?.success !== false;
     if (!succeeded && (response.status === 400 || response.status === 404 || response.status === 405)) {
       // 兼容把 ID 放在查询参数中的接口版本；仅在第一次请求明确失败时重试。
       const queryUrl = new URL('/api/favorites/', location.origin);
       queryUrl.searchParams.set('id', String(folderId));
       response = await fetchFavoriteApi(queryUrl.href, { method: 'DELETE', headers: { Accept: 'application/json' } });
-      raw = await response.text();
-      try { body = raw ? JSON.parse(raw) : null; } catch (_) { body = null; }
+      ({ raw, body } = await readJsonResponseText(response));
     }
-    if (response.status === 429) throw new RateLimitError('删除收藏夹');
-    if (response.status === 401 || response.status === 403) throw new Error(loginErrorMessage(response.status, '删除收藏夹'));
-    if (!response.ok || (body?.code != null && Number(body.code) !== 200) || body?.data?.success === false) {
-      throw new Error(body?.message || body?.reason || raw || `HTTP ${response.status}`);
-    }
+    validateFavoriteApiResponse(response, body, raw, '删除收藏夹', true);
   }
 
   function favoriteFolderId(folder) {
@@ -7432,20 +7217,13 @@ roleStateReady = true;
     return authorId ? `id:${authorId}` : (name ? `name:${name}` : `unknown:${String(row?.characterId || '')}`);
   }
 
-  function authorFolderMigrationDone() {
-    try { return loadAndMigrateScopedValue(AUTHOR_FOLDER_MIGRATION_KEY) === '1'; } catch (_) { return false; }
-  }
+  function authorFolderMigrationDone() { return loadScopedFlag(AUTHOR_FOLDER_MIGRATION_KEY); }
 
   function markAuthorFolderMigrationDone() {
-    try { localStorage.setItem(accountStorageKey(AUTHOR_FOLDER_MIGRATION_KEY), '1'); } catch (_) {}
+    saveScopedFlag(AUTHOR_FOLDER_MIGRATION_KEY, true);
   }
 
-  function loadAutoAddFavoriteFolderSetting() {
-    try {
-      const saved = loadAndMigrateScopedValue(AUTO_ADD_FAVORITE_FOLDER_KEY);
-      return saved == null ? true : saved === '1';
-    } catch (_) { return true; }
-  }
+  function loadAutoAddFavoriteFolderSetting() { return loadScopedFlag(AUTO_ADD_FAVORITE_FOLDER_KEY, true); }
 
   function setAutoAddFavoriteFolderSetting(enabled) {
     state.autoAddFavoriteFolder = Boolean(enabled);
@@ -8205,9 +7983,7 @@ roleStateReady = true;
       const headers = { Accept: 'application/json' };
       if (authorization) headers.Authorization = authorization;
       const response = await pageWindow.fetch(url.href, { method: 'GET', credentials: 'include', headers });
-      const raw = await response.text();
-      let body = null;
-      try { body = raw ? JSON.parse(raw) : null; } catch (_) {}
+      const { raw, body } = await readJsonResponseText(response);
       if (response.status === 429) throw new RateLimitError('作者作品列表');
       if (response.status === 401 || response.status === 403) throw new Error(loginErrorMessage(response.status, '读取作者全部作品'));
       if (!response.ok || body?.code != null && body.code !== 200) {
@@ -8760,21 +8536,7 @@ roleStateReady = true;
       if (response.status !== 429 && response.status < 500) break;
       if (attempt < 2) await wait(1200 * (attempt + 1));
     }
-    if (response.status === 401 && authorization) {
-      const previousAuthorization = authorization;
-      scanStoredAuthorization(true);
-      if (authorization && authorization !== previousAuthorization) {
-        const refreshedHeaders = new pageWindow.Headers(headers);
-        refreshedHeaders.set('Authorization', authorization);
-        response = await pageWindow.fetch(url.href, { ...options, headers: refreshedHeaders });
-        appendRunLog('info', '聊天记录读取遇到 401 后已改用网页存储中的最新登录令牌重试。');
-      }
-    }
-    if ((response.status === 401 || response.status === 403) && authorization) {
-      const cookieHeaders = new pageWindow.Headers(headers);
-      cookieHeaders.delete('Authorization');
-      response = await pageWindow.fetch(url.href, { ...options, headers: cookieHeaders });
-    }
+    response = await retryAuthenticatedRequest(response, url.href, options, '聊天记录读取遇到 401 后已改用网页存储中的最新登录令牌重试。');
     if (response.status === 401 || response.status === 403) throw new Error(loginErrorMessage(response.status, '聊天记录读取'));
     if (!response.ok) throw new Error(`聊天记录接口失败（HTTP ${response.status}）`);
     const body = await response.json();
@@ -10032,6 +9794,27 @@ roleStateReady = true;
   let quoteAvatarQueue = Promise.resolve();
   let quoteAvatarRetryAt = 0;
 
+  function normalizedQuoteText(value) {
+    return String(value || '').replace(/\u200b/g, '').replace(/\n{3,}/g, '\n\n').trim();
+  }
+
+  function isQuoteStatusLine(value) {
+    return /^(?:偷看剧本中|思考中|正在思考|正在生成|thinking|reasoning)[.…·\s]*$/i.test(String(value || '').trim());
+  }
+
+  function quoteTextFromContainer(container) {
+    if (!container) return '';
+    const markdownTexts = [...container.querySelectorAll?.('.react-markdown') || []]
+      .filter(isVisibleElement)
+      .map(node => normalizedQuoteText(node.innerText || node.textContent))
+      .filter(text => text && !isQuoteStatusLine(text));
+    if (markdownTexts.length) return markdownTexts.sort((a, b) => b.length - a.length)[0];
+    const lines = normalizedQuoteText(container.innerText || container.textContent).split('\n')
+      .map(line => line.trim())
+      .filter(line => line && !isQuoteStatusLine(line) && !/^(?:复制|摘录)$/.test(line));
+    return normalizedQuoteText(lines.join('\n'));
+  }
+
   function messageContainerFromAction(actionBox) {
     let node = actionBox;
     for (let depth = 0; node && depth < 9; depth += 1, node = node.parentElement) {
@@ -10046,9 +9829,7 @@ roleStateReady = true;
     if (!selection || !selection.rangeCount || !text) return;
     const common = selection.getRangeAt(0).commonAncestorContainer;
     const element = common.nodeType === 1 ? common : common.parentElement;
-    const markdown = element?.closest?.('.react-markdown');
-    if (!markdown) return;
-    let container = markdown;
+    let container = element;
     for (let depth = 0; container && depth < 9; depth += 1, container = container.parentElement) {
       if (container.querySelector?.('[id="mufy_message_actions_box"]')) {
         lastQuoteSelection = { text, container, savedAt: Date.now() };
@@ -10101,8 +9882,7 @@ roleStateReady = true;
   function openQuoteEditor(container) {
     if (!container || !panel) return;
     rememberQuoteSelection();
-    const markdown = container.querySelector('.react-markdown');
-    const fullText = String(markdown?.innerText || markdown?.textContent || '').replace(/\n{3,}/g, '\n\n').trim();
+    const fullText = quoteTextFromContainer(container);
     const selected = lastQuoteSelection && lastQuoteSelection.container === container && Date.now() - lastQuoteSelection.savedAt < 120000
       ? lastQuoteSelection.text : '';
     const character = currentQuoteCharacter();
@@ -11065,7 +10845,7 @@ roleStateReady = true;
       #mufy-recovery-auto-chat-toast[data-tone="success"]{border-color:#4d9e78;background:#173528ef;color:#caffdf}
       #mufy-recovery-auto-chat-toast[data-tone="error"]{border-color:#b45f69;background:#421f25ef;color:#ffd1d6}
       #mufy-recovery-panel{position:fixed;right:16px;bottom:62px;z-index:2147483647;width:480px;max-width:calc(100vw - 32px);height:min(72vh,720px);min-height:300px;max-height:90vh;overflow:hidden;display:flex;flex-direction:column;background:#222228;color:#eee;border:1px solid #555;border-radius:8px;box-shadow:0 12px 35px #0008;font:13px system-ui}
-      #mufy-recovery-head{display:flex;align-items:center;justify-content:flex-start;gap:4px;padding:9px 9px 6px;background:#303038;border-radius:8px 8px 0 0;font-weight:700;flex:none}
+      #mufy-recovery-head{display:flex;align-items:center;justify-content:flex-start;gap:4px;font-weight:700;flex:none}
       #mufy-recovery-title{display:flex;align-items:center;gap:6px;min-width:0}
       #mufy-recovery-title>span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
       #mufy-recovery-head button{background:none;border:0;color:#bbb;font-size:20px;cursor:pointer}
@@ -11078,7 +10858,7 @@ roleStateReady = true;
       #mufy-recovery-history-entry.active{background:#786bd4!important;border-color:#8f84dd!important;color:#fff!important}
       #mufy-recovery-close{flex:none;width:27px;height:27px;padding:0!important;line-height:23px!important}
       #mufy-recovery-help{width:19px;height:19px;padding:0!important;border:1px solid #777!important;border-radius:50%!important;background:#3a3a43!important;color:#eee!important;font-size:12px!important;line-height:17px!important;font-weight:700}
-      .mufy-recovery-version{color:#f3c969;font-size:10px;font-weight:600}
+      .mufy-recovery-version{font-size:10px;font-weight:600}
       #mufy-recovery-help-modal{position:absolute;inset:48px 10px 10px;z-index:4;display:flex;flex-direction:column;overflow:hidden;background:#292930;border:1px solid #666;border-radius:7px;box-shadow:0 8px 24px #0008}
       #mufy-recovery-help-head{display:flex;align-items:center;justify-content:space-between;padding:9px 11px;background:#35353e;border-bottom:1px solid #4b4b55}
       #mufy-recovery-help-head button{padding:1px 6px!important}
@@ -11164,7 +10944,7 @@ roleStateReady = true;
       #mufy-recovery-resize-handle-bottom{bottom:0}
       #mufy-recovery-resize-handle::after,#mufy-recovery-resize-handle-bottom::after{content:'';width:48px;height:4px;border-radius:3px;background:#777;box-shadow:0 1px 2px #0007}
       #mufy-recovery-panel.is-resizing{user-select:none}
-      #mufy-recovery-controls{display:grid;gap:7px;padding:9px 10px;flex:none;overflow:auto;max-height:55%}
+      #mufy-recovery-controls{display:grid;flex:none;overflow:auto;max-height:55%}
       #mufy-recovery-controls.is-section-home,#mufy-recovery-controls.is-standalone-section{flex:1;min-height:0;max-height:none;align-content:start}
       #mufy-recovery-role-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;align-items:stretch}
       #mufy-recovery-favorite-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;align-items:stretch}
@@ -11182,9 +10962,7 @@ roleStateReady = true;
       #mufy-recovery-role-read-options{display:flex;align-items:center;gap:6px;flex-wrap:wrap;color:#bbb;font-size:11px}
       #mufy-recovery-role-read-options select,#mufy-recovery-role-read-options input{border:1px solid #555;border-radius:6px;background:#18181c;color:#fff;padding:5px 6px;font:inherit}
       #mufy-recovery-role-latest-pages{width:52px}
-      .mufy-recovery-export-group{display:flex;gap:6px}
-      #mufy-recovery-mask-actions .mufy-recovery-export-group{display:contents}
-      #mufy-recovery-panel button{border:1px solid #666;border-radius:6px;background:#35353c;color:#eee;padding:6px 9px;cursor:pointer}
+      #mufy-recovery-panel button{border:1px solid #666;padding:6px 9px;cursor:pointer}
       #mufy-recovery-panel button:disabled{opacity:.5;cursor:wait}
       #mufy-recovery-run{background:#786bd4!important;border-color:#8f84dd!important}
       #mufy-recovery-role-filter-row{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);gap:6px;min-width:0}
@@ -11206,19 +10984,18 @@ roleStateReady = true;
       #mufy-recovery-panel [hidden]{display:none!important}
       #mufy-recovery-auto-switch-label{display:flex;align-items:center;gap:6px;color:#bbb;font-size:11px;user-select:none}
       #mufy-recovery-auto-switch-label input{accent-color:#786bd4}
-      #mufy-recovery-status{color:#b9b4e9;line-height:1.45}
+      #mufy-recovery-status{line-height:1.45}
       #mufy-recovery-favorite-task-controls{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:6px;padding:7px;border:1px solid #665d35;border-radius:7px;background:#2c281d}
       #mufy-recovery-favorite-task-main{background:#735f22!important;border-color:#b69637!important;color:#fff0b0!important;font-weight:700}
       #mufy-recovery-favorite-task-cancel{background:#572b30!important;border-color:#945059!important;color:#ffc6cb!important}
-      #mufy-recovery-section-home{display:grid;gap:10px;padding:4px 1px 6px}
-      #mufy-recovery-section-home-head{display:grid;gap:3px;padding:2px 3px;color:#eee}#mufy-recovery-section-home-head small{color:#999;font-size:11px;font-weight:400}
-      #mufy-recovery-section-cards{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-      .mufy-recovery-section-card{min-height:74px!important;display:grid!important;align-content:center;justify-items:start;gap:5px;padding:11px 12px!important;text-align:left;background:#292934!important;border-color:#555566!important}
-      .mufy-recovery-section-card strong{font-size:14px;color:#f4f1ff}.mufy-recovery-section-card small{font-size:10px;line-height:1.35;color:#aaa;font-weight:400}
-      .mufy-recovery-section-card:first-child{border-color:#8275ca!important;background:#38324f!important}
+      #mufy-recovery-section-home{display:grid}
+      #mufy-recovery-section-home-head{display:grid;gap:3px;color:#eee}#mufy-recovery-section-home-head small{font-size:11px;font-weight:400}
+      #mufy-recovery-section-cards{display:grid;grid-template-columns:1fr 1fr}
+      .mufy-recovery-section-card{display:grid!important;align-content:center;justify-items:start;gap:5px;padding:11px 12px!important;text-align:left}
+      .mufy-recovery-section-card strong{color:#f4f1ff}.mufy-recovery-section-card small{font-size:10px;line-height:1.35;font-weight:400}
       #mufy-recovery-section-nav{display:flex;align-items:center;gap:9px;padding-bottom:2px;border-bottom:1px solid #414149}
-      #mufy-recovery-section-back{flex:none;background:#292934!important;border-color:#625b7e!important;color:#dcd6ff!important}
-      #mufy-recovery-section-title{font-size:14px;color:#f1efff}
+      #mufy-recovery-section-back{flex:none;border-color:#625b7e!important;color:#dcd6ff!important}
+      #mufy-recovery-section-title{color:#f1efff}
       #mufy-recovery-tabs{display:grid;grid-template-columns:1fr 1fr;gap:6px}
       #mufy-recovery-favorite-tabs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
       #mufy-recovery-mask-tabs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
@@ -11230,14 +11007,13 @@ roleStateReady = true;
       #mufy-recovery-tabs button.active,#mufy-recovery-favorite-tabs button.active,#mufy-recovery-mask-tabs button.active{background:#786bd4;border-color:#8f84dd;color:#fff}
       #mufy-recovery-tabs .mufy-recovery-tab-action,#mufy-recovery-mask-tabs .mufy-recovery-tab-action{background:#453d69;border-color:#8578c8;color:#f4efff}
       #mufy-recovery-role-section,#mufy-recovery-favorite-section,#mufy-recovery-chat-section,#mufy-recovery-account-section,#mufy-recovery-material-section,#mufy-recovery-mask-section{display:flex;flex-direction:column;gap:8px}
-      #mufy-recovery-account-current{display:grid;gap:3px;padding:12px;border:1px solid #766bb155;border-radius:12px;background:linear-gradient(145deg,#4c407055,#24232d)}#mufy-recovery-account-current strong{font-size:11px;color:#aaa3c6}#mufy-recovery-account-current span{font-size:15px;color:#f5f2ff;font-weight:700}#mufy-recovery-account-current small{color:#aaa;overflow-wrap:anywhere}#mufy-recovery-account-mode-guide{display:grid;grid-template-columns:1fr 1fr;gap:6px}#mufy-recovery-account-mode-guide>div{display:grid;gap:4px;padding:9px;border:1px solid #494653;border-radius:9px;background:#24232b}#mufy-recovery-account-mode-guide strong{font-size:11px;color:#eeeaff}#mufy-recovery-account-mode-guide small{color:#9993a6;font-size:9px;line-height:1.45}#mufy-recovery-account-tools{display:grid;grid-template-columns:1fr;gap:6px}#mufy-recovery-account-save{background:#6654a4!important;border-color:#927fd3!important;font-weight:700}#mufy-recovery-account-list{display:grid;align-content:start;gap:7px;overflow:auto;padding-bottom:12px}.mufy-account-card{display:flex;align-items:center;justify-content:space-between;gap:9px;padding:10px 11px;border:1px solid #494653;border-radius:11px;background:#272630}.mufy-account-card.is-current{border-color:#68ba8a88;box-shadow:inset 3px 0 #59b17f}.mufy-account-card>div{display:grid;min-width:0;gap:3px}.mufy-account-card strong{color:#f0edff}.mufy-account-card small{color:#aaa;overflow-wrap:anywhere}.mufy-account-badges{display:flex;gap:4px;flex-wrap:wrap}.mufy-account-card em{width:max-content;padding:2px 6px;border-radius:9px;background:#24553a;color:#a8e7bd;font-size:9px;font-style:normal}.mufy-account-card em.has-password{background:#4b3f72;color:#ddd3ff}.mufy-account-card em.login-mode.native{background:#394554;color:#c5d9ed}.mufy-account-card em.login-mode.direct{background:#5b3f70;color:#ead5ff}.mufy-account-card>span{display:flex;flex:none;gap:4px;flex-wrap:wrap;justify-content:flex-end}.mufy-account-card button{padding:4px 7px!important;font-size:10px!important}.mufy-recovery-account-hint{display:block;color:#8f8a9c;line-height:1.55}#mufy-recovery-account-password-modal{position:absolute;inset:92px 18px auto;z-index:18;display:grid;gap:11px;padding:14px;border:1px solid #8c7bd1;border-radius:13px;background:#292930;box-shadow:0 18px 50px #000d}#mufy-recovery-account-password-modal[hidden]{display:none}#mufy-recovery-account-password-modal h3{margin:0;color:#f5f2ff;font-size:15px}#mufy-recovery-account-password-summary{color:#aaa;line-height:1.55}#mufy-recovery-account-password-warning{padding:8px;border:1px solid #a7774766;border-radius:8px;background:#5e3d2633;color:#e5bd91;font-size:10px;line-height:1.5}#mufy-recovery-account-password-input{box-sizing:border-box;width:100%;border:1px solid #655c83;border-radius:9px;background:#17171c;color:#fff;padding:10px;font-size:14px;outline:none}#mufy-recovery-account-password-actions{display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px}#mufy-recovery-account-password-save{background:#6654a4!important;border-color:#927fd3!important}
+      #mufy-recovery-account-current{display:grid;gap:3px;padding:12px;border:1px solid #766bb155;border-radius:12px;background:linear-gradient(145deg,#4c407055,#24232d)}#mufy-recovery-account-current strong{font-size:11px;color:#aaa3c6}#mufy-recovery-account-current span{font-size:15px;color:#f5f2ff;font-weight:700}#mufy-recovery-account-current small{color:#aaa;overflow-wrap:anywhere}#mufy-recovery-account-mode-guide{display:grid;grid-template-columns:1fr 1fr;gap:6px}#mufy-recovery-account-mode-guide>div{display:grid;gap:4px;padding:9px;border:1px solid #494653;border-radius:9px;background:#24232b}#mufy-recovery-account-mode-guide strong{font-size:11px;color:#eeeaff}#mufy-recovery-account-mode-guide small{color:#9993a6;font-size:9px;line-height:1.45}#mufy-recovery-account-tools{display:grid;grid-template-columns:1fr;gap:6px}#mufy-recovery-account-save{background:#6654a4!important;border-color:#927fd3!important;font-weight:700}#mufy-recovery-account-list{display:grid;align-content:start;gap:7px;overflow:auto;padding-bottom:12px}.mufy-account-card{display:flex;align-items:center;justify-content:space-between;gap:9px;padding:10px 11px;border:1px solid #494653;border-radius:11px;background:#272630}.mufy-account-card.is-current{border-color:#68ba8a88;box-shadow:inset 3px 0 #59b17f}.mufy-account-card>div{display:grid;min-width:0;gap:3px}.mufy-account-card strong{color:#f0edff}.mufy-account-card small{color:#aaa;overflow-wrap:anywhere}.mufy-account-badges{display:flex;gap:4px;flex-wrap:wrap}.mufy-account-card em{width:max-content;padding:2px 6px;border-radius:9px;background:#24553a;color:#a8e7bd;font-size:9px;font-style:normal}.mufy-account-card em.has-password{background:#4b3f72;color:#ddd3ff}.mufy-account-card em.login-mode.native{background:#394554;color:#c5d9ed}.mufy-account-card em.login-mode.direct{background:#5b3f70;color:#ead5ff}.mufy-account-card>span{display:flex;flex:none;gap:4px;flex-wrap:wrap;justify-content:flex-end}.mufy-account-card button{padding:4px 7px!important;font-size:10px!important}#mufy-recovery-account-password-modal{position:absolute;inset:92px 18px auto;z-index:18;display:grid;gap:11px;padding:14px;border:1px solid #8c7bd1;border-radius:13px;background:#292930;box-shadow:0 18px 50px #000d}#mufy-recovery-account-password-modal[hidden]{display:none}#mufy-recovery-account-password-modal h3{margin:0;color:#f5f2ff;font-size:15px}#mufy-recovery-account-password-summary{color:#aaa;line-height:1.55}#mufy-recovery-account-password-warning{padding:8px;border:1px solid #a7774766;border-radius:8px;background:#5e3d2633;color:#e5bd91;font-size:10px;line-height:1.5}#mufy-recovery-account-password-input{box-sizing:border-box;width:100%;border:1px solid #655c83;border-radius:9px;background:#17171c;color:#fff;padding:10px;font-size:14px;outline:none}#mufy-recovery-account-password-actions{display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px}#mufy-recovery-account-password-save{background:#6654a4!important;border-color:#927fd3!important}
       #mufy-recovery-material-tabs{display:grid;grid-template-columns:1fr 1fr;gap:6px}#mufy-recovery-material-tabs button.active{background:#786bd4;border-color:#8f84dd;color:#fff}#mufy-recovery-material-tools{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}#mufy-recovery-material-add{background:#5e4f91!important;border-color:#8373bb!important;font-weight:700}
       #mufy-recovery-material-list{display:grid;align-content:start;gap:7px;overflow:auto;padding-bottom:20px}.mufy-material-card{display:flex;align-items:flex-start;justify-content:space-between;gap:9px;padding:10px 11px;border:1px solid #4c485d;border-radius:10px;background:#272630;cursor:pointer}.mufy-material-card:hover{border-color:#8c7bd1;background:#302d40}.mufy-material-card>div{min-width:0;display:grid;gap:4px}.mufy-material-card strong{color:#f0edff}.mufy-material-card small{display:-webkit-box;overflow:hidden;color:#aaa;font-size:10px;line-height:1.5;-webkit-line-clamp:4;-webkit-box-orient:vertical;white-space:pre-wrap;overflow-wrap:anywhere}.mufy-material-card>span{display:flex;flex:none;gap:5px}.mufy-material-card>span button{padding:4px 7px!important;font-size:10px!important}
       #mufy-recovery-material-editor{position:absolute;inset:48px 10px 10px;z-index:14;display:flex;flex-direction:column;overflow:hidden;border:1px solid #766bb1;border-radius:12px;background:#292930;box-shadow:0 16px 45px #000c}#mufy-recovery-material-editor[hidden]{display:none}#mufy-recovery-material-editor-head{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid #4b4b55;background:#35353e}#mufy-recovery-material-editor-head button{padding:1px 7px!important;font-size:20px!important}#mufy-recovery-material-editor-body{flex:1;min-height:0;display:grid;grid-template-rows:auto minmax(0,1fr);gap:10px;padding:12px}#mufy-recovery-material-editor-body label{display:grid;grid-template-rows:auto auto;align-content:start;min-height:0;gap:5px;color:#bbb;font-size:11px}#mufy-recovery-material-editor-body label:last-child{grid-template-rows:auto minmax(180px,1fr)}#mufy-recovery-material-editor-body input,#mufy-recovery-material-editor-body textarea{box-sizing:border-box;width:100%;border:1px solid #555;border-radius:8px;background:#18181c;color:#fff;padding:9px;font:13px/1.55 system-ui;outline:none}#mufy-recovery-material-editor-body textarea{height:100%;min-height:180px;resize:none}#mufy-recovery-material-editor-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:0 12px 12px}#mufy-recovery-material-editor-save{background:#62539a!important;border-color:#8878c5!important}
-      .mufy-recovery-section-note{display:grid;gap:4px;padding:10px 11px;border:1px solid #4d4962;border-radius:8px;background:#292733}.mufy-recovery-section-note span{color:#aaa;font-size:11px;line-height:1.5}
       #mufy-recovery-list{flex:1 1 auto;min-height:0;overflow:auto;border-top:1px solid #444;padding:0 10px 16px}
-      .mufy-recovery-row{display:flex;gap:8px;padding:7px 2px;border-bottom:1px solid #3e3e45}
-      .mufy-recovery-row img{width:40px;height:40px;flex:none;border-radius:10px;object-fit:cover}
+      .mufy-recovery-row{display:flex;gap:8px;border-bottom:1px solid #3e3e45}
+      .mufy-recovery-row img{width:40px;height:40px;flex:none;object-fit:cover}
       .mufy-recovery-info{flex:1;min-width:0;word-break:break-all}.mufy-recovery-info a{color:#aaa1ff}
       .mufy-recovery-row-title{display:flex;align-items:center;justify-content:space-between;gap:8px}
       .mufy-recovery-mask-title-tools{margin-left:auto;display:inline-flex;align-items:center;gap:4px;flex:none}
@@ -11276,15 +11052,12 @@ roleStateReady = true;
       .mufy-recovery-chat-match{display:grid;gap:3px;margin:6px 0;padding:7px 8px;border-left:3px solid #8b79db;border-radius:4px;background:#2c2939;color:#ddd;line-height:1.45}
       .mufy-recovery-chat-match b{color:#c9c0ff;font-size:10px}.mufy-recovery-chat-match span{word-break:break-word}
       .mufy-recovery-chat-match mark{padding:0 2px;border-radius:2px;background:#ffe16b;color:#201b00}
-      .mufy-recovery-chat-jump{padding:4px 8px!important;background:#493f70!important;border-color:#7e70b5!important;color:#eee!important;font-size:11px!important}
       .mufy-recovery-chat-target{outline:3px solid #a78bfa!important;outline-offset:4px!important;background-color:rgba(139,92,246,.16)!important;animation:mufy-chat-target-pulse 1.1s ease-in-out 4}
       @keyframes mufy-chat-target-pulse{0%,100%{box-shadow:0 0 0 0 rgba(167,139,250,.15)}50%{box-shadow:0 0 0 8px rgba(167,139,250,.3)}}
       .mufy-recovery-detail{margin-top:5px;white-space:pre-wrap;color:#ccc;line-height:1.45}
       .mufy-recovery-row-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:4px}
       .mufy-recovery-row-actions button{padding:4px 7px!important;font-size:11px}
       .mufy-recovery-mask-binding-info{color:#898995;font-size:10px;white-space:nowrap}
-      .mufy-recovery-share-select{flex:none;border:0!important;background:transparent!important;color:#aaa1ff!important;font-size:18px!important;line-height:1;padding:2px 5px!important}
-      .mufy-recovery-share-select.is-selected{color:#cabfff!important}
       .mufy-recovery-empty{padding:22px;text-align:center;color:#999}
       .mufy-quote-action-separator{height:14px;width:1px;flex:none;border-radius:999px;background:#ffffff33}
       .mufy-quote-action-button{display:flex;align-items:center;gap:4px;padding-right:16px;color:#e9c77f;font-size:14px;line-height:1;cursor:pointer;white-space:nowrap;user-select:none}
@@ -11294,7 +11067,7 @@ roleStateReady = true;
       #mufy-recovery-panel-beauty-modal{position:absolute;inset:48px 10px 10px;z-index:15;display:flex;flex-direction:column;overflow:hidden;border:1px solid #766bb1;border-radius:14px;background:#25252cf5;box-shadow:0 18px 48px #000c}#mufy-recovery-panel-beauty-modal[hidden]{display:none}#mufy-recovery-panel-beauty-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:11px 13px;border-bottom:1px solid #4b4b55;background:#35353e}#mufy-recovery-panel-beauty-head>span{display:grid;gap:3px}#mufy-recovery-panel-beauty-head small{color:#aaa;font-size:10px;font-weight:400}#mufy-recovery-panel-beauty-head button{padding:1px 7px!important;font-size:20px!important}#mufy-recovery-panel-beauty-fields{flex:1;min-height:0;overflow:auto;display:grid;grid-template-columns:1fr 1fr;align-content:start;gap:11px;padding:14px}#mufy-recovery-panel-beauty-fields label{display:grid;gap:6px;color:#c6c1d1;font-size:11px}#mufy-recovery-panel-beauty-fields select,#mufy-recovery-panel-beauty-fields input{box-sizing:border-box;width:100%}#mufy-recovery-panel-beauty-fields input[type="color"]{height:42px;padding:3px;border:1px solid #ffffff24;border-radius:10px;background:#111}#mufy-recovery-panel-beauty-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:0 14px 14px}#mufy-recovery-panel-beauty-done{background:var(--mufy-panel-accent,#786bd4)!important;color:#fff!important}
       #mufy-recovery-model-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 11px;background:#35353e;border-bottom:1px solid #4b4b55}#mufy-recovery-model-head>span{display:grid;gap:2px}#mufy-recovery-model-summary{color:#aaa;font-size:10px;font-weight:400}#mufy-recovery-model-head button{padding:1px 7px!important;font-size:20px!important}
       #mufy-recovery-model-tools{display:grid;grid-template-columns:1fr auto;gap:7px;padding:9px 10px;border-bottom:1px solid #414149}#mufy-recovery-model-search{box-sizing:border-box;min-width:0;width:100%;border:1px solid #555;border-radius:6px;background:#18181c;color:#fff;padding:7px 9px;font:inherit}#mufy-recovery-model-refresh{background:#51477b!important;border-color:#7e70b5!important}#mufy-recovery-model-notify-label{grid-column:1/-1;display:flex;align-items:center;gap:7px;color:#cfcfd7;font-size:11px;cursor:pointer}#mufy-recovery-model-notify{accent-color:#786bd4}
-      #mufy-recovery-model-list{flex:1;min-height:0;overflow:auto;padding:8px;display:grid;align-content:start;gap:6px;background:#1c1c21}.mufy-model-monitor-row{display:flex;align-items:center;gap:8px;padding:9px;border:1px solid #454550;border-radius:8px;background:#28282f;cursor:pointer}.mufy-model-monitor-row:has(input:checked){border-color:#796bb1;background:#332e46}.mufy-model-monitor-row input{flex:none;accent-color:#786bd4}.mufy-model-monitor-info{min-width:0;display:grid;gap:3px;flex:1}.mufy-model-monitor-info b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}.mufy-model-monitor-info small{color:#999;font-size:9px;line-height:1.4}.mufy-model-monitor-row em{flex:none;padding:2px 6px;border-radius:9px;background:#444;font-size:9px;font-style:normal;color:#ddd}
+      #mufy-recovery-model-list{flex:1;min-height:0;overflow:auto;padding:8px;display:grid;align-content:start;gap:6px;background:#1c1c21}.mufy-model-monitor-row{display:flex;align-items:center;gap:8px;padding:9px;border:1px solid #454550;cursor:pointer}.mufy-model-monitor-row input{flex:none;accent-color:#786bd4}.mufy-model-monitor-info{min-width:0;display:grid;gap:3px;flex:1}.mufy-model-monitor-info b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}.mufy-model-monitor-info small{color:#999;font-size:9px;line-height:1.4}.mufy-model-monitor-row em{flex:none;padding:2px 6px;border-radius:9px;background:#444;font-size:9px;font-style:normal;color:#ddd}
       #mufy-recovery-quote-editor-modal,#mufy-recovery-quote-library-modal{position:absolute;inset:8px;z-index:12;display:flex;flex-direction:column;overflow:hidden;border:1px solid #766bb1;border-radius:10px;background:#25252c;box-shadow:0 14px 42px #000c}
       #mufy-recovery-quote-editor-modal[hidden],#mufy-recovery-quote-library-modal[hidden]{display:none}
       .mufy-quote-modal-head{display:flex;align-items:center;justify-content:space-between;gap:9px;padding:10px 12px;background:#34333e;border-bottom:1px solid #4c4a5c}
@@ -11344,7 +11117,7 @@ roleStateReady = true;
       #mufy-recovery-panel #mufy-recovery-quote-save-text{background:var(--mufy-panel-accent-button);border-color:var(--mufy-panel-border)}
       #mufy-recovery-quote-preview:focus-visible{outline:2px solid var(--mufy-panel-accent);outline-offset:5px}
       #mufy-recovery-panel .mufy-quote-card-image strong,#mufy-recovery-panel .mufy-quote-card-image small,#mufy-recovery-panel .mufy-quote-stack-cover small{color:#fff!important}
-      #mufy-recovery-quote-preview{width:min(100%,300px);width:min(100%,380px,64cqh);aspect-ratio:9/14;cursor:pointer;perspective:1200px}
+      #mufy-recovery-quote-preview{width:min(100%,380px,64cqh);aspect-ratio:9/14;cursor:pointer;perspective:1200px}
       @media (prefers-reduced-motion:reduce){#mufy-recovery-quote-preview .mufy-quote-card-inner{transition:none}}
       .mufy-quote-card-inner{position:relative;width:100%;height:100%;transform-style:preserve-3d;transition:transform .65s cubic-bezier(.2,.75,.2,1)}#mufy-recovery-quote-preview.is-flipped .mufy-quote-card-inner{transform:rotateY(180deg)}
       .mufy-quote-card-face{position:absolute;inset:0;box-sizing:border-box;overflow:hidden;border:2px solid var(--quote-accent);border-radius:17px;backface-visibility:hidden;box-shadow:inset 0 0 0 6px color-mix(in srgb,var(--quote-accent) 24%,transparent),0 9px 24px #0004}
@@ -11360,14 +11133,13 @@ roleStateReady = true;
       #mufy-recovery-head{min-height:38px;padding:10px 13px 8px;background:linear-gradient(90deg,#ffffff0d,#8f7bff12,#ffffff08);border-bottom:1px solid #ffffff12;border-radius:18px 18px 0 0}#mufy-recovery-title>span{font-size:14px;letter-spacing:.01em}.mufy-recovery-version{color:#d9c7ff}
       #mufy-recovery-head #mufy-recovery-log-entry,#mufy-recovery-head #mufy-recovery-history-entry{border-color:#ffffff24!important;border-radius:999px!important;background:#ffffff0a!important;color:#d9d6e7!important;box-shadow:inset 0 1px #ffffff12}
       #mufy-recovery-controls{gap:10px;padding:12px 13px;background:linear-gradient(180deg,#ffffff03,transparent)}
-      #mufy-recovery-panel button{border-color:var(--mufy-panel-border);border-radius:10px;background:var(--mufy-panel-surface);color:#eeedf6;box-shadow:0 1px 3px #0001;transition:transform .16s ease,border-color .16s ease,background .16s ease,box-shadow .16s ease}#mufy-recovery-panel button:hover{border-color:var(--mufy-panel-accent);background:var(--mufy-panel-accent-soft)}#mufy-recovery-panel button:active{transform:translateY(1px) scale(.99)}
-      #mufy-recovery-panel button.active,#mufy-recovery-panel .mufy-recovery-section-card:first-child{background:var(--mufy-panel-accent-soft)!important;border-color:color-mix(in srgb,var(--mufy-panel-accent,#8f7be8) 72%,transparent)!important}#mufy-recovery-panel #mufy-recovery-head{border-bottom-color:color-mix(in srgb,var(--mufy-panel-accent,#8f7be8) 24%,transparent)}
-      #mufy-recovery-panel #mufy-recovery-title>span,#mufy-recovery-panel #mufy-recovery-section-title,#mufy-recovery-panel .mufy-recovery-row>div>strong,#mufy-recovery-panel .mufy-recovery-section-note strong{color:var(--mufy-panel-text,#f2efff)!important}
+      #mufy-recovery-panel button{border-color:var(--mufy-panel-border);border-radius:10px;background:var(--mufy-panel-surface);box-shadow:0 1px 3px #0001;transition:transform .16s ease,border-color .16s ease,background .16s ease,box-shadow .16s ease}#mufy-recovery-panel button:hover{border-color:var(--mufy-panel-accent);background:var(--mufy-panel-accent-soft)}#mufy-recovery-panel button:active{transform:translateY(1px) scale(.99)}
+      #mufy-recovery-panel #mufy-recovery-head{border-bottom-color:color-mix(in srgb,var(--mufy-panel-accent,#8f7be8) 24%,transparent)}
+      #mufy-recovery-panel #mufy-recovery-title>span,#mufy-recovery-panel #mufy-recovery-section-title,#mufy-recovery-panel .mufy-recovery-row>div>strong{color:var(--mufy-panel-text,#f2efff)!important}
       #mufy-recovery-section-home{gap:13px;padding:6px 2px 10px}#mufy-recovery-section-home-head{padding:4px 5px 1px}#mufy-recovery-section-home-head strong{font-size:17px;letter-spacing:.02em}#mufy-recovery-section-home-head small{color:#8e8a9e}
       #mufy-recovery-section-cards{gap:10px}.mufy-recovery-section-card{position:relative;min-height:86px!important;overflow:hidden;border-color:var(--mufy-panel-border)!important;border-radius:15px!important;background:var(--mufy-panel-surface)!important;box-shadow:inset 0 1px #ffffff12,0 10px 24px #0002!important}.mufy-recovery-section-card:before{content:'';position:absolute;inset:0;background:radial-gradient(circle at 12% 0,var(--mufy-panel-accent-soft),transparent 48%);pointer-events:none}.mufy-recovery-section-card:hover{transform:translateY(-2px);border-color:var(--mufy-panel-accent)!important}.mufy-recovery-section-card strong{position:relative;font-size:14px}.mufy-recovery-section-card small{position:relative;color:var(--mufy-panel-muted)}.mufy-recovery-section-card:first-child{background:var(--mufy-panel-accent-soft)!important;border-color:var(--mufy-panel-accent)!important}
       #mufy-recovery-update-entry.has-update{border-color:#61c99588!important;background:linear-gradient(145deg,#225a4166,#242c3250)!important;box-shadow:inset 0 1px #baffd022,0 0 22px #42c78322!important}#mufy-recovery-update-entry.has-update strong{color:#bfffd8}#mufy-recovery-update-entry.has-update small{color:#8de8b2}
       #mufy-recovery-section-nav{padding:1px 0 9px;border-color:#ffffff12}#mufy-recovery-section-back{border-radius:999px!important;background:#ffffff09!important}#mufy-recovery-section-title{font-size:16px;letter-spacing:.04em}
-      .mufy-recovery-section-note{padding:12px 13px;border-color:#a995ff2e;border-radius:14px;background:linear-gradient(135deg,#8d73df18,#ffffff06);box-shadow:inset 0 1px #ffffff0d}.mufy-recovery-section-note strong{color:#f1edff;font-size:13px}.mufy-recovery-section-note span{color:#9d98ad}
       #mufy-recovery-panel input:not([type="checkbox"]):not([type="range"]):not([type="color"]),#mufy-recovery-panel select,#mufy-recovery-panel textarea{border-color:var(--mufy-panel-border)!important;border-radius:11px!important;background:var(--mufy-panel-input)!important;color:var(--mufy-panel-text)!important;box-shadow:inset 0 1px 4px #0002!important;outline:none}#mufy-recovery-panel input:focus,#mufy-recovery-panel select:focus,#mufy-recovery-panel textarea:focus{border-color:var(--mufy-panel-accent)!important;box-shadow:0 0 0 3px var(--mufy-panel-accent-soft)!important}
       #mufy-recovery-panel #mufy-recovery-account-email-input,#mufy-recovery-panel #mufy-recovery-account-password-input{box-sizing:border-box;width:100%;padding:10px;font-size:14px}#mufy-recovery-panel #mufy-recovery-account-current,#mufy-recovery-panel #mufy-recovery-account-mode-guide>div{background:var(--mufy-panel-surface)!important;border-color:var(--mufy-panel-border)!important;color:var(--mufy-panel-text)!important;box-shadow:inset 0 1px color-mix(in srgb,#fff 55%,transparent)}#mufy-recovery-panel #mufy-recovery-account-current span,#mufy-recovery-panel #mufy-recovery-account-mode-guide strong,#mufy-recovery-panel #mufy-recovery-account-password-title{color:var(--mufy-panel-text)!important}#mufy-recovery-panel #mufy-recovery-account-current small,#mufy-recovery-panel #mufy-recovery-account-mode-guide small,#mufy-recovery-panel #mufy-recovery-account-password-summary{color:var(--mufy-panel-muted)!important}#mufy-recovery-panel #mufy-recovery-account-password-warning{background:var(--mufy-panel-accent-soft)!important;border-color:var(--mufy-panel-border)!important;color:var(--mufy-panel-text)!important}
       #mufy-recovery-panel[data-section="accounts"] #mufy-recovery-account-section { order: -1; }
@@ -11389,13 +11161,13 @@ roleStateReady = true;
       #mufy-recovery-status{border-radius:11px;color:#c6bfdc}#mufy-recovery-list{border-color:#ffffff12}.mufy-recovery-row{margin:5px 0;padding:10px 9px;border:1px solid #ffffff0d;border-radius:13px;background:#ffffff05}.mufy-recovery-row:hover{border-color:#a995ff28;background:#ffffff08}.mufy-recovery-row img{border-radius:12px;box-shadow:0 5px 13px #0007}
       #mufy-recovery-model-modal,#mufy-recovery-log-modal,#mufy-recovery-export-modal{border-color:#ffffff24;border-radius:16px;background:linear-gradient(155deg,#292936f5,#17171ff8);box-shadow:0 22px 60px #000c}.mufy-model-monitor-row{border-color:#ffffff14;border-radius:12px;background:#ffffff07}.mufy-model-monitor-row:has(input:checked){border-color:#9f8bea55;background:#8d73df18}
       /* Selected theme owns every panel surface; no legacy purple/black mixing. */
-      #mufy-recovery-panel #mufy-recovery-head,#mufy-recovery-panel .mufy-recovery-section-note,#mufy-recovery-panel .mufy-recovery-section-card,#mufy-recovery-panel .mufy-account-card,#mufy-recovery-panel .mufy-material-card,#mufy-recovery-panel .mufy-recovery-row,#mufy-recovery-panel .mufy-model-monitor-row{background:var(--mufy-panel-surface)!important;border-color:var(--mufy-panel-border)!important;color:var(--mufy-panel-text)!important}
+      #mufy-recovery-panel #mufy-recovery-head,#mufy-recovery-panel .mufy-recovery-section-card,#mufy-recovery-panel .mufy-account-card,#mufy-recovery-panel .mufy-material-card,#mufy-recovery-panel .mufy-recovery-row,#mufy-recovery-panel .mufy-model-monitor-row{background:var(--mufy-panel-surface)!important;border-color:var(--mufy-panel-border)!important;color:var(--mufy-panel-text)!important}
       #mufy-recovery-panel #mufy-recovery-head,#mufy-recovery-panel #mufy-recovery-panel-beauty-head,#mufy-recovery-panel .mufy-quote-modal-head,#mufy-recovery-panel #mufy-recovery-material-editor-head,#mufy-recovery-panel #mufy-recovery-model-head{background:var(--mufy-panel-surface-strong)!important;border-color:var(--mufy-panel-border)!important}
       #mufy-recovery-panel #mufy-recovery-panel-beauty-modal,#mufy-recovery-panel #mufy-recovery-model-modal,#mufy-recovery-panel #mufy-recovery-log-modal,#mufy-recovery-panel #mufy-recovery-export-modal,#mufy-recovery-panel #mufy-recovery-material-editor,#mufy-recovery-panel #mufy-recovery-quote-editor-modal,#mufy-recovery-panel #mufy-recovery-quote-library-modal,#mufy-recovery-panel #mufy-recovery-quote-style-modal{background:var(--mufy-panel-bg)!important;border-color:var(--mufy-panel-border)!important;color:var(--mufy-panel-text)!important}
       #mufy-recovery-panel button{color:var(--mufy-panel-text)}#mufy-recovery-panel button.active,#mufy-recovery-panel .mufy-recovery-section-card:first-child{background:var(--mufy-panel-accent-soft)!important;border-color:var(--mufy-panel-accent)!important}
       #mufy-recovery-panel:where([data-panel-tone="light"]) button{color:var(--mufy-panel-text)!important}
       #mufy-recovery-panel[data-panel-tone="light"] .mufy-recovery-row-actions a{color:var(--mufy-panel-accent-text)!important}
-      #mufy-recovery-panel small,#mufy-recovery-panel .mufy-recovery-muted,#mufy-recovery-panel .mufy-recovery-section-card small,#mufy-recovery-panel .mufy-recovery-section-note span,#mufy-recovery-panel-beauty-fields label{color:var(--mufy-panel-muted)!important}
+      #mufy-recovery-panel small,#mufy-recovery-panel .mufy-recovery-muted,#mufy-recovery-panel .mufy-recovery-section-card small,#mufy-recovery-panel-beauty-fields label{color:var(--mufy-panel-muted)!important}
       #mufy-recovery-panel[data-panel-tone="light"]{box-shadow:0 24px 60px #26313a24,inset 0 1px #fff}#mufy-recovery-panel[data-panel-tone="light"] button{box-shadow:inset 0 1px #fff8,0 3px 10px #26313a10}#mufy-recovery-panel[data-panel-tone="light"] #mufy-recovery-title,#mufy-recovery-panel[data-panel-tone="light"] strong{color:var(--mufy-panel-text)}
       #mufy-recovery-panel #mufy-recovery-log-entry,#mufy-recovery-panel #mufy-recovery-history-entry,#mufy-recovery-panel #mufy-recovery-section-back{background:var(--mufy-panel-surface)!important;border-color:var(--mufy-panel-border)!important;color:var(--mufy-panel-text)!important}
       #mufy-recovery-panel #mufy-recovery-status,#mufy-recovery-panel #mufy-recovery-role-read-options,#mufy-recovery-panel #mufy-recovery-auto-switch-label,#mufy-recovery-panel .mufy-recovery-auto-delay{color:var(--mufy-panel-muted)!important}
@@ -11476,7 +11248,7 @@ roleStateReady = true;
       .theme-book .mufy-quote-preview-text p{margin:0 0 .75em;text-indent:2em}
       .mufy-quote-export-options,.mufy-quote-export-options label{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
       .mufy-quote-export-options{justify-content:space-between;padding:8px 12px;border:1px solid var(--mufy-panel-border);border-radius:10px}
-      #mufy-recovery-panel ::-webkit-scrollbar{width:7px;height:7px}#mufy-recovery-panel ::-webkit-scrollbar-track{background:transparent}#mufy-recovery-panel ::-webkit-scrollbar-thumb{border:2px solid transparent;border-radius:999px;background:#82769c;background-clip:padding-box}#mufy-recovery-panel ::-webkit-scrollbar-thumb:hover{background:#a594cb;background-clip:padding-box}
+      #mufy-recovery-panel ::-webkit-scrollbar{width:7px;height:7px}#mufy-recovery-panel ::-webkit-scrollbar-track{background:transparent}#mufy-recovery-panel ::-webkit-scrollbar-thumb{border:2px solid transparent;border-radius:999px}
       #mufy-recovery-panel ::-webkit-scrollbar-thumb{background:var(--mufy-panel-accent)!important;background-clip:padding-box!important}#mufy-recovery-panel ::-webkit-scrollbar-thumb:hover{background:var(--mufy-panel-accent-text)!important;background-clip:padding-box!important}
       @media (max-width:520px){
         #mufy-recovery-panel{right:8px;bottom:58px;width:calc(100vw - 16px);max-width:calc(100vw - 16px)}
