@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.122
+// @version      3.0.0-dev.123
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,7 +21,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.122';
+    : '3.0.0-dev.123';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -123,6 +123,7 @@
   const AUTH_HOOK_MARK = '__mufyRecoveryAuthHookedV3Test';
   let authCaptureLogged = false;
   const observedChatApiSignatures = new Set();
+  const authRetryOptions = new WeakSet();
 
   function mufyApiUrl(requestUrl) {
     try {
@@ -885,9 +886,31 @@
     } catch (_) {}
   }
 
-  function scanStoredAuthorization(force = false) {
-    if (authorization && !force) return authorization;
-    const previousAuthorization = authorization;
+  function normalizeAuthorizationCandidate(value) {
+    const text = String(value || '').trim().replace(/^"|"$/g, '');
+    if (/^Bearer\s+\S+$/i.test(text)) return `Bearer ${text.replace(/^Bearer\s+/i, '')}`;
+    return /^[\w-]+\.[\w-]+\.[\w-]+$/.test(text) ? `Bearer ${text}` : '';
+  }
+
+  function authorizationTokenTimes(candidate) {
+    const payload = decodeJwtPayload(candidate);
+    const seconds = value => Number.isFinite(Number(value)) ? Number(value) : 0;
+    return {
+      expiresAt: seconds(payload?.exp),
+      issuedAt: seconds(payload?.iat),
+      notBefore: seconds(payload?.nbf)
+    };
+  }
+
+  function authorizationIsUsable(candidate) {
+    if (!candidate) return false;
+    const { expiresAt, notBefore } = authorizationTokenTimes(candidate);
+    const now = Date.now() / 1000;
+    return (!expiresAt || expiresAt > now) && (!notBefore || notBefore <= now);
+  }
+
+  function storedAuthorizationCandidates(scope) {
+    const found = new Set();
     const storages = [];
     try { if (pageWindow.localStorage) storages.push(pageWindow.localStorage); } catch (_) {}
     try { if (pageWindow.sessionStorage) storages.push(pageWindow.sessionStorage); } catch (_) {}
@@ -895,27 +918,53 @@
       try {
         for (let index = 0; index < storage.length; index += 1) {
           const key = String(storage.key(index) || '');
-          if (!/(token|authorization|access.?token|jwt)/i.test(key)) continue;
-          const rawValue = String(storage.getItem(key) || '').replace(/^"|"$/g, '');
-          let nestedValue = '';
+          if (!/(token|authorization|jwt)/i.test(key) || /refresh|id.?token/i.test(key)) continue;
+          const raw = String(storage.getItem(key) || '');
+          let value = raw;
           try {
-            const parsed = JSON.parse(rawValue);
-            nestedValue = String(parsed?.accessToken || parsed?.access_token || parsed?.token || parsed?.authorization || '');
+            const parsed = JSON.parse(raw);
+            value = typeof parsed === 'string' ? parsed
+              : parsed?.accessToken || parsed?.access_token || parsed?.authorization || parsed?.token || '';
           } catch (_) {}
-          const value = nestedValue || rawValue;
-          const candidate = /^Bearer\s+\S+/i.test(value)
-            ? value
-            : (/^[\w-]+\.[\w-]+\.[\w-]+$/.test(value) ? `Bearer ${value}` : '');
-          if (candidate) {
-            authorization = candidate;
-            adoptMaskAccountFromAuthorization(candidate);
-            completePendingAccountSwitch(candidate);
-            return authorization;
-          }
+          const candidate = normalizeAuthorizationCandidate(value);
+          if (authorizationIsUsable(candidate)) found.add(candidate);
         }
       } catch (_) {}
     }
-    return authorization || previousAuthorization;
+    return [...found].map(candidate => ({
+      candidate,
+      scope: maskAccountScopeFromAuthorization(candidate),
+      ...authorizationTokenTimes(candidate)
+    })).filter(row => !scope || row.scope === scope)
+      .sort((left, right) => right.issuedAt - left.issuedAt || right.expiresAt - left.expiresAt)
+      .map(row => row.candidate);
+  }
+
+  function scanStoredAuthorization() {
+    if (authorizationIsUsable(authorization)) return authorization;
+    const scope = maskAccountScope || maskAccountScopeFromAuthorization(authorization);
+    const candidates = storedAuthorizationCandidates(scope);
+    const candidate = scope || candidates.length === 1 ? candidates[0] : '';
+    authorization = candidate || '';
+    if (candidate) {
+      authorization = candidate;
+      adoptMaskAccountFromAuthorization(candidate);
+      completePendingAccountSwitch(candidate);
+      return authorization;
+    }
+    return authorization;
+  }
+
+  function sameAccountRetryAuthorization(sentAuthorization, scope) {
+    if (!scope) return '';
+    if (authorization !== sentAuthorization && authorizationIsUsable(authorization)
+        && maskAccountScopeFromAuthorization(authorization) === scope) return authorization;
+    return storedAuthorizationCandidates(scope).find(candidate => candidate !== sentAuthorization) || '';
+  }
+
+  function fetchWithoutAuthCapture(url, options) {
+    authRetryOptions.add(options);
+    return pageWindow.fetch(url, options);
   }
 
   function findAuthorizationStorageSlot() {
@@ -1080,8 +1129,7 @@
         try {
           requestUrl = typeof input === 'string' ? input : input?.url || String(input || '');
         } catch (_) {}
-        captureAuthorization(init?.headers, requestUrl);
-        captureAuthorization(input?.headers, requestUrl);
+        if (!authRetryOptions.has(init)) captureAuthorization(init?.headers ?? input?.headers, requestUrl);
         captureChatCompletionRequest(requestUrl, init?.body || '');
         const result = originalFetch.apply(this, arguments);
         try {
@@ -2290,11 +2338,6 @@ roleStateReady = true;
         activeModelName = config.name;
         let reader = null;
         try {
-          const createHeaders = () => {
-            const headers = { Accept: 'text/event-stream', 'Content-Type': 'application/json' };
-            if (authorization) headers.Authorization = authorization;
-            return headers;
-          };
           const payload = {
             userInput: String(job.message || DEFAULT_MANUAL_AUTO_CHAT_MESSAGE),
             sessionId: '00000000-0000-0000-0000-000000000000',
@@ -2304,33 +2347,40 @@ roleStateReady = true;
             itemText: null,
             skipRedPacket: false
           };
-          const request = headers => pageWindow.fetch(new URL('/api/v1/chat/completions', location.origin).href, {
-            method: 'POST',
-            credentials: 'include',
-            signal: controller.signal,
-            headers,
-            body: JSON.stringify(payload)
-          });
+          const scope = job.accountScope || maskAccountScope;
+          const request = token => {
+            if (scope && scope !== maskAccountScope) throw new ManualAutoChatPausedError('发送前检测到 Mufy 账号已切换');
+            if (manualAutoChatWasStopped()) throw new ManualAutoChatPausedError('任务已暂停');
+            const headers = { Accept: 'text/event-stream', 'Content-Type': 'application/json' };
+            if (token) headers.Authorization = token;
+            return fetchWithoutAuthCapture(new URL('/api/v1/chat/completions', location.origin).href, {
+              method: 'POST',
+              credentials: 'include',
+              signal: controller.signal,
+              headers,
+              body: JSON.stringify(payload)
+            });
+          };
 
-          let headers = createHeaders();
-          let response = await request(headers);
-          if (response.status === 401 && authorization) {
-            const previousAuthorization = authorization;
-            scanStoredAuthorization(true);
-            if (authorization && authorization !== previousAuthorization) {
-              headers = createHeaders();
-              response = await request(headers);
-              appendRunLog('info', '一键扣数遇到 401 后已改用网页存储中的最新登录令牌重试。');
+          const sentAuthorization = authorizationIsUsable(authorization) ? authorization : '';
+          let response = await request(sentAuthorization);
+          const authAttempts = [`${sentAuthorization ? '页面令牌' : 'Cookie'} HTTP ${response.status}`];
+          if (response.status === 401) {
+            const replacement = sameAccountRetryAuthorization(sentAuthorization, scope);
+            if (replacement) {
+              response = await request(replacement);
+              authAttempts.push(`同账号备用令牌 HTTP ${response.status}`);
+            }
+            if (response.status === 401 && sentAuthorization) {
+              response = await request('');
+              authAttempts.push(`Cookie HTTP ${response.status}`);
             }
           }
-          if ((response.status === 401 || response.status === 403) && authorization) {
-            const cookieHeaders = createHeaders();
-            delete cookieHeaders.Authorization;
-            response = await request(cookieHeaders);
-            if (response.ok) appendRunLog('warn', '一键扣数的旧令牌被拒绝，已改用当前登录 Cookie 发送成功。');
+          if (authAttempts.length > 1 || response.status === 401 || response.status === 403) {
+            appendRunLog(response.ok ? 'info' : 'warn', `一键扣数鉴权：${authAttempts.join(' → ')}。`);
           }
           if (response.status === 401 || response.status === 403) {
-            throw new Error(loginErrorMessage(response.status, '自动发送消息'));
+            throw new Error(`自动发送消息被聊天接口拒绝（${authAttempts.join('，')}）。可在同一角色页用 Mufy 自带的发送按钮试一条，确认是网站发送也失败，还是只有一键扣数失败。`);
           }
           if (!response.ok) {
             const raw = await response.text().catch(() => '');
@@ -4323,21 +4373,22 @@ roleStateReady = true;
     };
   }
 
-  async function retryAuthenticatedRequest(response, url, options, refreshMessage) {
-    if (response.status === 401 && authorization) {
-      const previousAuthorization = authorization;
-      scanStoredAuthorization(true);
-      if (authorization && authorization !== previousAuthorization) {
-        const refreshedHeaders = new pageWindow.Headers(options.headers);
-        refreshedHeaders.set('Authorization', authorization);
-        response = await pageWindow.fetch(url, { ...options, headers: refreshedHeaders });
-        appendRunLog('info', refreshMessage);
+  async function retryAuthenticatedRequest(response, url, options, label) {
+    if (response.status !== 401 && response.status !== 403) return response;
+    const headers = new pageWindow.Headers(options.headers);
+    const sentAuthorization = headers.get('Authorization') || '';
+    const scope = maskAccountScopeFromAuthorization(sentAuthorization);
+    if (response.status === 401 && scope === maskAccountScope) {
+      const replacement = sameAccountRetryAuthorization(sentAuthorization, scope);
+      if (replacement) {
+        headers.set('Authorization', replacement);
+        response = await fetchWithoutAuthCapture(url, { ...options, headers });
+        appendRunLog(response.ok ? 'info' : 'warn', `${label}备用令牌重试返回 HTTP ${response.status}。`);
       }
     }
-    if ((response.status === 401 || response.status === 403) && authorization) {
-      const cookieHeaders = new pageWindow.Headers(options.headers);
-      cookieHeaders.delete('Authorization');
-      response = await pageWindow.fetch(url, { ...options, headers: cookieHeaders });
+    if ((response.status === 401 || response.status === 403) && sentAuthorization) {
+      headers.delete('Authorization');
+      response = await fetchWithoutAuthCapture(url, { ...options, headers });
     }
     return response;
   }
@@ -4398,7 +4449,7 @@ roleStateReady = true;
       headers
     };
     let response = await pageWindow.fetch(url.href, options);
-    response = await retryAuthenticatedRequest(response, url.href, options, '角色列表读取遇到 401 后已改用网页存储中的最新登录令牌重试。');
+    response = await retryAuthenticatedRequest(response, url.href, options, '角色列表读取');
     if (response.status === 429) throw new RateLimitError('角色列表');
     if (response.status === 401 || response.status === 403) {
       throw new Error(loginErrorMessage(response.status, '读取角色列表'));
@@ -8536,7 +8587,7 @@ roleStateReady = true;
       if (response.status !== 429 && response.status < 500) break;
       if (attempt < 2) await wait(1200 * (attempt + 1));
     }
-    response = await retryAuthenticatedRequest(response, url.href, options, '聊天记录读取遇到 401 后已改用网页存储中的最新登录令牌重试。');
+    response = await retryAuthenticatedRequest(response, url.href, options, '聊天记录读取');
     if (response.status === 401 || response.status === 403) throw new Error(loginErrorMessage(response.status, '聊天记录读取'));
     if (!response.ok) throw new Error(`聊天记录接口失败（HTTP ${response.status}）`);
     const body = await response.json();
