@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.120
+// @version      3.0.0-dev.121
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,7 +21,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.120';
+    : '3.0.0-dev.121';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -1891,6 +1891,10 @@
     siteRoleManaging: false,
     siteFavoriteStateLoading: false,
     maskQuery: '',
+    maskManaging: false,
+    selectedMaskKeys: new Set(),
+    maskDeleteRunning: false,
+    favoriteFolderSearchQuery: '',
     loading: false,
     roleLoading: false,
     rolePauseRequested: false,
@@ -5113,6 +5117,62 @@ roleStateReady = true;
     }
   }
 
+  function selectedMaskKey(row, category = state.active) {
+    return category === 'masks' ? `site:${String(row.maskId)}` : `library:${String(row.libraryId)}`;
+  }
+
+  async function deleteSelectedMasks() {
+    if (state.maskDeleteRunning || !state.selectedMaskKeys.size) return;
+    const category = state.active;
+    if (category === 'library' && !maskStorageReady) {
+      state.status = '面具库尚未准备好，暂不能删除本地备份。';
+      render();
+      return;
+    }
+    const source = category === 'masks' ? state.masks : state.library;
+    const targets = source.filter(row => state.selectedMaskKeys.has(selectedMaskKey(row, category)));
+    if (!targets.length) return;
+    const site = category === 'masks';
+    const notice = site
+      ? `将从 Mufy 网站永久删除 ${targets.length} 个面具。建议先导出备份。删除后不能用“撤回上次操作”恢复网站面具。`
+      : `将从本地面具库删除 ${targets.length} 份备份，并解除它们的本地自动绑定；网站面具不受影响。可用“撤回上次操作”恢复本地备份。`;
+    if (!pageWindow.confirm(`${notice}\n\n确定继续吗？`)) return;
+    state.maskDeleteRunning = true;
+    const failed = [];
+    let deleted = 0;
+    try {
+      if (site) {
+        for (const row of targets) {
+          try {
+            await deleteMask(row.maskId);
+            state.masks = state.masks.filter(item => String(item.maskId) !== String(row.maskId));
+            state.siteMaskIds = state.siteMaskIds.filter(id => String(id) !== String(row.maskId));
+            state.selectedMaskKeys.delete(selectedMaskKey(row, category));
+            deleted += 1;
+          } catch (error) {
+            failed.push(`${row.name}：${explainFailure(error)}`);
+            if (error instanceof RateLimitError) break;
+          }
+          state.status = `正在删除网站面具：${deleted}/${targets.length} 成功`;
+          render();
+        }
+      } else {
+        saveUndo('批量删除面具备份');
+        const ids = new Set(targets.map(row => String(row.libraryId)));
+        state.library = state.library.filter(row => !ids.has(String(row.libraryId)));
+        state.maskBindings = state.maskBindings.filter(binding => !ids.has(String(binding.libraryId || '')));
+        persistMaskBindings();
+        persistMaskLibrary();
+        targets.forEach(row => state.selectedMaskKeys.delete(selectedMaskKey(row, category)));
+        deleted = targets.length;
+      }
+      state.status = `已删除 ${deleted} 个${site ? '网站面具' : '本地面具备份'}${failed.length ? `；${failed.length} 个失败：${failed.slice(0, 3).join('；')}` : ''}。`;
+    } finally {
+      state.maskDeleteRunning = false;
+      render();
+    }
+  }
+
   function bindingMaskId(mask) {
     const value = mask?.maskId || mask?.sourceMaskId || '';
     return String(value).trim();
@@ -7132,7 +7192,9 @@ roleStateReady = true;
     const selected = state.selectedFavoriteFolderIds;
     const rows = state.favoriteFolderDeleteRows;
     const emptyRows = rows.filter(folder => folder?._countVerified === true && favoriteFolderCount(folder) === 0);
-    const visibleRows = state.favoriteFolderDeleteEmptyOnly ? emptyRows : rows;
+    const query = state.favoriteFolderSearchQuery.trim().toLowerCase();
+    const visibleRows = (state.favoriteFolderDeleteEmptyOnly ? emptyRows : rows)
+      .filter(folder => !query || `${favoriteFolderName(folder)} ${favoriteFolderId(folder)}`.toLowerCase().includes(query));
     const selectedCount = rows.filter(folder => selected.has(favoriteFolderId(folder))).length;
     const unverifiedCount = rows.filter(folder => folder?._countVerified !== true).length;
     if (state.favoriteFolderDeleteLoading && !rows.length) {
@@ -7140,7 +7202,9 @@ roleStateReady = true;
     } else if (!rows.length) {
       list.innerHTML = '<div class="mufy-recovery-folder-delete-empty">没有可删除的收藏夹</div>';
     } else if (!visibleRows.length) {
-      list.innerHTML = unverifiedCount
+      list.innerHTML = query
+        ? '<div class="mufy-recovery-folder-delete-empty">没有匹配的收藏夹</div>'
+        : unverifiedCount
         ? '<div class="mufy-recovery-folder-delete-empty">暂未确认空收藏夹，部分数量未读到。可以重新打开重试。</div>'
         : '<div class="mufy-recovery-folder-delete-empty">当前没有空收藏夹；关闭“只看空收藏夹”可管理全部收藏夹</div>';
     } else {
@@ -10874,6 +10938,19 @@ roleStateReady = true;
                     : button.dataset.category === 'masks' ? '面具' : '面具库';
       button.textContent = `${label} (${count})`;
     });
+    const maskManageButton = panel.querySelector('#mufy-recovery-mask-manage');
+    const maskSelectionBar = panel.querySelector('#mufy-recovery-mask-selection-bar');
+    if (maskManageButton) maskManageButton.textContent = state.maskManaging ? '完成管理' : '管理面具';
+    if (maskSelectionBar) {
+      maskSelectionBar.hidden = !state.maskManaging;
+      const visibleKeys = rows.map(row => selectedMaskKey(row));
+      const selectedCount = (state.active === 'masks' ? state.masks : state.library).filter(row => state.selectedMaskKeys.has(selectedMaskKey(row))).length;
+      const visibleSelected = visibleKeys.filter(key => state.selectedMaskKeys.has(key)).length;
+      panel.querySelector('#mufy-recovery-mask-selection-count').textContent = `已选 ${selectedCount} 个（当前列表 ${visibleSelected}/${rows.length}）`;
+      panel.querySelector('#mufy-recovery-mask-select-all').disabled = state.maskDeleteRunning || !rows.length;
+      panel.querySelector('#mufy-recovery-mask-delete-selected').disabled = state.maskDeleteRunning || !selectedCount || (state.active === 'library' && !maskStorageReady);
+      panel.querySelector('#mufy-recovery-mask-delete-selected').textContent = state.maskDeleteRunning ? '正在删除…' : `删除已选 (${selectedCount})`;
+    }
     const saveAllMasksButton = panel.querySelector('#mufy-recovery-save-all');
     if (saveAllMasksButton) {
       saveAllMasksButton.hidden = false;
@@ -10921,7 +10998,7 @@ roleStateReady = true;
         const boundNames = boundCharacterNames(row);
         return `<div class="mufy-recovery-row">
         <div class="mufy-recovery-info">
-          <div class="mufy-recovery-row-title"><b>${index + 1}. ${esc(row.name)}</b><button class="mufy-recovery-mask-copy" data-action="copy-mask" data-index="${index}" title="复制面具信息" aria-label="复制面具信息"><span aria-hidden="true">⧉</span></button></div>
+          <div class="mufy-recovery-row-title">${state.maskManaging ? `<input type="checkbox" data-mask-select="${esc(selectedMaskKey(row))}" ${state.selectedMaskKeys.has(selectedMaskKey(row)) ? 'checked' : ''} ${state.maskDeleteRunning ? 'disabled' : ''} aria-label="选择面具 ${esc(row.name)}">` : ''}<b>${index + 1}. ${esc(row.name)}</b><button class="mufy-recovery-mask-copy" data-action="copy-mask" data-index="${index}" title="复制面具信息" aria-label="复制面具信息"><span aria-hidden="true">⧉</span></button></div>
           <div class="mufy-recovery-muted">面具 ID：${esc(row.maskId)}${row.gender ? ` · ${esc(row.gender)}` : ''}${row.createdAt ? ` · ${esc(row.createdAt)}` : ''}</div>
           ${row.maskName ? `<div>名称：${esc(row.maskName)}</div>` : ''}
           ${boundNames ? `<div class="mufy-recovery-muted">已绑定角色：${esc(boundNames)}</div>` : ''}
@@ -10940,7 +11017,7 @@ roleStateReady = true;
           : '';
         return `<div class="mufy-recovery-row">
         <div class="mufy-recovery-info">
-          <div class="mufy-recovery-row-title"><b>${index + 1}. ${esc(row.name)}</b><span class="mufy-recovery-mask-title-tools">${slotBadge}<button class="mufy-recovery-mask-copy" data-action="copy-mask" data-index="${index}" title="复制面具信息" aria-label="复制面具信息"><span aria-hidden="true">⧉</span></button><button type="button" class="mufy-recovery-mask-remove" data-action="remove-library" data-index="${index}" title="移出面具库" aria-label="移出面具库"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5"/></svg></button></span></div>
+          <div class="mufy-recovery-row-title">${state.maskManaging ? `<input type="checkbox" data-mask-select="${esc(selectedMaskKey(row))}" ${state.selectedMaskKeys.has(selectedMaskKey(row)) ? 'checked' : ''} ${state.maskDeleteRunning ? 'disabled' : ''} aria-label="选择面具备份 ${esc(row.name)}">` : ''}<b>${index + 1}. ${esc(row.name)}</b><span class="mufy-recovery-mask-title-tools">${slotBadge}<button class="mufy-recovery-mask-copy" data-action="copy-mask" data-index="${index}" title="复制面具信息" aria-label="复制面具信息"><span aria-hidden="true">⧉</span></button><button type="button" class="mufy-recovery-mask-remove" data-action="remove-library" data-index="${index}" title="移出面具库" aria-label="移出面具库"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5"/></svg></button></span></div>
           <div class="mufy-recovery-muted">来源面具 ID：${esc(row.sourceMaskId || '未知')} · 保存于 ${esc(row.storedAt || '未知时间')}</div>
           ${row.maskName ? `<div>名称：${esc(row.maskName)}</div>` : ''}
           ${boundNames ? `<div class="mufy-recovery-muted">已绑定角色：${esc(boundNames)}</div>` : ''}
@@ -11145,6 +11222,11 @@ roleStateReady = true;
       #mufy-recovery-tabs{display:grid;grid-template-columns:1fr 1fr;gap:6px}
       #mufy-recovery-favorite-tabs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
       #mufy-recovery-mask-tabs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
+      #mufy-recovery-mask-manage-bar{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+      #mufy-recovery-mask-selection-bar{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+      #mufy-recovery-mask-selection-bar[hidden]{display:none}
+      #mufy-recovery-mask-delete-selected{color:#ffc0c5;border-color:#a95159;background:#672e33}
+      #mufy-recovery-list [data-mask-select]{width:17px;height:17px;flex:none;accent-color:#786bd4}
       #mufy-recovery-tabs button.active,#mufy-recovery-favorite-tabs button.active,#mufy-recovery-mask-tabs button.active{background:#786bd4;border-color:#8f84dd;color:#fff}
       #mufy-recovery-tabs .mufy-recovery-tab-action,#mufy-recovery-mask-tabs .mufy-recovery-tab-action{background:#453d69;border-color:#8578c8;color:#f4efff}
       #mufy-recovery-role-section,#mufy-recovery-favorite-section,#mufy-recovery-chat-section,#mufy-recovery-account-section,#mufy-recovery-material-section,#mufy-recovery-mask-section{display:flex;flex-direction:column;gap:8px}
@@ -11699,6 +11781,7 @@ roleStateReady = true;
         <div id="mufy-recovery-material-section" hidden><div id="mufy-recovery-material-tabs"><button data-material-kind="prompt">指令库</button><button data-material-kind="extra">番外库</button></div><div id="mufy-recovery-material-tools"><button id="mufy-recovery-material-add">新增指令</button><button id="mufy-recovery-material-import">导入 JSON</button><button id="mufy-recovery-material-export">导出 JSON</button><input id="mufy-recovery-material-file" type="file" accept=".json,application/json" hidden></div><div id="mufy-recovery-material-list"></div></div>
         <div id="mufy-recovery-mask-section" hidden>
           <div id="mufy-recovery-mask-tabs"><button data-category="masks">面具 (0)</button><button data-category="library">面具库 (0)</button><button id="mufy-recovery-save-all" class="mufy-recovery-tab-action">全部存入面具库</button></div>
+          <div id="mufy-recovery-mask-manage-bar"><button id="mufy-recovery-mask-manage">管理面具</button><div id="mufy-recovery-mask-selection-bar" hidden><span id="mufy-recovery-mask-selection-count">已选 0 个</span><button id="mufy-recovery-mask-select-all">全选当前</button><button id="mufy-recovery-mask-clear-selection">清空选择</button><button id="mufy-recovery-mask-delete-selected">删除已选 (0)</button></div></div>
           <input id="mufy-recovery-mask-search" placeholder="搜索面具名或面具 ID" hidden>
           <label id="mufy-recovery-auto-switch-label"><input id="mufy-recovery-auto-switch" type="checkbox"> 自动切换绑定面具</label>
           <div id="mufy-recovery-mask-actions"><button id="mufy-recovery-import-masks">导入面具</button><button id="mufy-recovery-export-masks">导出面具</button><button id="mufy-recovery-undo" class="mufy-recovery-tab-action" disabled>撤回上次操作</button><input id="mufy-recovery-mask-file" type="file" accept=".json,application/json" hidden></div>
@@ -12029,12 +12112,24 @@ roleStateReady = true;
       createManagedFavoriteFolder();
     };
     const folderDeleteModal = panel.querySelector('#mufy-recovery-folder-delete-modal');
+    const folderSearch = document.createElement('input');
+    folderSearch.id = 'mufy-recovery-folder-delete-search';
+    folderSearch.placeholder = '搜索收藏夹名称或 ID';
+    folderSearch.setAttribute('aria-label', folderSearch.placeholder);
+    folderSearch.style.cssText = 'box-sizing:border-box;margin:8px 12px;width:calc(100% - 24px);padding:8px;border:1px solid #555;border-radius:6px;background:#18181c;color:#fff;font:inherit';
+    folderDeleteModal.insertBefore(folderSearch, panel.querySelector('#mufy-recovery-folder-delete-filter'));
+    folderSearch.oninput = () => {
+      state.favoriteFolderSearchQuery = folderSearch.value;
+      if (folderSearch.value.trim()) state.favoriteFolderDeleteEmptyOnly = false;
+      renderFavoriteFolderDeleteModal();
+    };
     panel.querySelector('#mufy-recovery-folder-delete-close').onclick = () => {
       if (!state.favoriteFolderDeleteLoading) folderDeleteModal.hidden = true;
     };
     panel.querySelector('#mufy-recovery-folder-delete-select-all').onclick = () => {
       state.favoriteFolderDeleteRows
         .filter(folder => !state.favoriteFolderDeleteEmptyOnly || (folder?._countVerified === true && favoriteFolderCount(folder) === 0))
+        .filter(folder => !state.favoriteFolderSearchQuery || `${favoriteFolderName(folder)} ${favoriteFolderId(folder)}`.toLowerCase().includes(state.favoriteFolderSearchQuery.trim().toLowerCase()))
         .forEach(folder => state.selectedFavoriteFolderIds.add(favoriteFolderId(folder)));
       renderFavoriteFolderDeleteModal();
     };
@@ -12099,6 +12194,28 @@ roleStateReady = true;
     panel.querySelector('#mufy-recovery-share-recovery-cancel').onclick = () => cancelFavoriteShareRecoveryJob();
     panel.querySelector('#mufy-recovery-undo').onclick = undoLastLibraryChange;
     panel.querySelector('#mufy-recovery-save-all').onclick = addAllMasksToLibrary;
+    panel.querySelector('#mufy-recovery-mask-manage').onclick = () => {
+      if (state.maskDeleteRunning) return;
+      state.maskManaging = !state.maskManaging;
+      state.selectedMaskKeys.clear();
+      render();
+    };
+    panel.querySelector('#mufy-recovery-mask-select-all').onclick = () => {
+      state.visibleRows.forEach(row => state.selectedMaskKeys.add(selectedMaskKey(row)));
+      render();
+    };
+    panel.querySelector('#mufy-recovery-mask-clear-selection').onclick = () => {
+      state.selectedMaskKeys.clear();
+      render();
+    };
+    panel.querySelector('#mufy-recovery-mask-delete-selected').onclick = deleteSelectedMasks;
+    panel.querySelector('#mufy-recovery-list').addEventListener('change', event => {
+      const checkbox = event.target.closest?.('[data-mask-select]');
+      if (!checkbox || state.maskDeleteRunning) return;
+      if (checkbox.checked) state.selectedMaskKeys.add(checkbox.dataset.maskSelect);
+      else state.selectedMaskKeys.delete(checkbox.dataset.maskSelect);
+      render();
+    });
     const exportModal = panel.querySelector('#mufy-recovery-export-modal');
     const exportBindingOption = panel.querySelector('#mufy-recovery-export-binding-option');
     const exportBindingHint = panel.querySelector('#mufy-recovery-export-binding-hint');
@@ -12232,6 +12349,7 @@ roleStateReady = true;
     panel.querySelectorAll('[data-category]').forEach(button => {
       button.onclick = () => {
         if (button.dataset.category !== 'siteSearch') state.siteRoleManaging = false;
+        if (button.dataset.category !== state.active && (button.dataset.category === 'masks' || button.dataset.category === 'library')) state.selectedMaskKeys.clear();
         state.active = button.dataset.category;
         state.section = state.active === 'masks' || state.active === 'library' ? 'masks'
           : state.active === 'siteSearch' || state.active === 'siteAuthors' ? 'favorites'
