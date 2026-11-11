@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.119
+// @version      3.0.0-dev.120
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,7 +21,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.119';
+    : '3.0.0-dev.120';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -6462,7 +6462,10 @@ roleStateReady = true;
 
   async function tryWebsiteFavoriteClick(characterId, isFavorite, row = {}) {
     const control = findWebsiteFavoriteControl(characterId, row);
-    if (!control) return false;
+    if (!control) {
+      await requestFavorite(characterId, isFavorite);
+      return true;
+    }
     const before = nativeFavoriteState(control);
     if (before === Boolean(isFavorite)) return true;
     if (before === null) throw new Error(`无法确认“${row?.name || characterId}”当前是否已收藏，已跳过以避免反向切换`);
@@ -6489,7 +6492,10 @@ roleStateReady = true;
       if (control) break;
       await wait(250);
     }
-    if (!control) throw new Error(`没有找到“${row?.name || characterId}”对应的网页收藏按钮`);
+    if (!control) {
+      await requestFavorite(characterId, true);
+      return true;
+    }
 
     try {
       control.click();
