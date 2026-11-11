@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.124
+// @version      3.0.0-dev.125
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,7 +21,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.124';
+    : '3.0.0-dev.125';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -2304,9 +2304,30 @@ roleStateReady = true;
     return MANUAL_AUTO_CHAT_MODEL_CONFIGS.map(config => ({ ...config }));
   }
 
+  async function probeChatPageAuthorization(token, timeoutMs) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetchWithoutAuthCapture(roleListPageUrl(1, false, 'pageNum').href, {
+        method: 'GET', credentials: 'include', cache: 'no-store', redirect: 'error',
+        signal: controller.signal, headers: { Accept: 'application/json', Authorization: token }
+      });
+      const body = response.ok ? await readJsonResponse(response) : null;
+      return { verified: body?.code === 200 && Boolean(body.data), status: response.status };
+    } catch (_) {
+      return { verified: false, status: 0 };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async function waitForChatPageAuthorization(job, timeoutMs = 20000) {
     const characterId = String(job.activeCharacterId);
     const deadline = Date.now() + timeoutMs;
+    const testedTokens = new Set();
+    let nextProbeAt = Date.now() + 1000;
+    let probes = 0;
+    let probeStatus = 0;
     let announced = false;
     while (Date.now() < deadline) {
       if (manualAutoChatWasStopped()) throw new ManualAutoChatPausedError('任务已暂停');
@@ -2324,9 +2345,30 @@ roleStateReady = true;
         render();
         showManualAutoChatToast(state.status);
       }
+      if (probes < 3 && Date.now() >= nextProbeAt) {
+        if (!scope && !authorizationIsUsable(authorization)) scanStoredAuthorization();
+        const live = authorizationIsUsable(authorization) ? authorization : '';
+        const token = live && (!scope || maskAccountScopeFromAuthorization(live) === scope)
+          && !testedTokens.has(live) ? live : '';
+        const candidate = token || (scope && storedAuthorizationCandidates(scope).find(value => !testedTokens.has(value)));
+        nextProbeAt = Date.now() + 2500;
+        if (candidate) {
+          testedTokens.add(candidate);
+          probes += 1;
+          const request = { characterId, token: candidate, scope: maskAccountScopeFromAuthorization(candidate), id: ++chatPageAuthRequestId };
+          const result = await probeChatPageAuthorization(candidate, Math.min(4000, Math.max(1, deadline - Date.now())));
+          probeStatus = result.status;
+          if (result.verified && !manualAutoChatWasStopped()) {
+            rememberChatPageAuthorization(request, result.status);
+            continue;
+          }
+          if (probeStatus === 403 || probeStatus === 429) break;
+        }
+      }
       await wait(250);
     }
-    throw new Error('20 秒内未观察到当前角色页带登录凭证的成功请求。发送尚未开始，进度已保留。请等页面加载完成后点继续，必要时手动刷新角色页。');
+    const detail = probeStatus ? `会话列表未通过登录验证（HTTP ${probeStatus}）` : '暂未验证到当前角色页的登录凭证';
+    throw new Error(`${detail}。发送尚未开始，进度已保留。请等页面加载完成后点继续。`);
   }
 
   function realChatSessionId(value) {
@@ -2334,7 +2376,7 @@ roleStateReady = true;
     return id && id !== '00000000-0000-0000-0000-000000000000' ? id : '';
   }
 
-  async function confirmExistingManualChatSession(job, verifiedEmptySessions) {
+  async function confirmExistingManualChatSession(job, verifiedEmptySessions, pageAuth) {
     const characterId = String(job.activeCharacterId || '');
     const current = currentRoleContext();
     const sessions = new Set([
@@ -2351,7 +2393,7 @@ roleStateReady = true;
       const controller = new (pageWindow.AbortController || globalThis.AbortController)();
       const timeout = setTimeout(() => controller.abort(), 20000);
       try {
-        const data = await requestDialogPage({ characterId, sessionId }, 1, CHAT_EXPORT_SAFE_PAGE_SIZE, controller.signal);
+        const data = await requestDialogPage({ characterId, sessionId }, 1, CHAT_EXPORT_SAFE_PAGE_SIZE, controller.signal, pageAuth.token);
         if (manualAutoChatWasStopped()) throw new ManualAutoChatPausedError('任务已暂停');
         if (job.accountScope && job.accountScope !== maskAccountScope) throw new Error('核验期间切换了 Mufy 账号');
         const rows = dialogRowsFromPage(data, null);
@@ -2373,10 +2415,10 @@ roleStateReady = true;
 
   async function sendManualChatViaApi(job, verifiedEmptySessions, pageAuth) {
     const characterId = String(job.activeCharacterId || '');
-    if (await confirmExistingManualChatSession(job, verifiedEmptySessions)) return false;
+    if (await confirmExistingManualChatSession(job, verifiedEmptySessions, pageAuth)) return false;
     const configs = manualAutoChatModelConfigs();
     if (manualAutoChatWasStopped()) throw new ManualAutoChatPausedError('任务已暂停');
-    if (await confirmExistingManualChatSession(job, verifiedEmptySessions)) return false;
+    if (await confirmExistingManualChatSession(job, verifiedEmptySessions, pageAuth)) return false;
     const controller = new (pageWindow.AbortController || globalThis.AbortController)();
     const deadline = setTimeout(() => controller.abort(), 7 * 60 * 1000);
     const startedAt = Date.now();
@@ -2702,8 +2744,8 @@ roleStateReady = true;
         throw new Error('上一条消息的发送结果无法确认。为避免重复发送，请先在对话中核对。');
       }
       if (!['response-complete', 'waiting-response', 'already-chatted'].includes(job.phase)) {
-        await waitForChatPageAuthorization(job);
-        if (await confirmExistingManualChatSession(job, verifiedEmptySessions)) {
+        const pageAuth = await waitForChatPageAuthorization(job);
+        if (await confirmExistingManualChatSession(job, verifiedEmptySessions, pageAuth)) {
           job.phase = 'already-chatted';
           if (!saveManualAutoChatJob(job)) throw new Error('无法保存跳过状态');
         }
@@ -4512,13 +4554,17 @@ roleStateReady = true;
     return { response, body, detail };
   }
 
-  async function requestPage(pageNum, isFollowed, pageParameter = 'pageNum') {
-    scanStoredAuthorization();
+  function roleListPageUrl(pageNum, isFollowed, pageParameter) {
     const url = new URL('/api/characters/query_session', location.origin);
     url.searchParams.set(pageParameter, String(pageNum));
     url.searchParams.set('pageSize', '20');
     url.searchParams.set('isFollowed', String(isFollowed));
+    return url;
+  }
 
+  async function requestPage(pageNum, isFollowed, pageParameter = 'pageNum') {
+    scanStoredAuthorization();
+    const url = roleListPageUrl(pageNum, isFollowed, pageParameter);
     const headers = { Accept: 'application/json' };
     if (authorization) headers.Authorization = authorization;
     const options = {
@@ -8651,18 +8697,18 @@ roleStateReady = true;
     return fallback;
   }
 
-  async function requestDialogPage(context, pageNum, pageSize, signal) {
+  async function requestDialogPage(context, pageNum, pageSize, signal, token = authorization) {
     const url = new URL('/api/dialogs/query', location.origin);
     url.searchParams.set('sessionId', context.sessionId);
     url.searchParams.set('pageNum', String(pageNum));
     url.searchParams.set('pageSize', String(pageSize));
     url.searchParams.set('characterId', context.characterId);
     const headers = { Accept: 'application/json' };
-    if (authorization) headers.Authorization = authorization;
+    if (token) headers.Authorization = token;
     const options = { method: 'GET', credentials: 'include', cache: 'no-store', headers, signal };
     let response;
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      response = await fetchFromScript(url.href, options);
+      response = await fetchWithoutAuthCapture(url.href, options);
       if (response.status !== 429 && response.status < 500) break;
       if (attempt < 2) await wait(1200 * (attempt + 1));
     }
