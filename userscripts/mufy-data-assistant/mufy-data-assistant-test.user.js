@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.125
+// @version      3.0.0-dev.126
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,7 +21,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.125';
+    : '3.0.0-dev.126';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -49,6 +49,7 @@
   const SHARE_FAVORITE_RESULT_KEY = 'mufy-role-links-only-share-favorite-result-v1';
   const SHARE_FAVORITE_JOB_RECORD_KEY = 'share-favorite-job:active';
   const FAVORITE_SHARE_RECOVERY_JOB_KEY = 'mufy-role-links-only-favorite-share-recovery-test-v1';
+  const FAVORITE_SHARE_RECOVERY_FAILURES_KEY = 'mufy-favorite-share-recovery-failures-v1';
   const MANUAL_FAVORITE_CHAT_KEY = 'mufy-role-links-only-manual-favorite-chat-v1';
   const MANUAL_FAVORITE_CHAT_CURRENT_KEY = 'mufy-role-links-only-manual-favorite-chat-current-v1';
   const MANUAL_FAVORITE_NEXT_DISMISSED_KEY = 'mufy-role-links-only-manual-favorite-next-dismissed-v1';
@@ -3245,8 +3246,11 @@ roleStateReady = true;
   }
 
   function clearFavoriteShareRecoveryJob() {
-    if (!maskAccountScope) return;
-    try { localStorage.removeItem(accountStorageKey(FAVORITE_SHARE_RECOVERY_JOB_KEY)); } catch (_) {}
+    if (!maskAccountScope) return false;
+    try {
+      localStorage.removeItem(accountStorageKey(FAVORITE_SHARE_RECOVERY_JOB_KEY));
+      return true;
+    } catch (_) { return false; }
   }
 
   class RateLimitError extends Error {
@@ -6568,7 +6572,10 @@ roleStateReady = true;
     const detail = await requestCharacterDetail(String(characterId));
     if (detail?.favoriteKnown === true) {
       if (detail.isFavorite) return true;
-      return clickWebsiteFavoriteFromKnownUnfavorite(characterId, row);
+      await clickWebsiteFavoriteFromKnownUnfavorite(characterId, row);
+      const confirmed = await requestCharacterDetail(String(characterId));
+      if (confirmed?.favoriteKnown === true && confirmed.isFavorite) return true;
+      throw new Error(`网站尚未确认“${row?.name || characterId}”已重新收藏`);
     }
     // 接口没有返回收藏字段或临时失败时，才退回页面按钮的状态识别。
     const nativeHandled = await tryWebsiteFavoriteClick(characterId, true, row);
@@ -6614,6 +6621,44 @@ roleStateReady = true;
     return Math.max(0, (task?.rows?.length || 0) - Number(task?.index || 0));
   }
 
+  function loadFavoriteShareRecoveryFailures() {
+    if (!maskAccountScope) return [];
+    try {
+      const rows = JSON.parse(localStorage.getItem(accountStorageKey(FAVORITE_SHARE_RECOVERY_FAILURES_KEY)) || '[]');
+      return Array.isArray(rows) ? rows.filter(row => row?.characterId) : [];
+    } catch (_) { return []; }
+  }
+
+  function cancelFailedFavoriteShareRecovery(task, row, error) {
+    const characterId = String(row.characterId);
+    const name = row.name || characterId;
+    const shareCode = String(task.shareCode || shareCodeCache.get(characterId) || '');
+    const reason = explainFailure(error);
+    const record = { characterId, name, shareCode, reason, time: new Date().toISOString() };
+    let saved = false;
+    task.paused = true;
+    task.pauseRequested = false;
+    task.cancelRequested = false;
+    task.pauseReason = '重新收藏失败';
+    try {
+      if (maskAccountScope && (!task.accountScope || task.accountScope === maskAccountScope)) {
+        const records = loadFavoriteShareRecoveryFailures().filter(item => item.characterId !== characterId);
+        localStorage.setItem(accountStorageKey(FAVORITE_SHARE_RECOVERY_FAILURES_KEY), JSON.stringify([record, ...records]));
+        saved = true;
+      }
+    } catch (_) {}
+    const cancelled = saved && clearFavoriteShareRecoveryJob();
+    if (!cancelled && (!task.accountScope || task.accountScope === maskAccountScope)) saveFavoriteShareRecoveryJob(task);
+    const link = shareCode ? shareUrlFromCode(shareCode) : roleUrl(characterId);
+    appendRunLog('error', `收藏恢复需要核对：${name}`, `${reason}\n${link}`);
+    state.status = cancelled
+      ? `“${name}”的收藏未能确认，检测任务已自动取消。请在日志顶部打开该角色的链接并核对收藏。`
+      : `“${name}”的收藏未能确认，浏览器未能完整保存恢复状态，已停止检测。请保存此链接：${link}`;
+    render();
+    if (saved) openRunLogModal();
+    else pageWindow.alert(state.status);
+  }
+
   function pauseFavoriteShareRecoveryTask(task, reason = '用户中断') {
     task.paused = true;
     task.pauseRequested = false;
@@ -6655,6 +6700,7 @@ roleStateReady = true;
   async function processFavoriteShareRecoveryJob(automatic = false) {
     let task = loadFavoriteShareRecoveryJob();
     if (!task || !Array.isArray(task.rows) || state.shareRecoveryLoading || task.paused) return;
+    task.accountScope ||= maskAccountScope;
     state.shareRecoveryLoading = true;
     let navigating = false;
     let automaticWait = Boolean(automatic);
@@ -6679,13 +6725,7 @@ roleStateReady = true;
             await ensureFavoriteFromCharacterDetail(row.characterId, row);
             applyRecoveredFavoriteState(row);
           } catch (error) {
-            task.paused = true;
-            task.pauseRequested = false;
-            task.pauseReason = '重新收藏失败';
-            saveFavoriteShareRecoveryJob(task);
-            appendRunLog('error', `分享链接重新收藏失败：${row.name || row.characterId}`, error);
-            state.status = `“${row.name || '未命名角色'}”重新收藏失败，任务已暂停：${explainFailure(error)}请点击继续重试，恢复任务不会丢失。`;
-            pageWindow.alert(state.status);
+            cancelFailedFavoriteShareRecovery(task, row, error);
             return;
           }
           appendRunLog('info', `分享链接重新收藏成功：${row.name || row.characterId}`, {
@@ -6759,8 +6799,8 @@ roleStateReady = true;
           applyFavoriteState(row.characterId, false);
           state.status = `正在打开“${row.name || '未命名角色'}”的分享链接，打开后会自动重新收藏……`;
           render();
-          navigating = true;
           pageWindow.location.assign(task.shareUrl);
+          navigating = true;
           return;
         } catch (error) {
           if (unfavorited) {
@@ -6776,20 +6816,12 @@ roleStateReady = true;
               saveFavoriteShareRecoveryJob(task);
             } catch (restoreError) {
               task.phase = 'unfavorited';
-              task.paused = true;
-              saveFavoriteShareRecoveryJob(task);
-              appendRunLog('error', `打开分享链接失败且恢复收藏失败：${row.name || row.characterId}`, restoreError);
-              state.status = `“${row.name || '未命名角色'}”恢复收藏失败，任务已保留：${explainFailure(restoreError)}`;
-              pageWindow.alert(state.status);
+              cancelFailedFavoriteShareRecovery(task, row, restoreError);
               return;
             }
           } else {
-            task.failures = [...(task.failures || []), `${row.name || row.characterId}：${explainFailure(error)}`];
-            task.index += 1;
-            task.phase = 'checking';
-            task.shareCode = '';
-            task.shareUrl = '';
-            saveFavoriteShareRecoveryJob(task);
+            cancelFailedFavoriteShareRecovery(task, row, error);
+            return;
           }
           appendRunLog('error', `分享链接转换失败：${row.name || row.characterId}`, error);
         }
@@ -6802,6 +6834,11 @@ roleStateReady = true;
       pageWindow.alert(summary);
     } catch (error) {
       task = loadFavoriteShareRecoveryJob() || task;
+      const row = task?.rows?.[task.index];
+      if (row?.characterId && ['link-ready', 'unfavorited'].includes(task.phase)) {
+        cancelFailedFavoriteShareRecovery(task, row, error);
+        return;
+      }
       if (task) {
         task.paused = true;
         task.pauseRequested = false;
@@ -6857,7 +6894,7 @@ roleStateReady = true;
     }
     const confirmed = pageWindow.confirm(
       `检测 ${rows.length} 个尚无本地分享链接记录的“收藏未聊”角色吗？${cachedAtStart ? `\n本账号已有记录的 ${cachedAtStart} 个会直接跳过。` : ''}\n\n` +
-      '脚本会严格一次处理一个：先取得并保存分享链接，再取消原收藏，从分享链接打开后重新收藏。没有分享链接的角色会保持原收藏不变。任务可以中断。'
+      '脚本会严格一次处理一个：先取得并保存分享链接，再取消原收藏，从分享链接打开后重新收藏。没有分享链接的角色会保持原收藏不变。如果收藏未能恢复，任务会自动取消，角色链接会保存在运行日志顶部。'
     );
     if (!confirmed) return;
     const task = {
@@ -6919,9 +6956,8 @@ roleStateReady = true;
         await ensureFavoriteFromCharacterDetail(row.characterId, row);
         applyRecoveredFavoriteState(row);
       } catch (error) {
-        state.status = `恢复当前角色收藏失败，任务没有清除：${explainFailure(error)}`;
         state.shareRecoveryLoading = false;
-        render();
+        cancelFailedFavoriteShareRecovery(task, row, error);
         return;
       }
       state.shareRecoveryLoading = false;
@@ -7827,6 +7863,18 @@ roleStateReady = true;
     render();
   }
 
+  async function cancelFailedShareFavoriteJob(job, row, error) {
+    const name = row?.name || row?.characterId || '当前角色';
+    const reason = explainFailure(error);
+    const cleared = await clearShareFavoriteJob();
+    clearFavoritePendingState(job);
+    appendRunLog('error', `收藏失败：${name}`, row?.characterId ? `${reason}\n${roleUrl(row.characterId)}` : error);
+    state.status = cleared
+      ? `“${name}”收藏失败，本次任务已自动取消。此前已成功收藏的角色仍保留。${reason}`
+      : `“${name}”收藏失败，任务已停止。浏览器未能删除收藏队列：${reason}`;
+    render();
+  }
+
   async function finishShareFavoriteJob(job) {
     const normalIds = new Set((job.normalFallback || []).map(item => String(item.characterId)));
     const favoritedIds = new Set((job.favoritedIds || []).map(String));
@@ -7914,18 +7962,8 @@ roleStateReady = true;
         } catch (error) {
             if (applyFavoriteInterruption(job)) return;
             if (error instanceof FavoriteStorageError) throw error;
-            if (error instanceof RateLimitError) {
-              await pauseShareFavoriteJob(job, error);
-              return;
-            }
-            state.favoritePendingIds.delete(String(activeRow.characterId));
-            appendRunLog('error', `${openedByShareLink ? '分享链接' : '普通'}收藏失败：${activeRow.name || activeRow.characterId}`, error);
-            job.failures.push(`${activeRow.name}：${explainFailure(error)}`);
-            job.index += 1;
-            job.activeCharacterId = '';
-            job.activeShareCode = '';
-            job.navigationStartedAt = 0;
-            await persistFavoriteCheckpoint(job);
+            await cancelFailedShareFavoriteJob(job, activeRow, error);
+            return;
         }
       }
 
@@ -7960,10 +7998,10 @@ roleStateReady = true;
           job.activeShareCode = shareCode;
           job.navigationStartedAt = Date.now();
           await persistFavoriteCheckpoint(job);
-          navigating = true;
           state.status = `正在打开“${row.name}”的角色分享链接，打开成功后会自动完成收藏……`;
           render();
           pageWindow.location.assign(shareUrlFromCode(shareCode));
+          navigating = true;
           return;
         }
         if (!(job.normalFallback || []).some(item => String(item?.characterId || '') === String(row.characterId))) {
@@ -7991,18 +8029,8 @@ roleStateReady = true;
           await wait(250);
         } catch (error) {
           if (error instanceof FavoriteStorageError) throw error;
-          if (error instanceof RateLimitError) {
-            await pauseShareFavoriteJob(job, error);
-            return;
-          }
-          state.favoritePendingIds.delete(String(row.characterId));
-          appendRunLog('error', `普通收藏失败：${row.name || row.characterId}`, error);
-          job.failures.push(`${row.name}：${explainFailure(error)}`);
-          job.index += 1;
-          job.activeCharacterId = '';
-          job.activeShareCode = '';
-          job.navigationStartedAt = 0;
-          await persistFavoriteCheckpoint(job);
+          await cancelFailedShareFavoriteJob(job, row, error);
+          return;
         }
       }
       if (applyFavoriteInterruption(job)) return;
@@ -8017,20 +8045,7 @@ roleStateReady = true;
       } else if (error instanceof RateLimitError) {
         await pauseShareFavoriteJob(job, error);
       } else {
-        const failedRow = job.rows[job.index];
-        if (failedRow?.characterId) state.favoritePendingIds.delete(String(failedRow.characterId));
-        appendRunLog('error', '收藏任务异常中断', error);
-        job.failures.push(`${failedRow?.name || '当前角色'}：${explainFailure(error)}`);
-        job.index = Math.min(job.rows.length, job.index + 1);
-        job.activeCharacterId = '';
-        job.activeShareCode = '';
-        job.navigationStartedAt = 0;
-        const preserved = await saveShareFavoriteJob(job);
-        if (!preserved) clearFavoritePendingState(job);
-        state.status = preserved
-          ? `收藏过程中出现问题：${explainFailure(error)}已保留队列，重新点击收藏可继续。`
-          : `收藏过程中出现问题且队列无法保存：${explainFailure(error)}任务已停止，请查看运行日志。`;
-        render();
+        await cancelFailedShareFavoriteJob(job, job.rows[job.index], error);
       }
     } finally {
       if (state.favoriteInterruptMode) applyFavoriteInterruption(job);
@@ -8471,11 +8486,21 @@ roleStateReady = true;
     const output = panel?.querySelector('#mufy-recovery-log-output');
     if (!output) return;
     const rows = loadRunLogs();
-    if (!rows.length) {
+    const recoveryFailures = loadFavoriteShareRecoveryFailures();
+    if (!rows.length && !recoveryFailures.length) {
       output.innerHTML = '<div class="mufy-recovery-log-empty">暂无运行日志</div>';
       return;
     }
-    output.innerHTML = rows.map(row => {
+    const recoveryLinks = recoveryFailures.map(row => {
+      const directLink = roleUrl(row.characterId);
+      const shareLink = row.shareCode ? shareUrlFromCode(row.shareCode) : '';
+      return `<article class="mufy-recovery-log-entry is-error">
+        <div class="mufy-recovery-log-message">待核对收藏：${esc(row.name || row.characterId)}</div>
+        <div class="mufy-recovery-log-summary">${esc(row.reason || '')}</div>
+        ${shareLink ? `<a href="${esc(shareLink)}" target="_blank" rel="noopener">打开分享链接</a> · ` : ''}<a href="${esc(directLink)}" target="_blank" rel="noopener">打开角色链接</a>
+      </article>`;
+    }).join('');
+    output.innerHTML = recoveryLinks + rows.map(row => {
       const level = ['error', 'warn', 'info'].includes(String(row.level || '').toLowerCase())
         ? String(row.level).toLowerCase()
         : 'info';
@@ -12462,9 +12487,15 @@ roleStateReady = true;
     setTimeout(() => {
       const recoveryTask = loadFavoriteShareRecoveryJob();
       if (!recoveryTask) return;
+      const failedRow = recoveryTask.rows[recoveryTask.index];
+      if (recoveryTask.paused && recoveryTask.phase === 'unfavorited' && failedRow?.characterId
+          && (!recoveryTask.pauseReason || recoveryTask.pauseReason === '重新收藏失败')) {
+        cancelFailedFavoriteShareRecovery(recoveryTask, failedRow, new Error('上个版本留下了未确认的收藏恢复记录'));
+        return;
+      }
       const navigationType = pageWindow.performance?.getEntriesByType?.('navigation')?.[0]?.type || '';
       const intentionalShareNavigation = Boolean(
-        recoveryTask.phase === 'unfavorited'
+        !recoveryTask.paused && recoveryTask.phase === 'unfavorited'
         && navigationType === 'navigate'
         && Date.now() - Number(recoveryTask.navigationStartedAt || 0) < 120000
       );
