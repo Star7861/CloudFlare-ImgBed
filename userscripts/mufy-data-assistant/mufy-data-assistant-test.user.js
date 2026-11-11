@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.128
+// @version      3.0.0-dev.129
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,12 +21,15 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.128';
+    : '3.0.0-dev.129';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
   const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
   const MASK_LIBRARY_KEY = 'mufy-recovery-mask-library-v1';
+  const MASK_DELETED_BATCHES_KEY = 'mufy-recovery-mask-deleted-batches-v1';
+  const MASK_DELETE_UNDO_MS = 24 * 60 * 60 * 1000;
+  let maskDeletedCleanupTimer = 0;
   const MASK_LIBRARY_BACKUP_KEY = 'mufy-recovery-mask-library-backup-v1';
   const MASK_BINDINGS_KEY = 'mufy-recovery-mask-bindings-v1';
   const MASK_ACCOUNT_MIGRATION_OWNER_KEY = 'mufy-recovery-mask-account-migration-owner-v1';
@@ -1991,6 +1994,7 @@
     siteFavoriteStates: cachedRoles?.siteFavoriteStates || {},
     selectedSiteCharacterIds: new Set(),
     selectedFavoriteOnlyForChat: new Set(),
+    oldFavoritesManaging: false,
     siteRoleManaging: false,
     siteFavoriteStateLoading: false,
     maskQuery: '',
@@ -2045,6 +2049,7 @@
   };
   if (maskLibraryStorageWarning) state.status = maskLibraryStorageWarning;
 roleStateReady = true;
+  cleanExpiredDeletedMasks();
   chatModelConfigCache = loadChatModelConfigCache();
   if (pendingSiteCaptureRows.length) {
     pendingSiteCaptureRows.splice(0).forEach(item => addCapturedSiteRows(item.rows, item.pageScope));
@@ -2178,6 +2183,7 @@ roleStateReady = true;
 
   function reloadRoleCacheForAccount() {
     state.selectedFavoriteOnlyForChat.clear();
+    state.oldFavoritesManaging = false;
     const legacy = readLegacyRoleCache(maskAccountScope);
     applyRoleCacheSnapshot(legacy?.snapshot);
     initializeRoleCacheForAccount(maskAccountScope, legacy);
@@ -3682,11 +3688,16 @@ roleStateReady = true;
   async function writeMaskDatabaseSnapshot(database, accountKey, snapshot, options = {}) {
     // Safari 会较积极地自动关闭空闲事务，因此读取和写入分成两个短事务。
     const existing = await readMaskDatabaseRecord(database, accountKey);
+    const previous = cloneValue(existing?.current || existing?.previous || snapshot);
+    if (options.deletedIds?.size) {
+      previous.library = (previous.library || []).filter(row => !options.deletedIds.has(String(row.libraryId)));
+      previous.bindings = (previous.bindings || []).filter(row => !options.deletedIds.has(String(row.libraryId || '')));
+    }
     const record = {
       accountKey,
       schemaVersion: 1,
       current: cloneValue(snapshot),
-      previous: cloneValue(existing?.current || existing?.previous || snapshot),
+      previous,
       updatedAt: new Date().toISOString(),
       migration: options.migration || existing?.migration || null
     };
@@ -3848,18 +3859,22 @@ roleStateReady = true;
     }
   }
 
-  function queueIndexedDbMaskPersist(reason) {
+  function queueIndexedDbMaskPersist(reason, options = {}) {
     const scope = maskAccountScope;
     const snapshot = maskDataSnapshot();
     maskStorageWriteQueue = maskStorageWriteQueue
       .catch(() => {})
       .then(async () => {
-        if (!scope || scope !== maskAccountScope || maskStorageMode !== 'indexedDB') return;
+        if (!scope || scope !== maskAccountScope || maskStorageMode !== 'indexedDB') return false;
         const database = await openMaskDatabase();
-        await writeMaskDatabaseSnapshot(database, scope, snapshot);
+        await writeMaskDatabaseSnapshot(database, scope, snapshot, options);
         appendRunLog('info', `${reason}已写入 IndexedDB`, { account: maskAccountLabel(), masks: snapshot.library.length, bindings: snapshot.bindings.length });
+        return true;
       })
-      .catch(error => handleIndexedDbStorageFailure(`${reason}写入 IndexedDB 失败。`, error, false));
+      .catch(error => {
+        if (scope === maskAccountScope) handleIndexedDbStorageFailure(`${reason}写入 IndexedDB 失败。`, error, false);
+        return false;
+      });
     return true;
   }
 
@@ -4457,6 +4472,106 @@ roleStateReady = true;
       .filter(Boolean);
   }
 
+  function readDeletedMaskBatches(key) {
+    const rows = JSON.parse(localStorage.getItem(key) || '[]');
+    if (!Array.isArray(rows)) throw new Error('本地面具回收记录格式异常');
+    return rows.filter(row => row?.id && Array.isArray(row.library) && Array.isArray(row.bindings) && Number.isFinite(row.expiresAt));
+  }
+
+  function writeDeletedMaskBatches(key, rows) {
+    if (rows.length) localStorage.setItem(key, JSON.stringify(rows));
+    else localStorage.removeItem(key);
+  }
+
+  function cleanExpiredDeletedMasks() {
+    clearTimeout(maskDeletedCleanupTimer);
+    const now = Date.now();
+    let next = Infinity;
+    try {
+      const keys = Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i));
+      for (const key of keys) {
+        if (key !== MASK_DELETED_BATCHES_KEY && !key?.startsWith(`${MASK_DELETED_BATCHES_KEY}:account:`)) continue;
+        try {
+          const rows = readDeletedMaskBatches(key);
+          const retained = rows.filter(row => row.expiresAt > now);
+          if (retained.length !== rows.length) writeDeletedMaskBatches(key, retained);
+          for (const row of retained) next = Math.min(next, row.expiresAt);
+        } catch (_) {
+          next = Math.min(next, now + 60000);
+        }
+      }
+    } catch (_) {}
+    if (Number.isFinite(next)) {
+      maskDeletedCleanupTimer = setTimeout(() => {
+        cleanExpiredDeletedMasks();
+        if (panel) render();
+      }, Math.max(1, Math.min(MASK_DELETE_UNDO_MS, next - Date.now())));
+    }
+  }
+
+  function latestDeletedMaskBatch() {
+    try {
+      return readDeletedMaskBatches(accountStorageKey(MASK_DELETED_BATCHES_KEY))
+        .filter(row => row.expiresAt > Date.now()).at(-1) || null;
+    } catch (_) { return null; }
+  }
+
+  async function persistDeletedMaskChange(reason, deletedIds) {
+    if (maskStorageMode === 'indexedDB') {
+      queueIndexedDbMaskPersist(reason, { deletedIds });
+      return await maskStorageWriteQueue;
+    }
+    return persistMaskLibrary() && persistMaskBindings();
+  }
+
+  async function deleteLocalMaskBackups(targets) {
+    const ids = new Set(targets.map(row => String(row.libraryId)));
+    const key = accountStorageKey(MASK_DELETED_BATCHES_KEY);
+    const snapshot = maskDataSnapshot(targets, state.maskBindings.filter(row => ids.has(String(row.libraryId || ''))));
+    const now = Date.now();
+    const batch = { ...snapshot, id: makeLibraryId(), expiresAt: now + MASK_DELETE_UNDO_MS };
+    try {
+      const batches = readDeletedMaskBatches(key).filter(row => row.expiresAt > now);
+      writeDeletedMaskBatches(key, [...batches, batch]);
+    } catch (error) {
+      throw new Error(`无法保存 24 小时撤回记录，未删除面具：${explainFailure(error)}`);
+    }
+    cleanExpiredDeletedMasks();
+    state.undoLibrary = null;
+    state.undoBindings = null;
+    state.undoLabel = '';
+    state.undoSite = null;
+    state.library = state.library.filter(row => !ids.has(String(row.libraryId)));
+    state.maskBindings = state.maskBindings.filter(row => !ids.has(String(row.libraryId || '')));
+    if (!await persistDeletedMaskChange('删除本地面具备份', ids)) {
+      throw new Error('未能完整保存面具删除结果，24 小时撤回记录已保留');
+    }
+  }
+
+  async function restoreDeletedMaskBatch(batch) {
+    const key = accountStorageKey(MASK_DELETED_BATCHES_KEY);
+    const existingIds = new Set(state.library.map(row => String(row.libraryId)));
+    const library = batch.library.filter(row => !existingIds.has(String(row.libraryId)));
+    const occupiedCharacters = new Set(state.maskBindings.map(row => String(row.characterId)));
+    const restoredIds = new Set(batch.library.map(row => String(row.libraryId)));
+    const bindings = batch.bindings.filter(row => restoredIds.has(String(row.libraryId)) && !occupiedCharacters.has(String(row.characterId)));
+    state.maskDeleteRunning = true;
+    render();
+    try {
+      state.library = [...state.library, ...library];
+      state.maskBindings = [...state.maskBindings, ...bindings];
+      if (!await persistDeletedMaskChange('撤回本地面具删除')) throw new Error('恢复结果未能保存');
+      writeDeletedMaskBatches(key, readDeletedMaskBatches(key).filter(row => row.id !== batch.id));
+      cleanExpiredDeletedMasks();
+      state.status = `已撤回删除：恢复 ${library.length} 个本地面具备份、${bindings.length} 条绑定。`;
+    } catch (error) {
+      state.status = `撤回失败：${explainFailure(error)}。`;
+    } finally {
+      state.maskDeleteRunning = false;
+      render();
+    }
+  }
+
   function saveUndo(label, siteRestore = null) {
     state.undoLibrary = cloneValue(state.library);
     state.undoBindings = cloneValue(state.maskBindings);
@@ -4465,7 +4580,12 @@ roleStateReady = true;
   }
 
   async function undoLastLibraryChange() {
-    if (!state.undoLibrary) return;
+    if (!maskStorageReady || state.maskDeleteRunning || state.loading) return;
+    if (!state.undoLibrary) {
+      const batch = latestDeletedMaskBatch();
+      if (batch) await restoreDeletedMaskBatch(batch);
+      return;
+    }
     const library = state.undoLibrary;
     const bindings = state.undoBindings;
     const label = state.undoLabel;
@@ -5212,7 +5332,7 @@ roleStateReady = true;
     const site = category === 'masks';
     const notice = site
       ? `将从 Mufy 网站永久删除 ${targets.length} 个面具。建议先导出备份。删除后不能用“撤回”恢复网站面具。`
-      : `将从本地面具库删除 ${targets.length} 份备份及其本地自动绑定。可以在本次页面刷新前点“撤回”恢复这一步。`;
+      : `将从本地面具库删除 ${targets.length} 份备份及其本地自动绑定。24 小时内可点“撤回”恢复。`;
     if (!pageWindow.confirm(`${notice}\n\n确定继续吗？`)) return;
     state.maskDeleteRunning = true;
     const failed = [];
@@ -5234,16 +5354,13 @@ roleStateReady = true;
           render();
         }
       } else {
-        saveUndo('批量删除面具备份');
-        const ids = new Set(targets.map(row => String(row.libraryId)));
-        state.library = state.library.filter(row => !ids.has(String(row.libraryId)));
-        state.maskBindings = state.maskBindings.filter(binding => !ids.has(String(binding.libraryId || '')));
-        persistMaskBindings();
-        persistMaskLibrary();
+        await deleteLocalMaskBackups(targets);
         targets.forEach(row => state.selectedMaskKeys.delete(selectedMaskKey(row, category)));
         deleted = targets.length;
       }
       state.status = `已删除 ${deleted} 个${site ? '网站面具' : '本地面具备份'}${failed.length ? `；${failed.length} 个失败：${failed.slice(0, 3).join('；')}` : ''}。`;
+    } catch (error) {
+      state.status = explainFailure(error);
     } finally {
       state.maskDeleteRunning = false;
       render();
@@ -5988,25 +6105,28 @@ roleStateReady = true;
     }
   }
 
-  function removeLibraryMask(libraryItem) {
+  async function removeLibraryMask(libraryItem) {
+    if (!maskStorageReady || state.maskDeleteRunning) return;
     const boundCharacters = state.maskBindings
       .filter(binding => String(binding.libraryId || '') === String(libraryItem.libraryId))
       .map(binding => binding.characterName || binding.characterId);
     const bindingNotice = boundCharacters.length
       ? `\n\n它当前绑定了：${boundCharacters.join('、')}。删除后会解除这些本地自动绑定。`
       : '';
-    if (!confirm(`从本地面具库删除“${libraryItem.name}”吗？这不会删除 Mufy 服务器上的面具。${bindingNotice}`)) return;
-    saveUndo('删除面具备份');
-    state.library = state.library.filter(item => item.libraryId !== libraryItem.libraryId);
-    if (boundCharacters.length) {
-      state.maskBindings = state.maskBindings.filter(binding => String(binding.libraryId || '') !== String(libraryItem.libraryId));
-      persistMaskBindings();
-    }
-    persistMaskLibrary();
-    state.status = boundCharacters.length
-      ? `已删除“${libraryItem.name}”，并解除 ${boundCharacters.length} 个本地自动绑定。`
-      : `已从本地面具库删除“${libraryItem.name}”。`;
+    if (!confirm(`从本地面具库删除“${libraryItem.name}”吗？24 小时内可撤回。${bindingNotice}`)) return;
+    state.maskDeleteRunning = true;
     render();
+    try {
+      await deleteLocalMaskBackups([libraryItem]);
+      state.status = boundCharacters.length
+        ? `已删除“${libraryItem.name}”，并解除 ${boundCharacters.length} 个本地自动绑定。24 小时内可撤回。`
+        : `已从本地面具库删除“${libraryItem.name}”。24 小时内可撤回。`;
+    } catch (error) {
+      state.status = explainFailure(error);
+    } finally {
+      state.maskDeleteRunning = false;
+      render();
+    }
   }
 
   function maskEditorText(value) {
@@ -8631,7 +8751,7 @@ roleStateReady = true;
   }
 
   function queueSelectedOldFavoritesForChat() {
-    if (!maskAccountScope || loadManualAutoChatJob() || state.shareRecoveryLoading) return;
+    if (!state.oldFavoritesManaging || !maskAccountScope || loadManualAutoChatJob() || state.shareRecoveryLoading) return;
     const selected = state.selectedFavoriteOnlyForChat;
     const rows = state.favoriteOnly.filter(row => selected.has(String(row.characterId))
       && row.favoriteKnown === true && row.isFavorite && !realChatSessionId(row.lastSessionId));
@@ -8645,6 +8765,7 @@ roleStateReady = true;
       state.status = '普通待聊保存失败，请检查浏览器存储后重试。';
     } else {
       selected.clear();
+      state.oldFavoritesManaging = false;
       state.section = 'favorites';
       state.active = 'manualFavoriteChats';
       state.status = added ? `已将 ${added} 个旧收藏加入普通待聊。` : '选中的角色已在普通待聊里。';
@@ -9967,7 +10088,7 @@ roleStateReady = true;
     const manualDoneButton = state.active === 'manualFavoriteChats' ? `<button data-action="manual-chat-done" data-character-id="${esc(row.characterId)}">已完成</button>` : '';
     const roleActions = `${manualDoneButton}<button data-action="bind-role-mask" data-index="${index}" data-character-id="${esc(row.characterId)}">${hasLocalBinding ? '更换自动面具' : '绑定自动面具'}</button>${hasLocalBinding ? `<button data-action="unbind-role-mask" data-index="${index}" data-character-id="${esc(row.characterId)}">取消自动绑定</button>` : ''}`;
     const favoritePending = state.favoritePendingIds.has(String(row.characterId));
-    const queueSelection = state.section === 'roles' && state.active === 'favoriteOnly' && row.favoriteKnown === true && row.isFavorite
+    const queueSelection = state.oldFavoritesManaging && state.section === 'roles' && state.active === 'favoriteOnly' && row.favoriteKnown === true && row.isFavorite
       ? `<input type="checkbox" data-queue-old-favorite="${esc(row.characterId)}" aria-label="选择${esc(row.name || '角色')}加入待聊" ${state.selectedFavoriteOnlyForChat.has(String(row.characterId)) ? 'checked' : ''}> `
       : '';
     const favoriteUnknown = row.favoriteKnown !== true;
@@ -10754,7 +10875,10 @@ roleStateReady = true;
     }
     const roleRunButton = panel.querySelector('#mufy-recovery-run');
     roleRunButton.disabled = state.metadataLoading || state.roleLoading || state.shareRecoveryLoading || (state.loading && !state.roleLoading);
-    panel.querySelector('#mufy-recovery-undo').disabled = state.loading || !state.undoLibrary;
+    const undoMask = panel.querySelector('#mufy-recovery-undo');
+    const deletedBatch = state.section === 'masks' && latestDeletedMaskBatch();
+    undoMask.disabled = state.loading || state.maskDeleteRunning || !maskStorageReady || (!state.undoLibrary && !deletedBatch);
+    undoMask.title = state.undoLibrary ? '撤回上一次可恢复的面具操作' : deletedBatch ? '撤回最近一批本地面具删除' : '没有可撤回的面具操作';
     roleRunButton.textContent = state.roleLoading ? '正在找回…' : (state.rolePaused ? '继续读取' : (state.roleReadMode === 'latest' ? '查找最新几页' : '找回角色链接'));
     const stopActionButton = panel.querySelector('#mufy-recovery-stop-action');
     stopActionButton.hidden = !state.roleLoading;
@@ -10838,12 +10962,24 @@ roleStateReady = true;
     const shareRecoveryControls = panel.querySelector('#mufy-recovery-share-recovery-controls');
     const shareRecoveryOne = panel.querySelector('#mufy-recovery-share-recovery-one');
     const queueOldFavorites = panel.querySelector('#mufy-recovery-queue-old-favorites');
+    const manageOldFavorites = panel.querySelector('#mufy-recovery-manage-old-favorites');
+    const showOldFavorites = state.section === 'roles' && state.active === 'favoriteOnly';
+    if (!showOldFavorites && state.oldFavoritesManaging) {
+      state.oldFavoritesManaging = false;
+      state.selectedFavoriteOnlyForChat.clear();
+    }
+    if (manageOldFavorites) {
+      manageOldFavorites.hidden = !showOldFavorites;
+      manageOldFavorites.disabled = state.shareRecoveryLoading || !maskAccountScope || Boolean(loadManualAutoChatJob());
+      manageOldFavorites.setAttribute('aria-pressed', String(state.oldFavoritesManaging));
+      manageOldFavorites.textContent = state.oldFavoritesManaging ? '完成' : '管理';
+    }
     if (queueOldFavorites) {
       const count = state.favoriteOnly.filter(row => state.selectedFavoriteOnlyForChat.has(String(row.characterId))
         && row.favoriteKnown === true && row.isFavorite).length;
-      queueOldFavorites.hidden = state.section !== 'roles' || state.active !== 'favoriteOnly';
-      queueOldFavorites.disabled = !count || !maskAccountScope || state.shareRecoveryLoading || Boolean(loadManualAutoChatJob());
-      queueOldFavorites.textContent = `加入普通待聊（${count}）`;
+      queueOldFavorites.hidden = !showOldFavorites;
+      queueOldFavorites.disabled = !state.oldFavoritesManaging || !count || !maskAccountScope || state.shareRecoveryLoading || Boolean(loadManualAutoChatJob());
+      queueOldFavorites.textContent = count ? `加入待聊（${count}）` : '加入待聊';
     }
     const shareRecoveryCancel = panel.querySelector('#mufy-recovery-share-recovery-cancel');
     if (shareRecoveryControls && shareRecoveryOne && shareRecoveryCancel) {
@@ -10857,7 +10993,7 @@ roleStateReady = true;
         ? (recoveryTask?.pauseRequested ? '正在中断…' : `中断检测（${Math.min((recoveryTask?.index || 0) + 1, recoveryTask?.rows?.length || 0)}/${recoveryTask?.rows?.length || 0}）`)
         : recoveryTask
           ? `继续检测（剩余 ${remaining}）`
-          : (uncachedCount ? `检测未记录角色（${uncachedCount}）` : `本账号均已有链接记录`);
+          : (uncachedCount ? `检测（${uncachedCount}）` : '检测');
       shareRecoveryOne.disabled = state.favoriteRunning || state.loading || state.metadataLoading
         || Boolean(recoveryTask?.pauseRequested) || Boolean(recoveryTask?.cancelRequested)
         || (!recoveryTask && !uncachedCount);
@@ -11024,11 +11160,9 @@ roleStateReady = true;
     }
     const importMasksButton = panel.querySelector('#mufy-recovery-import-masks');
     const exportMasksButton = panel.querySelector('#mufy-recovery-export-masks');
-    const undoMasksButton = panel.querySelector('#mufy-recovery-undo');
     if (importMasksButton) importMasksButton.disabled = state.loading || !maskStorageReady;
     // 存储故障时必须保留导出能力，方便抢救当前内存中的面具。
     if (exportMasksButton) exportMasksButton.disabled = maskStorageMode === 'initializing';
-    if (undoMasksButton) undoMasksButton.disabled = state.loading || !maskStorageReady || !state.undoLibrary;
     if (state.active === 'authors' || state.active === 'siteAuthors') {
       state.visibleAuthors = groups;
       state.visibleRows = groups.flatMap(group => group.rows);
@@ -11242,7 +11376,8 @@ roleStateReady = true;
       #mufy-recovery-mask-actions #mufy-recovery-mask-manage.active{background:var(--mufy-panel-accent-button)!important;color:var(--mufy-panel-accent-text)!important}
       #mufy-recovery-role-actions > button,#mufy-recovery-mask-actions > button{min-width:0;white-space:normal;line-height:1.25}
       #mufy-recovery-favorite-visible{width:100%}
-      #mufy-recovery-share-recovery-controls{display:grid;grid-template-columns:1fr auto;gap:6px}
+      #mufy-recovery-share-recovery-controls{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;gap:6px}
+      #mufy-recovery-share-recovery-cancel{grid-column:1/-1}
       #mufy-recovery-share-recovery-controls[hidden]{display:none}
       #mufy-recovery-share-recovery-one{min-width:0;background:#453d69!important;border-color:#8578c8!important;color:#f4efff!important}
       #mufy-recovery-share-recovery-cancel{white-space:nowrap}
@@ -11792,7 +11927,7 @@ roleStateReady = true;
           <div id="mufy-recovery-tabs"><button class="active" data-category="allRoles">全部角色 (0)</button><button data-category="chatted">聊过的 (0)</button><button data-category="chattedNotFavorite">聊过未收藏 (0)</button><button data-category="favoriteOnly">收藏未聊 (0)</button><button data-category="authors">作者合集 (0)</button></div>
           <div id="mufy-recovery-role-actions"><button id="mufy-recovery-run">找回角色链接</button><button id="mufy-recovery-refresh-status" title="更新最近一次链接读取到的角色状态和作者名称">更新状态</button><button id="mufy-recovery-role-more" aria-expanded="false" aria-controls="mufy-recovery-role-more-options">▸ 更多</button></div>
           <div id="mufy-recovery-role-more-options" hidden><div id="mufy-recovery-role-read-options"><span>读取方式</span><select id="mufy-recovery-role-read-mode" aria-label="角色读取方式"><option value="full">完整读取</option><option value="latest">查找最新几页</option></select><label>页数 <input id="mufy-recovery-role-latest-pages" type="number" min="1" max="500" value="2" aria-label="读取页数"></label><span>每页 20 个</span></div><button id="mufy-recovery-export-roles" class="mufy-recovery-tab-action">导出角色</button></div>
-          <button id="mufy-recovery-favorite-visible" hidden>收藏当前列表</button><button id="mufy-recovery-queue-old-favorites" hidden>加入普通待聊（0）</button><div id="mufy-recovery-share-recovery-controls" hidden><button id="mufy-recovery-share-recovery-one">检测全部收藏未聊</button><button id="mufy-recovery-share-recovery-cancel" hidden>取消任务</button></div>
+          <button id="mufy-recovery-favorite-visible" hidden>收藏当前列表</button><div id="mufy-recovery-share-recovery-controls" hidden><button id="mufy-recovery-queue-old-favorites" hidden title="点管理后勾选角色">加入待聊</button><button id="mufy-recovery-share-recovery-one">检测</button><button id="mufy-recovery-manage-old-favorites" aria-pressed="false" hidden>管理</button><button id="mufy-recovery-share-recovery-cancel" hidden>取消任务</button></div>
         </div>
         <div id="mufy-recovery-favorite-section" hidden>
           <div class="mufy-favorite-nav">
@@ -12245,9 +12380,14 @@ roleStateReady = true;
     panel.querySelector('#mufy-recovery-auto-add-favorite-folder').onchange = event => setAutoAddFavoriteFolderSetting(event.target.checked);
     panel.querySelector('#mufy-recovery-favorite-visible').onclick = () => favoriteRows(state.visibleRows, '当前列表');
     panel.querySelector('#mufy-recovery-queue-old-favorites').onclick = queueSelectedOldFavoritesForChat;
+    panel.querySelector('#mufy-recovery-manage-old-favorites').onclick = () => {
+      state.oldFavoritesManaging = !state.oldFavoritesManaging;
+      if (!state.oldFavoritesManaging) state.selectedFavoriteOnlyForChat.clear();
+      render();
+    };
     panel.querySelector('#mufy-recovery-list').addEventListener('change', event => {
       const id = event.target.dataset?.queueOldFavorite;
-      if (!id || state.section !== 'roles' || state.active !== 'favoriteOnly') return;
+      if (!id || !state.oldFavoritesManaging || state.section !== 'roles' || state.active !== 'favoriteOnly') return;
       if (event.target.checked) state.selectedFavoriteOnlyForChat.add(id);
       else state.selectedFavoriteOnlyForChat.delete(id);
       render();
