@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.123
+// @version      3.0.0-dev.124
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,7 +21,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.123';
+    : '3.0.0-dev.124';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -123,7 +123,9 @@
   const AUTH_HOOK_MARK = '__mufyRecoveryAuthHookedV3Test';
   let authCaptureLogged = false;
   const observedChatApiSignatures = new Set();
-  const authRetryOptions = new WeakSet();
+  const scriptFetchOptions = new WeakMap();
+  let chatPageAuthorization = null;
+  let chatPageAuthRequestId = 0;
 
   function mufyApiUrl(requestUrl) {
     try {
@@ -467,7 +469,7 @@
     try {
       const loginUrl = new URL('/api/users/login', pageWindow.location.origin);
       appendRunLog('info', '正在发送 POST /api/users/login。');
-      const response = await pageWindow.fetch(loginUrl.href, {
+      const response = await fetchFromScript(loginUrl.href, {
         method: 'POST',
         headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -652,7 +654,7 @@
       scanStoredAuthorization();
       const headers = { Accept: 'application/json' };
       if (authorization) headers.Authorization = authorization;
-      const response = await pageWindow.fetch('/api/users/logout', {
+      const response = await fetchFromScript('/api/users/logout', {
         method: 'POST',
         headers,
         credentials: 'include',
@@ -747,7 +749,7 @@
     try {
       const requestedAt = Date.now();
       const installUrl = `${TEST_UPDATE_URL}?check=${requestedAt}`;
-      const response = await pageWindow.fetch(installUrl, { cache: 'no-store', credentials: 'omit' });
+      const response = await fetchFromScript(installUrl, { cache: 'no-store', credentials: 'omit' });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const header = (await response.text()).slice(0, 3000);
       const latestVersion = String(header.match(/^\/\/\s*@version\s+([^\s]+)\s*$/mi)?.[1] || '');
@@ -963,8 +965,32 @@
   }
 
   function fetchWithoutAuthCapture(url, options) {
-    authRetryOptions.add(options);
+    return fetchFromScript(url, options, true);
+  }
+
+  function fetchFromScript(url, options, skipCapture = false) {
+    scriptFetchOptions.set(options, skipCapture);
     return pageWindow.fetch(url, options);
+  }
+
+  function chatPageAuthRequest(url, headers) {
+    const api = mufyApiUrl(url);
+    if (!api || api.origin !== pageWindow.location.origin || pageWindow.location.pathname !== '/chat'
+        || /\/users\/(?:login|logout)(?:\/|$)/i.test(api.pathname)) return null;
+    const characterId = currentRoleContext().characterId;
+    let token;
+    try { token = normalizeAuthorizationCandidate(new pageWindow.Headers(headers).get('Authorization')); }
+    catch (_) { return null; }
+    if (!characterId || !authorizationIsUsable(token)) return null;
+    return { characterId, token, scope: maskAccountScopeFromAuthorization(token), id: ++chatPageAuthRequestId };
+  }
+
+  function rememberChatPageAuthorization(request, status, body) {
+    if (!request || status < 200 || status >= 300 || body?.success === false
+        || (body?.code != null && Number(body.code) !== 200)) return;
+    if (request.id < (chatPageAuthorization?.id || 0)) return;
+    if (pageWindow.location.pathname === '/chat' && currentRoleContext().characterId === request.characterId
+        && (!maskAccountScope || request.scope === maskAccountScope)) chatPageAuthorization = request;
   }
 
   function findAuthorizationStorageSlot() {
@@ -1101,9 +1127,17 @@
         this.__mufyRecoveryUrl = String(url || '');
         this.__mufyRecoveryMethod = String(method || 'GET');
         this.__mufyRecoveryPageScope = currentSiteCaptureScope();
+        this.__mufyRecoveryAuthRequest = null;
         if (!this.__mufyRecoveryCaptureHooked && this.addEventListener) {
           this.__mufyRecoveryCaptureHooked = true;
           this.addEventListener('loadend', function () {
+            if (this.__mufyRecoveryAuthRequest && this.status >= 200 && this.status < 300) {
+              try {
+                const body = this.responseType === 'json' ? this.response
+                  : this.getResponseHeader('Content-Type')?.includes('json') ? JSON.parse(this.responseText) : null;
+                rememberChatPageAuthorization(this.__mufyRecoveryAuthRequest, this.status, body);
+              } catch (_) {}
+            }
             tryCaptureSiteCharacterXhr(this.__mufyRecoveryUrl, this, this.__mufyRecoveryPageScope);
             recordChatApiObservation(this.__mufyRecoveryUrl, this, this.__mufyRecoveryMethod, this.__mufyRecoveryBody);
             captureChatModelConfigXhr(this.__mufyRecoveryUrl, this);
@@ -1112,7 +1146,11 @@
         return originalOpen.call(this, method, url, ...rest);
       };
       XHR.prototype.setRequestHeader = function (name, value) {
-        if (/^authorization$/i.test(String(name))) captureAuthorization({ authorization: value }, this.__mufyRecoveryUrl);
+        if (/^authorization$/i.test(String(name))) {
+          const headers = { authorization: value };
+          captureAuthorization(headers, this.__mufyRecoveryUrl);
+          this.__mufyRecoveryAuthRequest = chatPageAuthRequest(this.__mufyRecoveryUrl, headers);
+        }
         return originalSetRequestHeader.call(this, name, value);
       };
       XHR.prototype.send = function (body) {
@@ -1129,11 +1167,20 @@
         try {
           requestUrl = typeof input === 'string' ? input : input?.url || String(input || '');
         } catch (_) {}
-        if (!authRetryOptions.has(init)) captureAuthorization(init?.headers ?? input?.headers, requestUrl);
+        const headers = init?.headers ?? input?.headers;
+        const authRequest = scriptFetchOptions.has(init) ? null : chatPageAuthRequest(requestUrl, headers);
+        if (!scriptFetchOptions.get(init)) captureAuthorization(headers, requestUrl);
         captureChatCompletionRequest(requestUrl, init?.body || '');
         const result = originalFetch.apply(this, arguments);
         try {
           return Promise.resolve(result).then(response => {
+            if (authRequest && response.ok && !response.redirected) {
+              if (response.headers.get('Content-Type')?.includes('json')) {
+                response.clone().json().then(body => rememberChatPageAuthorization(authRequest, response.status, body)).catch(() => {});
+              } else {
+                rememberChatPageAuthorization(authRequest, response.status);
+              }
+            }
             tryCaptureSiteCharacterResponse(requestUrl, response, pageScope);
             recordChatApiObservation(requestUrl, response, init?.method || input?.method || 'GET', init?.body || '');
             captureChatModelConfigResponse(requestUrl, response);
@@ -2257,6 +2304,31 @@ roleStateReady = true;
     return MANUAL_AUTO_CHAT_MODEL_CONFIGS.map(config => ({ ...config }));
   }
 
+  async function waitForChatPageAuthorization(job, timeoutMs = 20000) {
+    const characterId = String(job.activeCharacterId);
+    const deadline = Date.now() + timeoutMs;
+    let announced = false;
+    while (Date.now() < deadline) {
+      if (manualAutoChatWasStopped()) throw new ManualAutoChatPausedError('任务已暂停');
+      if (pageWindow.location.pathname !== '/chat' || currentRoleContext().characterId !== characterId
+          || (job.accountScope && maskAccountScope && job.accountScope !== maskAccountScope)) {
+        throw new ManualAutoChatPausedError('角色页或 Mufy 账号已切换，已暂停发送');
+      }
+      const proof = chatPageAuthorization;
+      const scope = job.accountScope || maskAccountScope;
+      if (proof?.characterId === characterId && (!scope || proof.scope === scope)
+          && authorizationIsUsable(proof.token)) return proof;
+      if (!announced) {
+        announced = true;
+        state.status = '正在等待当前角色页完成登录验证……';
+        render();
+        showManualAutoChatToast(state.status);
+      }
+      await wait(250);
+    }
+    throw new Error('20 秒内未观察到当前角色页带登录凭证的成功请求。发送尚未开始，进度已保留。请等页面加载完成后点继续，必要时手动刷新角色页。');
+  }
+
   function realChatSessionId(value) {
     const id = String(value || '').trim();
     return id && id !== '00000000-0000-0000-0000-000000000000' ? id : '';
@@ -2299,8 +2371,7 @@ roleStateReady = true;
     return false;
   }
 
-  async function sendManualChatViaApi(job, verifiedEmptySessions) {
-    scanStoredAuthorization();
+  async function sendManualChatViaApi(job, verifiedEmptySessions, pageAuth) {
     const characterId = String(job.activeCharacterId || '');
     if (await confirmExistingManualChatSession(job, verifiedEmptySessions)) return false;
     const configs = manualAutoChatModelConfigs();
@@ -2350,6 +2421,9 @@ roleStateReady = true;
           const scope = job.accountScope || maskAccountScope;
           const request = token => {
             if (scope && scope !== maskAccountScope) throw new ManualAutoChatPausedError('发送前检测到 Mufy 账号已切换');
+            if (pageWindow.location.pathname !== '/chat' || currentRoleContext().characterId !== characterId) {
+              throw new ManualAutoChatPausedError('发送前检测到角色页已切换');
+            }
             if (manualAutoChatWasStopped()) throw new ManualAutoChatPausedError('任务已暂停');
             const headers = { Accept: 'text/event-stream', 'Content-Type': 'application/json' };
             if (token) headers.Authorization = token;
@@ -2362,7 +2436,7 @@ roleStateReady = true;
             });
           };
 
-          const sentAuthorization = authorizationIsUsable(authorization) ? authorization : '';
+          const sentAuthorization = pageAuth.token;
           let response = await request(sentAuthorization);
           const authAttempts = [`${sentAuthorization ? '页面令牌' : 'Cookie'} HTTP ${response.status}`];
           if (response.status === 401) {
@@ -2380,6 +2454,7 @@ roleStateReady = true;
             appendRunLog(response.ok ? 'info' : 'warn', `一键扣数鉴权：${authAttempts.join(' → ')}。`);
           }
           if (response.status === 401 || response.status === 403) {
+            if (chatPageAuthorization === pageAuth) chatPageAuthorization = null;
             throw new Error(`自动发送消息被聊天接口拒绝（${authAttempts.join('，')}）。可在同一角色页用 Mufy 自带的发送按钮试一条，确认是网站发送也失败，还是只有一键扣数失败。`);
           }
           if (!response.ok) {
@@ -2626,10 +2701,12 @@ roleStateReady = true;
       if (job.phase === 'sending') {
         throw new Error('上一条消息的发送结果无法确认。为避免重复发送，请先在对话中核对。');
       }
-      if (!['response-complete', 'waiting-response', 'already-chatted'].includes(job.phase)
-        && await confirmExistingManualChatSession(job, verifiedEmptySessions)) {
-        job.phase = 'already-chatted';
-        if (!saveManualAutoChatJob(job)) throw new Error('无法保存跳过状态');
+      if (!['response-complete', 'waiting-response', 'already-chatted'].includes(job.phase)) {
+        await waitForChatPageAuthorization(job);
+        if (await confirmExistingManualChatSession(job, verifiedEmptySessions)) {
+          job.phase = 'already-chatted';
+          if (!saveManualAutoChatJob(job)) throw new Error('无法保存跳过状态');
+        }
       }
       if (job.phase === 'waiting-response') {
         const composer = findManualChatComposer();
@@ -2650,7 +2727,9 @@ roleStateReady = true;
       if (!['waiting-response', 'response-complete', 'already-chatted'].includes(job.phase)) {
         state.status = `一键扣数 ${Number(job.completed || 0) + 1}/${job.total}：正在等待“${job.activeCharacterName || job.activeCharacterId}”的输入框……`;
         render();
-        showManualAutoChatToast(`一键扣数 ${Number(job.completed || 0) + 1}/${job.total}：正在准备并发送消息…`);
+        showManualAutoChatToast(state.status);
+        await waitForManualChatComposer();
+        const pageAuth = await waitForChatPageAuthorization(job);
         const { textarea } = await waitForManualChatComposer();
         const existingDraft = String(textarea.value || '').trim();
         if (existingDraft && existingDraft !== String(job.message || '').trim()) {
@@ -2661,7 +2740,7 @@ roleStateReady = true;
         job.sentAt = Date.now();
         if (!saveManualAutoChatJob(job)) throw new Error('发送前无法保存任务状态');
         showManualAutoChatToast(`一键扣数 ${Number(job.completed || 0) + 1}/${job.total}：消息发送中，正在等待完整回复…`);
-        const sent = await sendManualChatViaApi(job, verifiedEmptySessions);
+        const sent = await sendManualChatViaApi(job, verifiedEmptySessions, pageAuth);
         const latest = loadManualAutoChatJob();
         if (!latest) {
           reportManualAutoChatCancelResult(job, sent ? true : null);
@@ -2834,14 +2913,14 @@ roleStateReady = true;
     const Controller = pageWindow.AbortController || globalThis.AbortController;
     if (!Controller) {
       return Promise.race([
-        pageWindow.fetch(url, options),
+        fetchFromScript(url, options),
         new Promise((_, reject) => setTimeout(() => reject(new Error(`${label}超过 ${Math.round(timeoutMs / 1000)} 秒未响应`)), timeoutMs))
       ]);
     }
     const controller = new Controller();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      return await pageWindow.fetch(url, { ...options, signal: controller.signal });
+      return await fetchFromScript(url, { ...options, signal: controller.signal });
     } catch (error) {
       if (error?.name === 'AbortError') throw new Error(`${label}超过 ${Math.round(timeoutMs / 1000)} 秒未响应`);
       throw error;
@@ -3933,7 +4012,7 @@ roleStateReady = true;
     url.searchParams.set('characterId', String(characterId));
     const headers = { Accept: 'application/json' };
     if (authorization) headers.Authorization = authorization;
-    const response = await pageWindow.fetch(url.href, {
+    const response = await fetchFromScript(url.href, {
       method: 'GET', credentials: 'include', headers
     });
     if (response.status === 429) throw new RateLimitError('归档记录');
@@ -4394,12 +4473,12 @@ roleStateReady = true;
   }
 
   async function fetchWithCookieFallback(url, options) {
-    let response = await pageWindow.fetch(url, options);
+    let response = await fetchFromScript(url, options);
     const headers = new pageWindow.Headers(options.headers);
     if ((response.status === 401 || response.status === 403) && headers.has('Authorization')) {
       authorization = '';
       headers.delete('Authorization');
-      response = await pageWindow.fetch(url, { ...options, headers });
+      response = await fetchFromScript(url, { ...options, headers });
     }
     return response;
   }
@@ -4418,7 +4497,7 @@ roleStateReady = true;
     if (authorization) headers.Authorization = authorization;
     let response;
     try {
-      response = await pageWindow.fetch(url, {
+      response = await fetchFromScript(url, {
         method: 'POST',
         credentials: 'include',
         headers,
@@ -4448,7 +4527,7 @@ roleStateReady = true;
       cache: 'no-store',
       headers
     };
-    let response = await pageWindow.fetch(url.href, options);
+    let response = await fetchFromScript(url.href, options);
     response = await retryAuthenticatedRequest(response, url.href, options, '角色列表读取');
     if (response.status === 429) throw new RateLimitError('角色列表');
     if (response.status === 401 || response.status === 403) {
@@ -4791,14 +4870,14 @@ roleStateReady = true;
         ...(search ? { search } : {})
       })
     };
-    let response = await pageWindow.fetch(url.href, requestOptions);
+    let response = await fetchFromScript(url.href, requestOptions);
     // Mufy 页面加载后偶尔会保留或发出一枚旧 Bearer。服务器会优先拒绝
     // 这枚旧令牌，即使当前浏览器的 Cookie 登录仍然有效；去掉它重试可避免
     // 出现“页面未加载完能读取，加载完成反而显示没有登录权限”的误报。
     if ((response.status === 401 || response.status === 403) && authorization) {
       const cookieHeaders = new pageWindow.Headers(headers);
       cookieHeaders.delete('Authorization');
-      response = await pageWindow.fetch(url.href, { ...requestOptions, headers: cookieHeaders });
+      response = await fetchFromScript(url.href, { ...requestOptions, headers: cookieHeaders });
       if (response.ok) {
         authorization = '';
         appendRunLog('warn', '面具接口拒绝了页面令牌，已改用当前登录 Cookie 并读取成功。');
@@ -8033,7 +8112,7 @@ roleStateReady = true;
       url.searchParams.set('pageSize', '20');
       const headers = { Accept: 'application/json' };
       if (authorization) headers.Authorization = authorization;
-      const response = await pageWindow.fetch(url.href, { method: 'GET', credentials: 'include', headers });
+      const response = await fetchFromScript(url.href, { method: 'GET', credentials: 'include', headers });
       const { raw, body } = await readJsonResponseText(response);
       if (response.status === 429) throw new RateLimitError('作者作品列表');
       if (response.status === 401 || response.status === 403) throw new Error(loginErrorMessage(response.status, '读取作者全部作品'));
@@ -8583,7 +8662,7 @@ roleStateReady = true;
     const options = { method: 'GET', credentials: 'include', cache: 'no-store', headers, signal };
     let response;
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      response = await pageWindow.fetch(url.href, options);
+      response = await fetchFromScript(url.href, options);
       if (response.status !== 429 && response.status < 500) break;
       if (attempt < 2) await wait(1200 * (attempt + 1));
     }
@@ -10420,7 +10499,7 @@ roleStateReady = true;
       scanStoredAuthorization();
       const headers = { Accept: 'application/json' };
       if (authorization) headers.Authorization = authorization;
-      const response = await pageWindow.fetch(new URL('/api/models/tree', location.origin).href, { method: 'GET', credentials: 'include', headers });
+      const response = await fetchFromScript(new URL('/api/models/tree', location.origin).href, { method: 'GET', credentials: 'include', headers });
       if (response.status === 401 || response.status === 403) throw new Error(loginErrorMessage(response.status, '读取模型状态'));
       if (!response.ok) throw new Error(`读取模型状态失败（HTTP ${response.status}）`);
       const body = await response.json();
