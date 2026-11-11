@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.129
+// @version      3.0.0-dev.130
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,7 +21,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.129';
+    : '3.0.0-dev.130';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -2001,7 +2001,8 @@
     maskManaging: false,
     selectedMaskKeys: new Set(),
     maskDeleteRunning: false,
-    favoriteFolderSearchQuery: '',
+    favoriteFolderSearchRows: null,
+    favoriteFolderSearchRequest: null,
     loading: false,
     roleLoading: false,
     rolePauseRequested: false,
@@ -2182,6 +2183,7 @@ roleStateReady = true;
   }
 
   function reloadRoleCacheForAccount() {
+    resetInlineFavoriteFolderSearch(true);
     state.selectedFavoriteOnlyForChat.clear();
     state.oldFavoritesManaging = false;
     const legacy = readLegacyRoleCache(maskAccountScope);
@@ -7218,11 +7220,12 @@ roleStateReady = true;
     }
   }
 
-  async function requestFavoriteFolders() {
+  async function requestFavoriteFolders(expectedScope) {
     const folders = [];
     const pageSize = 20;
     const seenPageSignatures = new Set();
     for (let page = 1; page <= 500; page += 1) {
+      if (expectedScope != null && expectedScope !== maskAccountScope) throw new Error('读取收藏夹期间切换了 Mufy 账号');
       // /api/favorites/ 是读取某个收藏夹内容的接口，需要 ID；列表接口使用 /api/favorites/list.
       const url = new URL('/api/favorites/list', location.origin);
       url.searchParams.set('pageNum', String(page));
@@ -7260,6 +7263,7 @@ roleStateReady = true;
     });
     const { raw, body } = await readJsonResponseText(response);
     validateFavoriteApiResponse(response, body, raw, '创建收藏夹');
+    resetInlineFavoriteFolderSearch();
     const folder = body?.data;
     if (!folder?.id) throw new Error('创建收藏夹成功，但返回结果没有收藏夹 ID。');
     return folder;
@@ -7320,6 +7324,7 @@ roleStateReady = true;
       ({ raw, body } = await readJsonResponseText(response));
     }
     validateFavoriteApiResponse(response, body, raw, '删除收藏夹', true);
+    resetInlineFavoriteFolderSearch();
   }
 
   function favoriteFolderId(folder) {
@@ -7328,6 +7333,61 @@ roleStateReady = true;
 
   function favoriteFolderName(folder) {
     return String(folder?.name || folder?.folderName || `收藏夹 ${favoriteFolderId(folder) || '未知'}`);
+  }
+
+  function resetInlineFavoriteFolderSearch(clearInput = false) {
+    state.favoriteFolderSearchRows = null;
+    state.favoriteFolderSearchRequest = null;
+    const input = panel?.querySelector('#mufy-recovery-folder-search-query');
+    if (input && clearInput) input.value = '';
+    renderInlineFavoriteFolderSearch();
+  }
+
+  function renderInlineFavoriteFolderSearch(error = '') {
+    const form = panel?.querySelector('#mufy-recovery-folder-search');
+    if (!form) return;
+    const query = form.querySelector('input').value.trim().toLowerCase();
+    const output = form.querySelector('#mufy-recovery-folder-search-results');
+    const searching = Boolean(state.favoriteFolderSearchRequest);
+    form.querySelector('button').disabled = !query || searching;
+    output.hidden = !query || (!searching && !state.favoriteFolderSearchRows && !error);
+    if (output.hidden) {
+      output.replaceChildren();
+      return;
+    }
+    if (searching || error) {
+      output.textContent = error || '正在读取收藏夹……';
+      return;
+    }
+    const rows = state.favoriteFolderSearchRows.filter(folder => favoriteFolderName(folder).toLowerCase().includes(query)
+      || favoriteFolderId(folder).toLowerCase().includes(query));
+    output.innerHTML = rows.length ? rows.map(folder => {
+      const count = favoriteFolderCount(folder);
+      return `<div class="mufy-recovery-folder-search-item"><strong>${esc(favoriteFolderName(folder))}</strong><small>ID：${esc(favoriteFolderId(folder))}${count == null ? '' : ` · ${count} 个角色`}</small></div>`;
+    }).join('') : '没有匹配的收藏夹';
+  }
+
+  async function searchFavoriteFoldersInline() {
+    const input = panel?.querySelector('#mufy-recovery-folder-search-query');
+    if (!input?.value.trim() || state.favoriteFolderSearchRequest) return;
+    const query = input.value;
+    scanStoredAuthorization();
+    input.value = query;
+    const request = { scope: maskAccountScope };
+    state.favoriteFolderSearchRequest = request;
+    renderInlineFavoriteFolderSearch();
+    let error = '';
+    try {
+      const rows = await requestFavoriteFolders(request.scope);
+      if (state.favoriteFolderSearchRequest === request && request.scope === maskAccountScope) state.favoriteFolderSearchRows = rows;
+    } catch (failure) {
+      error = `读取收藏夹失败：${explainFailure(failure)}`;
+    } finally {
+      if (state.favoriteFolderSearchRequest === request) {
+        state.favoriteFolderSearchRequest = null;
+        renderInlineFavoriteFolderSearch(error);
+      }
+    }
   }
 
   function favoriteFolderCount(folder) {
@@ -7356,9 +7416,7 @@ roleStateReady = true;
     const selected = state.selectedFavoriteFolderIds;
     const rows = state.favoriteFolderDeleteRows;
     const emptyRows = rows.filter(folder => folder?._countVerified === true && favoriteFolderCount(folder) === 0);
-    const query = state.favoriteFolderSearchQuery.trim().toLowerCase();
-    const visibleRows = (state.favoriteFolderDeleteEmptyOnly ? emptyRows : rows)
-      .filter(folder => !query || `${favoriteFolderName(folder)} ${favoriteFolderId(folder)}`.toLowerCase().includes(query));
+    const visibleRows = state.favoriteFolderDeleteEmptyOnly ? emptyRows : rows;
     const selectedCount = rows.filter(folder => selected.has(favoriteFolderId(folder))).length;
     const unverifiedCount = rows.filter(folder => folder?._countVerified !== true).length;
     if (state.favoriteFolderDeleteLoading && !rows.length) {
@@ -7366,9 +7424,7 @@ roleStateReady = true;
     } else if (!rows.length) {
       list.innerHTML = '<div class="mufy-recovery-folder-delete-empty">没有可删除的收藏夹</div>';
     } else if (!visibleRows.length) {
-      list.innerHTML = query
-        ? '<div class="mufy-recovery-folder-delete-empty">没有匹配的收藏夹</div>'
-        : unverifiedCount
+      list.innerHTML = unverifiedCount
         ? '<div class="mufy-recovery-folder-delete-empty">暂未确认空收藏夹，部分数量未读到。可以重新打开重试。</div>'
         : '<div class="mufy-recovery-folder-delete-empty">当前没有空收藏夹；关闭“只看空收藏夹”可管理全部收藏夹</div>';
     } else {
@@ -11368,6 +11424,10 @@ roleStateReady = true;
       #mufy-recovery-controls.is-section-home,#mufy-recovery-controls.is-standalone-section{flex:1;min-height:0;max-height:none;align-content:start}
       #mufy-recovery-role-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;align-items:stretch}
       #mufy-recovery-favorite-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;align-items:stretch}
+      #mufy-recovery-folder-search{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px}
+      #mufy-recovery-folder-search-query{box-sizing:border-box;min-width:0;width:100%;padding:7px 9px;font:inherit}
+      #mufy-recovery-folder-search-results{grid-column:1/-1;max-height:132px;overflow:auto;padding:5px 8px;border:1px solid var(--mufy-panel-border,#555);border-radius:6px;font-size:12px}
+      .mufy-recovery-folder-search-item{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 8px;padding:4px 0;overflow-wrap:anywhere}
       #mufy-recovery-auto-folder-label{display:flex;align-items:flex-start;gap:8px;margin-top:7px;padding:9px 10px;border:1px solid #4d4962;border-radius:8px;background:#292733;color:#ddd;cursor:pointer;user-select:none}
       #mufy-recovery-auto-folder-label input{flex:none;margin-top:2px;accent-color:#786bd4}
       #mufy-recovery-auto-folder-label span{display:grid;gap:2px;line-height:1.35}
@@ -11935,6 +11995,7 @@ roleStateReady = true;
             <button id="mufy-recovery-site-manage" hidden aria-pressed="false">管理</button>
           </div>
           <div id="mufy-recovery-favorite-actions"><button id="mufy-recovery-folder-organize">按作者整理</button><button id="mufy-recovery-folder-manage">新建 / 删除收藏夹</button><button id="mufy-recovery-stop-action" hidden>停止找回</button></div>
+          <form id="mufy-recovery-folder-search"><input id="mufy-recovery-folder-search-query" type="search" placeholder="搜索收藏夹名称或 ID" aria-label="搜索收藏夹名称或 ID"><button type="submit" disabled>搜索</button><div id="mufy-recovery-folder-search-results" role="status" hidden></div></form>
           <label id="mufy-recovery-auto-folder-label"><input id="mufy-recovery-auto-add-favorite-folder" type="checkbox"><span>收藏后自动放入收藏夹<small>关闭后仍会正常收藏角色，只是不再自动按作者归入收藏夹；手动整理功能不受影响。</small></span></label>
           <div id="mufy-recovery-site-actions"><button id="mufy-recovery-refresh-favorite-states">获取收藏状态</button><button id="mufy-recovery-select-unfavorite-site">全选未收藏</button><button id="mufy-recovery-queue-site-for-chat">加入普通待聊</button><button id="mufy-recovery-clear-site-selection">清空勾选</button><button id="mufy-recovery-refresh-site-rows" title="刷新当前网站页面并重新捕获，之后翻页会继续自动获取">重新获取</button><button id="mufy-recovery-clear-site-rows">清空结果</button></div>
           <div id="mufy-recovery-manual-auto-actions" hidden><input id="mufy-recovery-manual-auto-message" type="text" maxlength="500" value="${esc(state.manualAutoChatMessage)}" aria-label="一键扣数发送内容"><label class="mufy-recovery-auto-delay">间隔 <input id="mufy-recovery-manual-auto-delay-min" type="number" min="0" max="300" step="1" value="${esc(state.manualAutoChatDelayMin)}" aria-label="随机冷却最短秒数">～<input id="mufy-recovery-manual-auto-delay-max" type="number" min="0" max="300" step="1" value="${esc(state.manualAutoChatDelayMax)}" aria-label="随机冷却最长秒数"> 秒</label><button id="mufy-recovery-manual-auto-start">一键扣数</button><button id="mufy-recovery-manual-auto-cancel" hidden>取消任务</button><button id="mufy-recovery-manual-chat-next" title="按普通待聊列表顺序打开角色；再次点击视为当前角色已处理并前往下一个">下一个</button></div>
@@ -12305,16 +12366,10 @@ roleStateReady = true;
       createManagedFavoriteFolder();
     };
     const folderDeleteModal = panel.querySelector('#mufy-recovery-folder-delete-modal');
-    const folderSearch = document.createElement('input');
-    folderSearch.id = 'mufy-recovery-folder-delete-search';
-    folderSearch.placeholder = '搜索收藏夹名称或 ID';
-    folderSearch.setAttribute('aria-label', folderSearch.placeholder);
-    folderSearch.style.cssText = 'box-sizing:border-box;margin:8px 12px;width:calc(100% - 24px);padding:8px;border:1px solid #555;border-radius:6px;background:#18181c;color:#fff;font:inherit';
-    folderDeleteModal.insertBefore(folderSearch, panel.querySelector('#mufy-recovery-folder-delete-filter'));
-    folderSearch.oninput = () => {
-      state.favoriteFolderSearchQuery = folderSearch.value;
-      if (folderSearch.value.trim()) state.favoriteFolderDeleteEmptyOnly = false;
-      renderFavoriteFolderDeleteModal();
+    panel.querySelector('#mufy-recovery-folder-search-query').oninput = () => renderInlineFavoriteFolderSearch();
+    panel.querySelector('#mufy-recovery-folder-search').onsubmit = event => {
+      event.preventDefault();
+      searchFavoriteFoldersInline();
     };
     panel.querySelector('#mufy-recovery-folder-delete-close').onclick = () => {
       if (!state.favoriteFolderDeleteLoading) folderDeleteModal.hidden = true;
@@ -12322,7 +12377,6 @@ roleStateReady = true;
     panel.querySelector('#mufy-recovery-folder-delete-select-all').onclick = () => {
       state.favoriteFolderDeleteRows
         .filter(folder => !state.favoriteFolderDeleteEmptyOnly || (folder?._countVerified === true && favoriteFolderCount(folder) === 0))
-        .filter(folder => !state.favoriteFolderSearchQuery || `${favoriteFolderName(folder)} ${favoriteFolderId(folder)}`.toLowerCase().includes(state.favoriteFolderSearchQuery.trim().toLowerCase()))
         .forEach(folder => state.selectedFavoriteFolderIds.add(favoriteFolderId(folder)));
       renderFavoriteFolderDeleteModal();
     };
