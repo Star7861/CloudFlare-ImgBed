@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.126
+// @version      3.0.0-dev.127
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,7 +21,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.126';
+    : '3.0.0-dev.127';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -44,6 +44,7 @@
   const ROLE_CACHE_ACCOUNT_MIGRATION_OWNER_KEY = 'mufy-role-links-only-role-cache-migration-owner-v1';
   const AUTHOR_CACHE_KEY = 'mufy-role-links-only-author-cache-v1';
   const SHARE_CODE_CACHE_KEY = 'mufy-role-links-only-share-code-cache-v1';
+  const SHARE_CODE_NAMES_KEY = 'mufy-share-code-names-v1';
   const SHARE_CODE_ACCOUNT_MIGRATION_OWNER_KEY = 'mufy-role-links-only-share-code-migration-owner-v1';
   const SHARE_FAVORITE_JOB_KEY = 'mufy-role-links-only-share-favorite-job-v1';
   const SHARE_FAVORITE_RESULT_KEY = 'mufy-role-links-only-share-favorite-result-v1';
@@ -2998,6 +2999,17 @@ roleStateReady = true;
   function saveShareCodeCache() {
     if (!maskAccountScope) return;
     try { localStorage.setItem(accountStorageKey(SHARE_CODE_CACHE_KEY), JSON.stringify(Object.fromEntries(shareCodeCache))); } catch (_) {}
+  }
+
+  function saveShareCodeRoleName(row) {
+    const id = String(row?.characterId || '');
+    const name = String(row?.name || '').trim();
+    if (!maskAccountScope || !id || !name || name === '未命名角色') return;
+    try {
+      const key = accountStorageKey(SHARE_CODE_NAMES_KEY);
+      const names = JSON.parse(localStorage.getItem(key) || '{}');
+      if (names[id] !== name) localStorage.setItem(key, JSON.stringify({ ...names, [id]: name }));
+    } catch (_) {}
   }
 
   function reloadShareCodeCacheForAccount() {
@@ -6747,6 +6759,7 @@ roleStateReady = true;
 
         if (stopFavoriteShareRecoveryAtSafePoint(task)) return;
         if (shareCodeCache.has(String(row.characterId))) {
+          saveShareCodeRoleName(row);
           task.cachedSkipped = Number(task.cachedSkipped || 0) + 1;
           task.index += 1;
           task.phase = 'checking';
@@ -6783,6 +6796,7 @@ roleStateReady = true;
           continue;
         }
 
+        saveShareCodeRoleName(row);
         task.shareCode = shareCode;
         task.shareUrl = shareUrlFromCode(shareCode);
         task.phase = 'link-ready';
@@ -7994,6 +8008,7 @@ roleStateReady = true;
           job.shareLookupFailures.push(`${row.name}：${explainFailure(error)}`);
         }
         if (shareCode) {
+          saveShareCodeRoleName(row);
           job.activeCharacterId = String(row.characterId);
           job.activeShareCode = shareCode;
           job.navigationStartedAt = Date.now();
