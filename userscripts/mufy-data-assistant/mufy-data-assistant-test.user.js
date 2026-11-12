@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.131
+// @version      3.0.0-dev.132
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,7 +21,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.131';
+    : '3.0.0-dev.132';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -83,11 +83,7 @@
   const ROLE_FALLBACK_PENDING_KEY = 'mufy-role-links-only-role-fallback-pending-v1';
   const DEFAULT_MANUAL_AUTO_CHAT_MESSAGE = '≽^⚈⩊⚈^≼';
   // 一键扣数使用固定的低价非直连模型，不请求模型目录，也不跟随角色页当前选择。
-  const MANUAL_AUTO_CHAT_MODEL_CONFIGS = [
-    { name: 'MUMU-1.5', modelId: 25, modelTemplateId: 67 },
-    { name: '快速二哈3.0', modelId: 23, modelTemplateId: 140 },
-    { name: '快速二哈3.7', modelId: 111, modelTemplateId: 183 }
-  ];
+  const MANUAL_AUTO_CHAT_MODEL = { name: 'MUMU-1.5', modelId: 25, modelTemplateId: 67 };
   const AUTHOR_FOLDER_MIGRATION_KEY = 'mufy-recovery-author-folder-migration-v1';
   const AUTHOR_FOLDER_MAP_KEY = 'mufy-recovery-author-folder-map-v1';
   const AUTO_ADD_FAVORITE_FOLDER_KEY = 'mufy-recovery-auto-add-favorite-folder-v1';
@@ -2218,6 +2214,8 @@ roleStateReady = true;
     }
   }
 
+  class ManualAutoChatAuthRejectedError extends Error {}
+
   function isVisibleElement(element) {
     if (!element || !element.isConnected) return false;
     const style = pageWindow.getComputedStyle?.(element);
@@ -2314,10 +2312,6 @@ roleStateReady = true;
       await wait(300);
     }
     throw new Error('等待聊天输入框超过 60 秒');
-  }
-
-  function manualAutoChatModelConfigs() {
-    return MANUAL_AUTO_CHAT_MODEL_CONFIGS.map(config => ({ ...config }));
   }
 
   async function probeChatPageAuthorization(token, timeoutMs) {
@@ -2432,7 +2426,7 @@ roleStateReady = true;
   async function sendManualChatViaApi(job, verifiedEmptySessions, pageAuth) {
     const characterId = String(job.activeCharacterId || '');
     if (await confirmExistingManualChatSession(job, verifiedEmptySessions, pageAuth)) return false;
-    const configs = manualAutoChatModelConfigs();
+    const config = MANUAL_AUTO_CHAT_MODEL;
     if (manualAutoChatWasStopped()) throw new ManualAutoChatPausedError('任务已暂停');
     if (await confirmExistingManualChatSession(job, verifiedEmptySessions, pageAuth)) return false;
     const controller = new (pageWindow.AbortController || globalThis.AbortController)();
@@ -2440,7 +2434,7 @@ roleStateReady = true;
     const startedAt = Date.now();
     let contentParts = 0;
     let lastContentAt = 0;
-    let activeModelName = configs[0]?.name || '';
+    const activeModelName = config.name;
     const updateProgress = () => {
       if (job.accountScope && job.accountScope !== maskAccountScope) return;
       const elapsed = Math.floor((Date.now() - startedAt) / 1000);
@@ -2459,159 +2453,146 @@ roleStateReady = true;
       showManualAutoChatToast(state.status, { tone: !current || current.paused ? 'warn' : 'progress' });
     };
     const progressTimer = setInterval(updateProgress, 1000);
+    let reader = null;
     try {
       updateProgress();
-      let lastError = null;
-      for (let configIndex = 0; configIndex < configs.length; configIndex += 1) {
-        const config = configs[configIndex];
-        activeModelName = config.name;
-        let reader = null;
-        try {
-          const payload = {
-            userInput: String(job.message || DEFAULT_MANUAL_AUTO_CHAT_MESSAGE),
-            sessionId: '00000000-0000-0000-0000-000000000000',
-            modelId: Number(config.modelId),
-            modelTemplateId: Number(config.modelTemplateId),
-            characterId,
-            itemText: null,
-            skipRedPacket: false
-          };
-          const scope = job.accountScope || maskAccountScope;
-          const request = token => {
-            if (scope && scope !== maskAccountScope) throw new ManualAutoChatPausedError('发送前检测到 Mufy 账号已切换');
-            if (pageWindow.location.pathname !== '/chat' || currentRoleContext().characterId !== characterId) {
-              throw new ManualAutoChatPausedError('发送前检测到角色页已切换');
-            }
-            if (manualAutoChatWasStopped()) throw new ManualAutoChatPausedError('任务已暂停');
-            const headers = { Accept: 'text/event-stream', 'Content-Type': 'application/json' };
-            if (token) headers.Authorization = token;
-            return fetchWithoutAuthCapture(new URL('/api/v1/chat/completions', location.origin).href, {
-              method: 'POST',
-              credentials: 'include',
-              signal: controller.signal,
-              headers,
-              body: JSON.stringify(payload)
-            });
-          };
+      const payload = {
+        userInput: String(job.message || DEFAULT_MANUAL_AUTO_CHAT_MESSAGE),
+        sessionId: '00000000-0000-0000-0000-000000000000',
+        modelId: Number(config.modelId),
+        modelTemplateId: Number(config.modelTemplateId),
+        characterId,
+        itemText: null,
+        skipRedPacket: false
+      };
+      const scope = job.accountScope || maskAccountScope;
+      const request = token => {
+        if (scope && scope !== maskAccountScope) throw new ManualAutoChatPausedError('发送前检测到 Mufy 账号已切换');
+        if (pageWindow.location.pathname !== '/chat' || currentRoleContext().characterId !== characterId) {
+          throw new ManualAutoChatPausedError('发送前检测到角色页已切换');
+        }
+        if (manualAutoChatWasStopped()) throw new ManualAutoChatPausedError('任务已暂停');
+        const headers = { Accept: 'text/event-stream', 'Content-Type': 'application/json' };
+        if (token) headers.Authorization = token;
+        return fetchWithoutAuthCapture(new URL('/api/v1/chat/completions', location.origin).href, {
+          method: 'POST',
+          credentials: 'include',
+          signal: controller.signal,
+          headers,
+          body: JSON.stringify(payload)
+        });
+      };
 
-          const sentAuthorization = pageAuth.token;
-          let response = await request(sentAuthorization);
-          const authAttempts = [`${sentAuthorization ? '页面令牌' : 'Cookie'} HTTP ${response.status}`];
-          if (response.status === 401) {
-            const replacement = sameAccountRetryAuthorization(sentAuthorization, scope);
-            if (replacement) {
-              response = await request(replacement);
-              authAttempts.push(`同账号备用令牌 HTTP ${response.status}`);
-            }
-            if (response.status === 401 && sentAuthorization) {
-              response = await request('');
-              authAttempts.push(`Cookie HTTP ${response.status}`);
-            }
-          }
-          if (authAttempts.length > 1 || response.status === 401 || response.status === 403) {
-            appendRunLog(response.ok ? 'info' : 'warn', `一键扣数鉴权：${authAttempts.join(' → ')}。`);
-          }
-          if (response.status === 401 || response.status === 403) {
-            if (chatPageAuthorization === pageAuth) chatPageAuthorization = null;
-            throw new Error(`自动发送消息被聊天接口拒绝（${authAttempts.join('，')}）。可在同一角色页用 Mufy 自带的发送按钮试一条，确认是网站发送也失败，还是只有一键扣数失败。`);
-          }
-          if (!response.ok) {
-            const raw = await response.text().catch(() => '');
-            const error = new Error('“' + config.name + '”发送失败（HTTP ' + response.status + (raw ? '：' + raw.slice(0, 240) : '') + '）');
-            error.manualAutoModelRetryable = true;
-            throw error;
-          }
-          if (!response.body?.getReader) throw new Error('聊天接口没有返回可读取的 EventStream');
-
-          reader = response.body.getReader();
-          const decoder = new TextDecoder();
-          let buffer = '';
-          let doneReceived = false;
-          let attemptContentParts = 0;
-          let failureMessage = '';
-          let lastEventText = '';
-          const inspectLine = line => {
-            const trimmed = String(line || '').trim();
-            if (!trimmed || trimmed.startsWith(':') || /^(?:event|id|retry):/i.test(trimmed)) return;
-            const dataText = trimmed.replace(/^data:\s*/i, '');
-            if (dataText === '[DONE]') {
-              doneReceived = true;
-              return;
-            }
-            lastEventText = dataText.slice(0, 300);
-            try {
-              const event = JSON.parse(dataText);
-              const type = String(event?.type || event?.event || '').toLowerCase();
-              const status = String(event?.status || '').toLowerCase();
-              const finishReason = event?.finishReason ?? event?.finish_reason ?? event?.choices?.[0]?.finish_reason;
-              if (['done', 'complete', 'completed', 'finish', 'finished', 'success', 'end'].includes(type)
-                  || ['done', 'complete', 'completed', 'success', 'finished'].includes(status)
-                  || event?.done === true || event?.completed === true || (finishReason != null && finishReason !== '')) {
-                doneReceived = true;
-              }
-              const fragments = [
-                event?.content,
-                event?.delta?.content,
-                event?.data?.content,
-                event?.message?.content,
-                event?.choices?.[0]?.delta?.content,
-                event?.choices?.[0]?.message?.content
-              ].filter(value => typeof value === 'string' && value && value !== '[DONE]');
-              if (fragments.length) {
-                attemptContentParts += fragments.length;
-                contentParts += fragments.length;
-                lastContentAt = Date.now();
-              }
-              const explicitFailure = event?.error?.message || event?.error || event?.reason || event?.message;
-              if (['error', 'failed', 'failure'].includes(type) || event?.success === false) {
-                failureMessage = typeof explicitFailure === 'string' ? explicitFailure : JSON.stringify(explicitFailure || event);
-              }
-            } catch (_) {}
-          };
-
-          while (!doneReceived && !failureMessage) {
-            const chunk = await reader.read();
-            buffer += decoder.decode(chunk.value || new Uint8Array(), { stream: !chunk.done });
-            const lines = buffer.split(/\r?\n/);
-            buffer = lines.pop() || '';
-            lines.forEach(inspectLine);
-            if (chunk.done) break;
-          }
-          if (buffer) inspectLine(buffer);
-          if (failureMessage) {
-            const error = new Error('“' + config.name + '”返回失败：' + failureMessage.slice(0, 300));
-            error.manualAutoModelRetryable = attemptContentParts === 0
-              && /模型|model|额度|配额|拥堵|中断|不可用|channel|供应|capacity|overload|rate.?limit/i.test(failureMessage);
-            throw error;
-          }
-          if (!doneReceived && attemptContentParts > 0) {
-            appendRunLog('warn', '一键扣数的 EventStream 未带完成标记，但已收到回复内容并正常结束；按完成处理。', {
-              model: config.name,
-              contentParts: attemptContentParts,
-              lastEvent: lastEventText
-            });
-          } else if (!doneReceived) {
-            const error = new Error('EventStream 已结束，既没有完成标记，也没有收到回复内容'
-              + (lastEventText ? '；最后事件：' + lastEventText : ''));
-            error.manualAutoModelRetryable = true;
-            throw error;
-          }
-          appendRunLog('info', '一键扣数已使用固定模型“' + config.name + '”完成发送。');
-          return true;
-        } catch (error) {
-          if (controller.signal.aborted) throw new Error('等待角色回复完成超过 7 分钟，请在对话里核对这一条');
-          lastError = error;
-          const hasBackup = configIndex + 1 < configs.length;
-          if (!error?.manualAutoModelRetryable || !hasBackup || contentParts > 0) throw error;
-          const nextConfig = configs[configIndex + 1];
-          appendRunLog('warn', '固定模型“' + config.name + '”不可用，改用备用“' + nextConfig.name + '”。', error);
-          showManualAutoChatToast('“' + config.name + '”不可用，正在改用备用“' + nextConfig.name + '”…', { tone: 'warn' });
-        } finally {
-          if (reader) reader.cancel().catch(() => {});
+      const sentAuthorization = pageAuth.token;
+      let response = await request(sentAuthorization);
+      const authAttempts = [`${sentAuthorization ? '页面令牌' : 'Cookie'} HTTP ${response.status}`];
+      if (response.status === 401) {
+        const replacement = sameAccountRetryAuthorization(sentAuthorization, scope);
+        if (replacement) {
+          response = await request(replacement);
+          authAttempts.push(`同账号备用令牌 HTTP ${response.status}`);
+        }
+        if (response.status === 401 && sentAuthorization) {
+          response = await request('');
+          authAttempts.push(`Cookie HTTP ${response.status}`);
         }
       }
-      throw lastError || new Error('三个固定模型均未能发送');
+      if (authAttempts.length > 1 || response.status === 401 || response.status === 403) {
+        appendRunLog(response.ok ? 'info' : 'warn', `一键扣数鉴权：${authAttempts.join(' → ')}。`);
+      }
+      if (response.status === 401 || response.status === 403) {
+        if (chatPageAuthorization === pageAuth) chatPageAuthorization = null;
+        throw new ManualAutoChatAuthRejectedError(`自动发送消息被聊天接口拒绝（${authAttempts.join('，')}）。可在同一角色页用 Mufy 自带的发送按钮试一条，确认是网站发送也失败，还是只有一键扣数失败。`);
+      }
+      if (!response.ok) {
+        const raw = await response.text().catch(() => '');
+        const error = new Error('“' + config.name + '”发送失败（HTTP ' + response.status + (raw ? '：' + raw.slice(0, 240) : '') + '）');
+
+        throw error;
+      }
+      if (!response.body?.getReader) throw new Error('聊天接口没有返回可读取的 EventStream');
+
+      reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let doneReceived = false;
+      let attemptContentParts = 0;
+      let failureMessage = '';
+      let lastEventText = '';
+      const inspectLine = line => {
+        const trimmed = String(line || '').trim();
+        if (!trimmed || trimmed.startsWith(':') || /^(?:event|id|retry):/i.test(trimmed)) return;
+        const dataText = trimmed.replace(/^data:\s*/i, '');
+        if (dataText === '[DONE]') {
+          doneReceived = true;
+          return;
+        }
+        lastEventText = dataText.slice(0, 300);
+        try {
+          const event = JSON.parse(dataText);
+          const type = String(event?.type || event?.event || '').toLowerCase();
+          const status = String(event?.status || '').toLowerCase();
+          const finishReason = event?.finishReason ?? event?.finish_reason ?? event?.choices?.[0]?.finish_reason;
+          if (['done', 'complete', 'completed', 'finish', 'finished', 'success', 'end'].includes(type)
+              || ['done', 'complete', 'completed', 'success', 'finished'].includes(status)
+              || event?.done === true || event?.completed === true || (finishReason != null && finishReason !== '')) {
+            doneReceived = true;
+          }
+          const fragments = [
+            event?.content,
+            event?.delta?.content,
+            event?.data?.content,
+            event?.message?.content,
+            event?.choices?.[0]?.delta?.content,
+            event?.choices?.[0]?.message?.content
+          ].filter(value => typeof value === 'string' && value && value !== '[DONE]');
+          if (fragments.length) {
+            attemptContentParts += fragments.length;
+            contentParts += fragments.length;
+            lastContentAt = Date.now();
+          }
+          const explicitFailure = event?.error?.message || event?.error || event?.reason || event?.message;
+          if (['error', 'failed', 'failure'].includes(type) || event?.success === false) {
+            failureMessage = typeof explicitFailure === 'string' ? explicitFailure : JSON.stringify(explicitFailure || event);
+          }
+        } catch (_) {}
+      };
+
+      while (!doneReceived && !failureMessage) {
+        const chunk = await reader.read();
+        buffer += decoder.decode(chunk.value || new Uint8Array(), { stream: !chunk.done });
+        const lines = buffer.split(/\r?\n/);
+        buffer = lines.pop() || '';
+        lines.forEach(inspectLine);
+        if (chunk.done) break;
+      }
+      if (buffer) inspectLine(buffer);
+      if (failureMessage) {
+        const error = new Error('“' + config.name + '”返回失败：' + failureMessage.slice(0, 300));
+
+        throw error;
+      }
+      if (!doneReceived && attemptContentParts > 0) {
+        appendRunLog('warn', '一键扣数的 EventStream 未带完成标记，但已收到回复内容并正常结束；按完成处理。', {
+          model: config.name,
+          contentParts: attemptContentParts,
+          lastEvent: lastEventText
+        });
+      } else if (!doneReceived) {
+        const error = new Error('EventStream 已结束，既没有完成标记，也没有收到回复内容'
+          + (lastEventText ? '；最后事件：' + lastEventText : ''));
+
+        throw error;
+      }
+      appendRunLog('info', '一键扣数已使用固定模型“' + config.name + '”完成发送。');
+      return true;
+    } catch (error) {
+      if (controller.signal.aborted && !(error instanceof ManualAutoChatAuthRejectedError)) {
+        throw new Error('等待角色回复完成超过 7 分钟，请在对话里核对这一条');
+      }
+      throw error;
     } finally {
+      if (reader) reader.cancel().catch(() => {});
       clearTimeout(deadline);
       clearInterval(progressTimer);
     }
@@ -2861,6 +2842,10 @@ roleStateReady = true;
       if (persistedJob.startedAt !== job.startedAt || persistedJob.activeCharacterId !== job.activeCharacterId
           || (job.accountScope && job.accountScope !== maskAccountScope)) return;
       job = persistedJob;
+      if (error instanceof ManualAutoChatAuthRejectedError && job.phase === 'sending') {
+        job.phase = 'ready-to-send';
+        job.sentAt = 0;
+      }
       job.paused = true;
       job.pauseReason = String(error?.message || error || '未知错误');
       saveManualAutoChatJob(job);
@@ -2923,7 +2908,7 @@ roleStateReady = true;
     const message = saveManualAutoChatMessage(state.manualAutoChatMessage);
     const delayRange = saveManualAutoChatDelayRange(state.manualAutoChatDelayMin, state.manualAutoChatDelayMax);
     if (!message) return;
-    if (!pageWindow.confirm(`将依次给 ${state.manualFavoriteChats.length} 个普通收藏角色发送：\n\n${message}\n\n固定低价模型：MUMU-1.5 → 快速二哈3.0 → 快速二哈3.7（仅前一个明确不可用时换备用，不含直连）。\n每个角色会等待完整回复，再随机冷却 ${delayRange.min}～${delayRange.max} 秒后进入下一个。确定开始吗？`)) return;
+    if (!pageWindow.confirm(`将依次给 ${state.manualFavoriteChats.length} 个普通收藏角色发送：\n\n${message}\n\n固定模型：${MANUAL_AUTO_CHAT_MODEL.name}。\n每个角色会等待完整回复，再随机冷却 ${delayRange.min}～${delayRange.max} 秒后进入下一个。确定开始吗？`)) return;
     const first = state.manualFavoriteChats[0];
     const job = {
       active: true,
@@ -4596,6 +4581,9 @@ roleStateReady = true;
     const bindings = state.undoBindings;
     const label = state.undoLabel;
     const siteRestore = state.undoSite;
+    const scope = maskAccountScope;
+    const generation = maskStorageGeneration;
+    const accountChanged = () => scope !== maskAccountScope || generation !== maskStorageGeneration;
     state.loading = Boolean(siteRestore);
     state.status = siteRestore ? '正在撤回上一次网站面具变更……' : '正在撤回上一次面具库变更……';
     render();
@@ -4603,6 +4591,7 @@ roleStateReady = true;
       if (siteRestore) {
         if (siteRestore.mode === 'created') await deleteMask(siteRestore.maskId);
         else await updateMask(siteRestore.maskId, siteRestore.source);
+        if (accountChanged()) return;
       }
       state.library = library;
       if (bindings) {
@@ -4616,11 +4605,12 @@ roleStateReady = true;
       persistMaskLibrary();
       if (siteRestore) {
         const refreshed = await fetchCurrentSiteMasks();
+        if (accountChanged()) return;
         updateSiteMaskState(refreshed);
       }
       state.status = `已撤回${label ? `：${label}` : '上一次本地变更'}。`;
     } catch (error) {
-      state.status = `撤回失败：${explainFailure(error)}`;
+      if (!accountChanged()) state.status = `撤回失败：${explainFailure(error)}`;
     } finally {
       state.loading = false;
       render();
@@ -5534,6 +5524,12 @@ roleStateReady = true;
     }
     let checks = 0;
     const timer = setInterval(() => {
+      const current = currentRoleContext();
+      if (pageWindow.location.pathname !== '/chat' || current.characterId !== context.characterId
+          || current.sessionId !== context.sessionId) {
+        clearInterval(timer);
+        return;
+      }
       checks += 1;
       const failure = exactRoleFailureOnPage();
       const textarea = findChatTextarea();
@@ -6663,31 +6659,15 @@ roleStateReady = true;
     return visible.length === 1 ? visible[0].element : null;
   }
 
-  async function tryWebsiteFavoriteClick(characterId, isFavorite, row = {}) {
-    const control = findWebsiteFavoriteControl(characterId, row);
-    if (!control) {
-      await requestFavorite(characterId, isFavorite);
-      return true;
-    }
-    const before = nativeFavoriteState(control);
-    if (before === Boolean(isFavorite)) return true;
-    if (before === null) throw new Error(`无法确认“${row?.name || characterId}”当前是否已收藏，已跳过以避免反向切换`);
-    try {
-      control.click();
-    } catch (error) {
-      throw new Error(`点击“${row?.name || characterId}”的收藏按钮失败：${String(error?.message || error)}`);
-    }
-    for (let attempt = 0; attempt < 12; attempt += 1) {
-      await wait(250);
-      const latestControl = findWebsiteFavoriteControl(characterId, row) || control;
-      const current = nativeFavoriteState(latestControl);
-      if (current === Boolean(isFavorite)) return true;
-      if (current === before && attempt < 11) continue;
-    }
-    throw new Error(`“${row?.name || characterId}”的收藏按钮点击后没有变成目标状态，未写入本地成功记录`);
-  }
+  async function ensureFavoriteFromCharacterDetail(characterId, row = {}) {
+    const scope = maskAccountScope;
+    const assertAccount = () => {
+      if (scope !== maskAccountScope) throw new Error('确认收藏期间切换了 Mufy 账号');
+    };
+    const detail = await requestCharacterDetail(String(characterId));
+    assertAccount();
+    if (detail?.favoriteKnown === true && detail.isFavorite) return true;
 
-  async function clickWebsiteFavoriteFromKnownUnfavorite(characterId, row = {}) {
     let control = null;
     // 分享链接刚打开时页面组件可能还没有挂载，短暂等待原生收藏按钮出现。
     for (let attempt = 0; attempt < 20; attempt += 1) {
@@ -6695,38 +6675,21 @@ roleStateReady = true;
       if (control) break;
       await wait(250);
     }
-    if (!control) {
+    assertAccount();
+    if (!control || nativeFavoriteState(control) !== false) {
       await requestFavorite(characterId, true);
-      return true;
-    }
-
-    try {
+    } else {
       control.click();
-    } catch (error) {
-      throw new Error(`点击“${row?.name || characterId}”的收藏按钮失败：${String(error?.message || error)}`);
     }
 
-    // 进入队列前已经根据可靠列表状态或单角色详情确认未收藏；
-    // 这里直接交给网站原生点击流程，不再为每个角色重复请求详情。
-    await wait(750);
-    return true;
-  }
-
-  async function ensureFavoriteFromCharacterDetail(characterId, row = {}) {
-    // 作者作品列表的 isFollowed 目前不可靠；单角色详情才是服务器当前收藏状态。
-    // 分享链接打开后网站有时已经自动恢复收藏，此时无需再切换一次按钮。
-    const detail = await requestCharacterDetail(String(characterId));
-    if (detail?.favoriteKnown === true) {
-      if (detail.isFavorite) return true;
-      await clickWebsiteFavoriteFromKnownUnfavorite(characterId, row);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await wait(attempt === 0 ? 750 : 1000);
+      assertAccount();
       const confirmed = await requestCharacterDetail(String(characterId));
+      assertAccount();
       if (confirmed?.favoriteKnown === true && confirmed.isFavorite) return true;
-      throw new Error(`网站尚未确认“${row?.name || characterId}”已重新收藏`);
     }
-    // 接口没有返回收藏字段或临时失败时，才退回页面按钮的状态识别。
-    const nativeHandled = await tryWebsiteFavoriteClick(characterId, true, row);
-    if (!nativeHandled) throw new Error(`角色详情和当前页面都无法确认“${row?.name || characterId}”的收藏状态`);
-    return true;
+    throw new Error(`角色详情接口尚未确认“${row?.name || characterId}”已收藏`);
   }
   async function requestShareCode(characterId, confirmMissing = false) {
     scanStoredAuthorization();
@@ -8170,9 +8133,7 @@ roleStateReady = true;
         await wait(2500);
         if (applyFavoriteInterruption(job)) return;
         try {
-          // 趋势榜等可靠列表已直接给出收藏状态；作者页角色则在入队前逐个查过详情。
-          // 因此到达角色页后直接执行网站原生收藏，不再重复请求每个角色详情。
-          await clickWebsiteFavoriteFromKnownUnfavorite(activeRow.characterId, activeRow);
+          await ensureFavoriteFromCharacterDetail(activeRow.characterId, activeRow);
           if (applyFavoriteInterruption(job)) return;
           applyFavoriteState(activeRow.characterId, true);
           state.status = `已通过分享链接页面收藏“${activeRow.name}”（${job.index + 1}/${job.rows.length}）……`;
@@ -11885,7 +11846,7 @@ roleStateReady = true;
 <li><strong>收藏作者的全部角色：</strong><ol><li>进入「角色」→「作者合集」，找到作者，点右侧收藏按钮。</li><li>打开作者主页，进入助手「收藏」→「网页」，依次点「获取收藏状态」「全选未收藏」「立即收藏」。</li></ol></li>
 <li><strong>整理或删除收藏夹：</strong>进入「收藏」→「收藏夹」，可按作者整理角色，也可筛选空收藏夹或批量删除。删除收藏夹会保留角色收藏。</li>
 <li><strong>收藏：</strong>点角色卡片上的星星收藏或取消收藏。有分享链接时优先用分享链接收藏。</li>
-<li><strong>普通角色一键扣数：</strong>进入「收藏」→「普通待聊」，可修改发送内容，再点「一键扣数」。接口发送固定使用 MUMU-1.5，明确不可用时依次换快速二哈3.0、快速二哈3.7，不使用任何直连模型。任务可以停止、继续或取消。</li>
+<li><strong>普通角色一键扣数：</strong>进入「收藏」→「普通待聊」，可修改发送内容，再点「一键扣数」。接口发送固定使用 MUMU-1.5。发送结果不明确时会暂停，请先核对聊天记录。任务可以停止、继续或取消。</li>
 <li><strong>完整导出当前聊天：</strong>打开要导出的对话，再到助手「聊天记录」点「导出当前聊天」。下载的 ZIP 内含 HTML 和 TXT。再点一次可停止导出。</li>
 <li><strong>根据聊天内容找角色：</strong>进入「聊天记录」，输入关键词后点「搜索」。可选全部或指定角色。单角色至少输入 1 个字，全部角色至少 2 个字。点「打开并定位」回到原对话。</li>
 <li><strong>角色回复摘录：</strong>选中回复里的文字，点该条回复的「⋯」→「摘录」，再点「收藏到牌组」。直接点「摘录」可选中整条回复。进入助手「摘录」可查看、编辑或导出。
