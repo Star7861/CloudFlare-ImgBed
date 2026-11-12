@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.132
+// @version      3.0.0-dev.133
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,7 +21,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.132';
+    : '3.0.0-dev.133';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -6139,6 +6139,10 @@ roleStateReady = true;
 
   let maskEditorSource = null;
   let maskEditorOrigin = '';
+  let maskEditorAccountScope = '';
+  let maskEditorSaving = false;
+  let maskEditorSyncedOriginal = null;
+  let maskEditorSyncedContent = null;
 
   function closeMaskEditor() {
     const editor = panel?.querySelector('#mufy-recovery-mask-editor');
@@ -6146,6 +6150,9 @@ roleStateReady = true;
     editor.hidden = true;
     maskEditorSource = null;
     maskEditorOrigin = '';
+    maskEditorAccountScope = '';
+    maskEditorSyncedOriginal = null;
+    maskEditorSyncedContent = null;
   }
 
   function openMaskEditor(mask, origin) {
@@ -6154,6 +6161,9 @@ roleStateReady = true;
     if (!editor || !mask || (isLibrary ? !mask.libraryId : !mask.maskId)) return;
     maskEditorSource = cloneValue(mask);
     maskEditorOrigin = isLibrary ? 'library' : 'site';
+    maskEditorAccountScope = maskAccountScope;
+    maskEditorSyncedOriginal = null;
+    maskEditorSyncedContent = null;
     editor.querySelector('#mufy-recovery-mask-editor-title').textContent = `${isLibrary ? '编辑本地面具' : '编辑面具'} · ${mask.name || '未命名面具'}`;
     editor.querySelector('[name="remark"]').value = maskEditorText(mask.remark);
     editor.querySelector('[name="maskName"]').value = maskEditorText(mask.maskName);
@@ -6163,8 +6173,8 @@ roleStateReady = true;
     editor.querySelector('[name="command"]').value = maskEditorText(mask.command);
     editor.querySelector('#mufy-recovery-mask-editor-hint').textContent = isLibrary
       ? '正在编辑面具库中的本地面具。“保存修改”会更新当前这份面具并保留已有角色绑定；“另存为新面具”会新增一份，原面具和原绑定不变。'
-      : '编辑的是上方选中的网站面具，但保存只写入浏览器本地面具库。另存会新增一份；替换会删除面具库中的旧副本再写入当前内容，网站原面具不受影响。';
-    editor.querySelector('#mufy-recovery-mask-editor-replace').textContent = isLibrary ? '保存修改' : '替换本地原面具';
+      : '「同步替换」会更新选中的网站面具和它在面具库中的原副本，并保留原有绑定。「另存为新面具」只在面具库新增一份。';
+    editor.querySelector('#mufy-recovery-mask-editor-replace').textContent = isLibrary ? '保存修改' : '同步替换网站和本地';
     editor.hidden = false;
     editor.querySelector('[name="remark"]').focus();
   }
@@ -6177,7 +6187,70 @@ roleStateReady = true;
     openMaskEditor(mask, 'library');
   }
 
+  async function syncMaskEditorReplacement(editor, source, edited, replacedItem) {
+    const scope = maskAccountScope;
+    const generation = maskStorageGeneration;
+    const maskId = String(source.maskId);
+    const libraryId = String(replacedItem.libraryId);
+    const accountChanged = () => scope !== maskAccountScope || generation !== maskStorageGeneration;
+    const matches = (left, right) => JSON.stringify(maskUpdatePayload(maskId, left)) === JSON.stringify(maskUpdatePayload(maskId, right));
+    const currentIndex = () => state.library.findIndex(item => String(item.libraryId) === libraryId);
+    const buttons = [...editor.querySelectorAll('#mufy-recovery-mask-editor-close, #mufy-recovery-mask-editor-save-as, #mufy-recovery-mask-editor-replace')];
+    let websiteSaved = false;
+    maskEditorSaving = true;
+    buttons.forEach(button => { button.disabled = true; });
+    try {
+      editor.querySelector('#mufy-recovery-mask-editor-hint').textContent = '正在核对网站面具和本地副本……';
+      let siteMasks = await fetchCurrentSiteMasks();
+      if (accountChanged()) return;
+      let siteMask = siteMasks.find(item => String(item.maskId) === maskId);
+      if (!siteMask) throw new Error('网站上已找不到这份面具，请重新读取面具列表');
+      if (state.library[currentIndex()] !== replacedItem) throw new Error('本地副本已变更，请重新打开编辑器');
+      if (!matches(siteMask, edited)) {
+        if (!matches(siteMask, maskEditorSyncedContent || source)) throw new Error('网站面具已变更，请重新读取后再编辑');
+        const original = maskEditorSyncedOriginal || siteMask;
+        await updateMask(maskId, edited);
+        websiteSaved = true;
+        if (accountChanged()) return;
+        maskEditorSyncedOriginal = original;
+        maskEditorSyncedContent = edited;
+        saveUndo('同步替换网站和本地面具', { maskId, source: original });
+        siteMasks = await fetchCurrentSiteMasks();
+        if (accountChanged()) return;
+        siteMask = siteMasks.find(item => String(item.maskId) === maskId);
+        if (!siteMask || !matches(siteMask, edited)) throw new Error('网站回读的内容与本次修改不一致，请稍后重试');
+      }
+      websiteSaved = true;
+      const index = currentIndex();
+      if (state.library[index] !== replacedItem) throw new Error('本地副本已变更，请重新打开编辑器');
+      if (!maskEditorSyncedOriginal) saveUndo('替换本地面具');
+      state.library.splice(index, 1, maskSnapshot(siteMask, { libraryId, name: edited.name }));
+      const queued = persistMaskLibrary();
+      const saved = queued && (maskStorageMode !== 'indexedDB' || await maskStorageWriteQueue);
+      if (accountChanged()) return;
+      updateSiteMaskState(siteMasks);
+      if (!saved) throw new Error('本地副本未能保存，请检查浏览器存储后重试');
+      closeMaskEditor();
+      state.active = 'library';
+      state.section = 'masks';
+      state.status = `已同步更新“${edited.name}”的网站面具和本地副本。`;
+      render();
+    } catch (error) {
+      if (!accountChanged()) {
+        const message = `${websiteSaved ? '网站已接受修改，本地同步尚未完成' : '同步替换未完成'}：${explainFailure(error)}`;
+        editor.querySelector('#mufy-recovery-mask-editor-hint').textContent = message;
+        state.status = message;
+        render();
+      }
+    } finally {
+      maskEditorSaving = false;
+      buttons.forEach(button => { button.disabled = false; });
+      if (accountChanged()) closeMaskEditor();
+    }
+  }
+
   function saveMaskEditor(mode) {
+    if (maskEditorSaving) return;
     const editor = panel?.querySelector('#mufy-recovery-mask-editor');
     const source = maskEditorSource;
     const isLibrarySource = maskEditorOrigin === 'library';
@@ -6187,6 +6260,10 @@ roleStateReady = true;
         ? '原本地面具已经不存在，未保存编辑内容。'
         : '原网站面具已经不存在，未保存编辑内容。';
       render();
+      return;
+    }
+    if (maskEditorAccountScope !== maskAccountScope || !maskStorageReady) {
+      editor.querySelector('#mufy-recovery-mask-editor-hint').textContent = '账号或面具库状态已变化，请重新打开编辑器。';
       return;
     }
     const value = name => String(editor.querySelector(`[name="${name}"]`)?.value || '');
@@ -6209,17 +6286,18 @@ roleStateReady = true;
       const exactSourceIndex = state.library.findIndex(item =>
         String(item.sourceMaskId || '') === sourceMaskId && sameMaskContent(item, source));
       const sourceIndex = state.library.findIndex(item => String(item.sourceMaskId || '') === sourceMaskId);
-      const contentIndex = state.library.findIndex(item => sameMaskContent(item, source));
+      const contentIndex = state.library.findIndex(item => !item.sourceMaskId && sameMaskContent(item, source));
       replaceIndex = exactSourceIndex >= 0 ? exactSourceIndex : (sourceIndex >= 0 ? sourceIndex : contentIndex);
     }
     if (replacing && replaceIndex < 0) {
       state.status = isLibrarySource
         ? '面具库中已经找不到这份原面具，无法保存修改；可以选择“另存为新面具”。'
         : '面具库中没有找到这份面具的旧副本，无法替换；请先选择“另存为新面具”。';
-      panel.querySelector('#mufy-recovery-status').textContent = state.status;
+      editor.querySelector('#mufy-recovery-mask-editor-hint').textContent = state.status;
       return;
     }
     const replacedItem = replacing ? state.library[replaceIndex] : null;
+    if (replacing && !isLibrarySource) return syncMaskEditorReplacement(editor, source, edited, replacedItem);
     const snapshot = maskSnapshot(edited, {
       libraryId: replacing ? replacedItem.libraryId : makeLibraryId(),
       name: edited.name,
@@ -6231,7 +6309,7 @@ roleStateReady = true;
       render();
       return;
     }
-    saveUndo(replacing ? (isLibrarySource ? '保存本地面具修改' : '替换本地面具') : '另存编辑后的面具');
+    saveUndo(replacing ? '保存本地面具修改' : '另存编辑后的面具');
     if (replacing) {
       // 保留 libraryId，让原本绑定到这份本地面具的角色继续跟随编辑后的版本。
       state.library.splice(replaceIndex, 1, snapshot);
@@ -6243,9 +6321,7 @@ roleStateReady = true;
     state.active = 'library';
     state.section = 'masks';
     state.status = replacing
-      ? (isLibrarySource
-        ? `已保存“${snapshot.name}”的修改；原有角色绑定继续有效。`
-        : `已删除面具库中的旧副本，并存入编辑后的“${snapshot.name}”；网站原面具未修改。`)
+      ? `已保存“${snapshot.name}”的修改；原有角色绑定继续有效。`
       : (isLibrarySource
         ? `已将编辑后的“${snapshot.name}”另存为新面具；原面具和原有角色绑定未修改。`
         : `已将编辑后的“${snapshot.name}”另存到面具库；网站原面具未修改。`);
@@ -11887,9 +11963,9 @@ roleStateReady = true;
           <label class="mufy-recovery-mask-editor-field is-wide"><span class="mufy-recovery-mask-editor-label"><span>我的描述</span><button type="button" class="mufy-recovery-mask-field-copy" data-copy-mask-field="description" data-copy-mask-label="我的描述" title="复制我的描述" aria-label="复制我的描述">⧉</button></span><textarea name="description"></textarea></label>
           <label class="mufy-recovery-mask-editor-field is-wide"><span class="mufy-recovery-mask-editor-label"><span>我的喜好</span><button type="button" class="mufy-recovery-mask-field-copy" data-copy-mask-field="favorite" data-copy-mask-label="我的喜好" title="复制我的喜好" aria-label="复制我的喜好">⧉</button></span><textarea name="favorite"></textarea></label>
           <label class="mufy-recovery-mask-editor-field is-wide"><span class="mufy-recovery-mask-editor-label"><span>指令</span><button type="button" class="mufy-recovery-mask-field-copy" data-copy-mask-field="command" data-copy-mask-label="指令" title="复制指令" aria-label="复制指令">⧉</button></span><textarea name="command"></textarea></label>
-          <div id="mufy-recovery-mask-editor-hint">编辑的是上方选中的网站面具，但保存只写入浏览器本地面具库。另存会新增一份；替换会删除面具库中的旧副本再写入当前内容，网站原面具不受影响。</div>
+          <div id="mufy-recovery-mask-editor-hint"></div>
         </div>
-        <div id="mufy-recovery-mask-editor-actions"><button id="mufy-recovery-mask-editor-save-as">另存为新面具</button><button id="mufy-recovery-mask-editor-replace">替换本地原面具</button></div>
+        <div id="mufy-recovery-mask-editor-actions"><button id="mufy-recovery-mask-editor-save-as">另存为新面具</button><button id="mufy-recovery-mask-editor-replace">同步替换网站和本地</button></div>
       </div>
       <div id="mufy-recovery-favorite-interrupt-modal" hidden>
         <div id="mufy-recovery-favorite-interrupt-head"><strong>中断收藏任务</strong><button id="mufy-recovery-favorite-interrupt-close" title="继续当前任务">×</button></div>
