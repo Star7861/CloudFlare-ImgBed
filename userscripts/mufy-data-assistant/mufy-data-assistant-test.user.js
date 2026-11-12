@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.130
+// @version      3.0.0-dev.131
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,7 +21,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.130';
+    : '3.0.0-dev.131';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -2226,10 +2226,14 @@ roleStateReady = true;
     return !rect || rect.width > 0 && rect.height > 0;
   }
 
-  function findManualChatComposer() {
+  function findChatTextarea() {
     const textareas = [...document.querySelectorAll('textarea[placeholder*="发送消息"], textarea[placeholder*="Enter"]')]
       .filter(textarea => !textarea.closest('#mufy-recovery-panel') && isVisibleElement(textarea));
-    const textarea = textareas.find(item => String(item.placeholder || '').includes('发送消息')) || textareas[0] || null;
+    return textareas.find(item => String(item.placeholder || '').includes('发送消息')) || textareas[0] || null;
+  }
+
+  function findManualChatComposer() {
+    const textarea = findChatTextarea();
     if (!textarea) return { textarea: null, button: null };
     let container = textarea.parentElement;
     let buttons = [];
@@ -5533,7 +5537,7 @@ roleStateReady = true;
       checks += 1;
       const failure = exactRoleFailureOnPage();
       const textarea = findChatTextarea();
-      const ready = Boolean(textarea && !textarea.disabled && isVisibleElement(textarea));
+      const ready = Boolean(textarea && !textarea.disabled);
       if (pending) {
         if (ready && checks >= 3) {
           clearInterval(timer);
