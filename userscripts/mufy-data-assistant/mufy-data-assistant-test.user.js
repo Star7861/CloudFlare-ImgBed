@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.136
+// @version      3.0.0-dev.137
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,7 +21,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.136';
+    : '3.0.0-dev.137';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -7445,9 +7445,10 @@ roleStateReady = true;
   }
 
   function findNativeFavoriteFolderControl(target) {
+    const eligible = element => !element.closest('#mufy-recovery-panel')
+      && !element.matches(':disabled, [aria-disabled="true"]') && isVisibleElement(element);
     const controls = [...document.querySelectorAll('button, a[href], [role="button"], [data-folder-id], [data-favorite-id]')]
-      .filter(element => !element.closest('#mufy-recovery-panel') && !element.matches(':disabled, [aria-disabled="true"]')
-        && isVisibleElement(element));
+      .filter(eligible);
     const ids = controls.filter(element => element.getAttribute('data-folder-id') === target.id
       || element.getAttribute('data-favorite-id') === target.id);
     const byId = ids.filter(element => !ids.some(other => other !== element && other.contains(element)));
@@ -7458,7 +7459,26 @@ roleStateReady = true;
     const byName = controls.filter(element => [element.textContent, element.getAttribute('title'), element.getAttribute('aria-label')]
       .some(value => tidy(value) === name));
     const unique = byName.filter(element => !byName.some(other => other !== element && element.contains(other)));
-    return unique.length === 1 ? unique[0] : null;
+    if (unique.length) return unique.length === 1 ? unique[0] : null;
+
+    // 卡片可以用 div 绑定点击，标题也可能与角色数量分开显示。
+    const root = document.querySelector('main') || document.body;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const cards = new Set();
+    while (walker.nextNode()) {
+      const label = walker.currentNode.parentElement;
+      if (!label || tidy(walker.currentNode.nodeValue) !== name || !eligible(label)) continue;
+      for (let element = label, depth = 0; element && element !== root && depth < 5; element = element.parentElement, depth += 1) {
+        if (!eligible(element)) break;
+        const pointerRoot = pageWindow.getComputedStyle(element).cursor === 'pointer'
+          && (!element.parentElement || pageWindow.getComputedStyle(element.parentElement).cursor !== 'pointer');
+        if (element.matches('button, [role="button"], a[href], [onclick], [tabindex="0"], .cursor-pointer') || pointerRoot) {
+          cards.add(element);
+          break;
+        }
+      }
+    }
+    return cards.size === 1 ? cards.values().next().value : null;
   }
 
   async function resumeFavoriteFolderJump() {
@@ -7475,6 +7495,7 @@ roleStateReady = true;
       const control = maskAccountScope === target.scope ? findNativeFavoriteFolderControl(target) : null;
       if (control) {
         if (panel) panel.style.display = 'none';
+        control.scrollIntoView?.({ block: 'nearest' });
         control.click();
         return;
       }
@@ -7527,12 +7548,15 @@ roleStateReady = true;
     const form = panel?.querySelector('#mufy-recovery-folder-search');
     if (!form) return;
     const query = form.querySelector('input').value.trim().toLowerCase();
-    const output = form.querySelector('#mufy-recovery-folder-search-results');
+    const output = panel.querySelector('#mufy-recovery-folder-search-results');
+    const roles = panel.querySelector('#mufy-recovery-list');
     const searching = Boolean(state.favoriteFolderSearchRequest);
     form.querySelector('button').disabled = !query || searching;
-    output.hidden = !query || (!searching && !state.favoriteFolderSearchRows && !error);
+    const showResults = Boolean(query && (searching || state.favoriteFolderSearchRows || error));
+    output.hidden = state.section !== 'favorites' || !showResults;
+    if (state.section === 'favorites') roles.hidden = showResults;
     if (output.hidden) {
-      output.replaceChildren();
+      if (!showResults) output.replaceChildren();
       return;
     }
     if (searching || error) {
@@ -11291,6 +11315,14 @@ roleStateReady = true;
     if (maskSection) maskSection.hidden = state.section !== 'masks';
     const resultList = panel.querySelector('#mufy-recovery-list');
     if (resultList) resultList.hidden = ['home', 'accounts', 'materials'].includes(state.section);
+    const folderResults = panel.querySelector('#mufy-recovery-folder-search-results');
+    if (state.section === 'favorites') {
+      const folderQuery = panel.querySelector('#mufy-recovery-folder-search-query').value.trim();
+      folderResults.hidden = !folderQuery || !folderResults.hasChildNodes();
+      resultList.hidden = !folderResults.hidden;
+    } else {
+      folderResults.hidden = true;
+    }
     if (state.section === 'materials') renderMaterialSection();
     if (state.section === 'accounts') renderAccountSection();
     const roleFilterRow = panel.querySelector('#mufy-recovery-role-filter-row');
@@ -11621,7 +11653,8 @@ roleStateReady = true;
       #mufy-recovery-favorite-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;align-items:stretch}
       #mufy-recovery-folder-search{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px}
       #mufy-recovery-folder-search-query{box-sizing:border-box;min-width:0;width:100%;padding:7px 9px;font:inherit}
-      #mufy-recovery-folder-search-results{grid-column:1/-1;max-height:min(280px,32vh);overflow:auto;padding:0 4px}
+      #mufy-recovery-folder-search-results{flex:1 1 auto;min-height:0;overflow:auto;padding:0 10px 16px;border-top:1px solid var(--mufy-panel-border,#444)}
+      #mufy-recovery-folder-search-results[hidden]{display:none}
       .mufy-recovery-folder-search-item{position:relative;overflow-wrap:anywhere}
       #mufy-recovery-panel .mufy-recovery-folder-search-item summary,
       #mufy-recovery-panel .mufy-recovery-folder-search-item .mufy-recovery-folder-open{background:var(--mufy-panel-surface,#2b2b32)!important;color:var(--mufy-panel-text,#ddd)!important;border:1px solid var(--mufy-panel-border,#555);border-radius:12px}
@@ -12198,7 +12231,7 @@ roleStateReady = true;
             <button id="mufy-recovery-site-manage" hidden aria-pressed="false">管理</button>
           </div>
           <div id="mufy-recovery-favorite-actions"><button id="mufy-recovery-folder-organize">按作者整理</button><button id="mufy-recovery-folder-manage">新建 / 删除收藏夹</button><button id="mufy-recovery-stop-action" hidden>停止找回</button></div>
-          <form id="mufy-recovery-folder-search"><input id="mufy-recovery-folder-search-query" type="search" placeholder="搜索收藏夹名称或 ID" aria-label="搜索收藏夹名称或 ID"><button type="submit" disabled>搜索</button><div id="mufy-recovery-folder-search-results" role="status" hidden></div></form>
+          <form id="mufy-recovery-folder-search"><input id="mufy-recovery-folder-search-query" type="search" placeholder="搜索收藏夹名称或 ID" aria-label="搜索收藏夹名称或 ID"><button type="submit" disabled>搜索</button></form>
           <label id="mufy-recovery-auto-folder-label"><input id="mufy-recovery-auto-add-favorite-folder" type="checkbox"><span>收藏后自动放入收藏夹<small>关闭后仍会正常收藏角色，只是不再自动按作者归入收藏夹；手动整理功能不受影响。</small></span></label>
           <div id="mufy-recovery-site-actions"><button id="mufy-recovery-refresh-favorite-states">获取收藏状态</button><button id="mufy-recovery-select-unfavorite-site">全选未收藏</button><button id="mufy-recovery-queue-site-for-chat">加入普通待聊</button><button id="mufy-recovery-clear-site-selection">清空勾选</button><button id="mufy-recovery-refresh-site-rows" title="刷新当前网站页面并重新捕获，之后翻页会继续自动获取">重新获取</button><button id="mufy-recovery-clear-site-rows">清空结果</button></div>
           <div id="mufy-recovery-manual-auto-actions" hidden><input id="mufy-recovery-manual-auto-message" type="text" maxlength="500" value="${esc(state.manualAutoChatMessage)}" aria-label="一键扣数发送内容"><label class="mufy-recovery-auto-delay">间隔 <input id="mufy-recovery-manual-auto-delay-min" type="number" min="0" max="300" step="1" value="${esc(state.manualAutoChatDelayMin)}" aria-label="随机冷却最短秒数">～<input id="mufy-recovery-manual-auto-delay-max" type="number" min="0" max="300" step="1" value="${esc(state.manualAutoChatDelayMax)}" aria-label="随机冷却最长秒数"> 秒</label><button id="mufy-recovery-manual-auto-start">一键扣数</button><button id="mufy-recovery-manual-auto-cancel" hidden>取消任务</button><button id="mufy-recovery-manual-chat-next" title="按普通待聊列表顺序打开角色；再次点击视为当前角色已处理并前往下一个">下一个</button></div>
@@ -12243,7 +12276,7 @@ roleStateReady = true;
           <div id="mufy-recovery-mask-actions"><button id="mufy-recovery-import-masks">导入面具</button><button id="mufy-recovery-export-masks">导出面具</button><button id="mufy-recovery-undo" class="mufy-recovery-tab-action" title="撤回上一次可恢复的面具操作" disabled>撤回</button><button id="mufy-recovery-mask-manage" aria-pressed="false">管理</button><input id="mufy-recovery-mask-file" type="file" accept=".json,application/json" hidden></div>
           <div id="mufy-recovery-mask-selection-bar" hidden><span id="mufy-recovery-mask-selection-count">已选 0 个</span><button id="mufy-recovery-mask-select-all">全选当前</button><button id="mufy-recovery-mask-clear-selection">清空选择</button><button id="mufy-recovery-mask-delete-selected">删除已选 (0)</button></div>
         </div>
-      </div><div id="mufy-recovery-list"></div>
+      </div><div id="mufy-recovery-list"></div><div id="mufy-recovery-folder-search-results" aria-label="收藏夹搜索结果" hidden></div>
       <div id="mufy-recovery-site-selection-bar" hidden><span id="mufy-recovery-site-selection-count">已选 0 项</span><button id="mufy-recovery-favorite-selected-site">立即收藏 (0)</button></div>
       <div id="mufy-recovery-resize-handle-bottom" title="上下拖动调整面板高度" aria-label="上下拖动调整面板高度"></div>`;
     panel.style.display = 'none';
