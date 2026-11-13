@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.137
+// @version      3.0.0-dev.138
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,7 +21,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.137';
+    : '3.0.0-dev.138';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -7481,6 +7481,17 @@ roleStateReady = true;
     return cards.size === 1 ? cards.values().next().value : null;
   }
 
+  function findNativeFavoriteFoldersTab() {
+    const candidates = [...document.querySelectorAll('[role="tab"], button, a, [role="button"], [tabindex="0"], .cursor-pointer')]
+      .filter(element => !element.closest('#mufy-recovery-panel')
+        && !element.matches(':disabled, [aria-disabled="true"]')
+        && element.textContent.trim() === '收藏夹' && isVisibleElement(element));
+    const tabs = candidates.filter(element => element.matches('[role="tab"]'));
+    const controls = tabs.length ? tabs : candidates.filter(element =>
+      !candidates.some(other => other !== element && other.contains(element)));
+    return controls.length === 1 ? controls[0] : null;
+  }
+
   async function resumeFavoriteFolderJump() {
     if (location.pathname.replace(/\/$/, '') !== '/favorites') return;
     let target;
@@ -7489,6 +7500,7 @@ roleStateReady = true;
       if (!target) return;
       sessionStorage.removeItem(FAVORITE_FOLDER_JUMP_KEY);
     } catch (_) { return; }
+    let switchedTab = false;
     while (Date.now() < target.expiresAt && location.pathname.replace(/\/$/, '') === '/favorites') {
       scanStoredAuthorization();
       if (maskAccountScope && maskAccountScope !== target.scope) break;
@@ -7498,6 +7510,16 @@ roleStateReady = true;
         control.scrollIntoView?.({ block: 'nearest' });
         control.click();
         return;
+      }
+      if (!switchedTab && maskAccountScope === target.scope) {
+        const tab = findNativeFavoriteFoldersTab();
+        if (tab) {
+          switchedTab = true;
+          if (tab.getAttribute('aria-selected') !== 'true') {
+            if (panel) panel.style.display = 'none';
+            tab.click();
+          }
+        }
       }
       await wait(300);
     }
