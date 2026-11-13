@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.133
+// @version      3.0.0-dev.134
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,7 +21,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.133';
+    : '3.0.0-dev.134';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -1999,6 +1999,7 @@
     maskDeleteRunning: false,
     favoriteFolderSearchRows: null,
     favoriteFolderSearchRequest: null,
+    favoriteFolderSearchDetails: new Map(),
     loading: false,
     roleLoading: false,
     rolePauseRequested: false,
@@ -7381,9 +7382,71 @@ roleStateReady = true;
   function resetInlineFavoriteFolderSearch(clearInput = false) {
     state.favoriteFolderSearchRows = null;
     state.favoriteFolderSearchRequest = null;
+    state.favoriteFolderSearchDetails.clear();
     const input = panel?.querySelector('#mufy-recovery-folder-search-query');
     if (input && clearInput) input.value = '';
     renderInlineFavoriteFolderSearch();
+  }
+
+  function renderFavoriteFolderRoles(container, detail) {
+    if (!detail || detail.loading || detail.error || !detail.rows.length) {
+      container.textContent = detail?.error || (detail?.loading ? '正在读取角色……' : detail ? '收藏夹里没有角色' : '');
+      return;
+    }
+    container.innerHTML = detail.rows.map(row =>
+      `<a href="${esc(roleUrl(row.characterId))}">${esc(row.name)}</a>`).join('');
+  }
+
+  function nativeFavoriteFolderUrl(folder, siteLinks) {
+    const id = favoriteFolderId(folder);
+    for (const value of [folder?.url, folder?.href, folder?.link, folder?.folderUrl, ...siteLinks]) {
+      if (typeof value !== 'string' || !value) continue;
+      try {
+        const url = new URL(value, location.origin);
+        if (url.origin !== location.origin || !/^\/favorites(?:\/|$)/.test(url.pathname)) continue;
+        if (url.pathname === '/favorites/' + encodeURIComponent(id)
+            || ['folderId', 'favoriteId', 'id'].some(key => url.searchParams.get(key) === id)) return url.href;
+      } catch (_) {}
+    }
+    return '';
+  }
+
+  async function expandFavoriteFolder(details) {
+    const id = details.dataset.favoriteFolderPreview;
+    if (!details.open || !id) return;
+    const cache = state.favoriteFolderSearchDetails;
+    const existing = cache.get(id);
+    if (existing && !existing.error) return;
+    const scope = maskAccountScope;
+    const entry = { loading: true, rows: [] };
+    cache.set(id, entry);
+    const update = () => {
+      if (scope !== maskAccountScope || cache.get(id) !== entry) return;
+      const output = panel?.querySelector('#mufy-recovery-folder-search-results');
+      for (const row of output?.querySelectorAll('details[data-favorite-folder-preview]') || []) {
+        if (row.dataset.favoriteFolderPreview === id) renderFavoriteFolderRoles(row.querySelector('.mufy-recovery-folder-roles'), entry);
+      }
+    };
+    update();
+    try {
+      const body = await requestFavoriteFolder(id);
+      const list = favoriteFolderCharacterLists(body)[0];
+      if (!list) throw new Error('网站未返回角色列表');
+      const unique = new Map();
+      for (const item of list) {
+        const characterId = item?.characterId || item?.characterID || item?.roleId
+          || item?.character?.characterId || item?.character?.id || item?.id;
+        if (!characterId) continue;
+        const row = normalize({ ...item, characterId });
+        unique.set(row.characterId, row);
+      }
+      entry.rows = [...unique.values()];
+    } catch (error) {
+      entry.error = `读取收藏夹失败：${explainFailure(error)}。收起后再展开可重试。`;
+    } finally {
+      entry.loading = false;
+      update();
+    }
   }
 
   function renderInlineFavoriteFolderSearch(error = '') {
@@ -7404,10 +7467,21 @@ roleStateReady = true;
     }
     const rows = state.favoriteFolderSearchRows.filter(folder => favoriteFolderName(folder).toLowerCase().includes(query)
       || favoriteFolderId(folder).toLowerCase().includes(query));
+    const openIds = new Set([...output.querySelectorAll('details[open]')].map(row => row.dataset.favoriteFolderPreview));
+    const siteLinks = [...document.querySelectorAll('a[href*="/favorites"]')]
+      .filter(link => !link.closest('#mufy-recovery-panel')).map(link => link.href);
     output.innerHTML = rows.length ? rows.map(folder => {
       const count = favoriteFolderCount(folder);
-      return `<div class="mufy-recovery-folder-search-item"><strong>${esc(favoriteFolderName(folder))}</strong><small>ID：${esc(favoriteFolderId(folder))}${count == null ? '' : ` · ${count} 个角色`}</small></div>`;
+      const id = favoriteFolderId(folder);
+      const nativeUrl = nativeFavoriteFolderUrl(folder, siteLinks);
+      const jump = nativeUrl
+        ? `<a href="${esc(nativeUrl)}">前往收藏夹</a>`
+        : `<a href="${esc(new URL('/favorites', location.origin).href)}" title="进入网站收藏页后选择此收藏夹">网站收藏页</a>`;
+      return `<div class="mufy-recovery-folder-search-item"><details data-favorite-folder-preview="${esc(id)}" ${openIds.has(id) ? 'open' : ''}><summary>${esc(favoriteFolderName(folder))}${count == null ? '' : `（${count}）`}</summary><div class="mufy-recovery-folder-roles"></div></details>${jump}</div>`;
     }).join('') : '没有匹配的收藏夹';
+    for (const row of output.querySelectorAll('details[open]')) {
+      renderFavoriteFolderRoles(row.querySelector('.mufy-recovery-folder-roles'), state.favoriteFolderSearchDetails.get(row.dataset.favoriteFolderPreview));
+    }
   }
 
   async function searchFavoriteFoldersInline() {
@@ -11468,7 +11542,9 @@ roleStateReady = true;
       #mufy-recovery-folder-search{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px}
       #mufy-recovery-folder-search-query{box-sizing:border-box;min-width:0;width:100%;padding:7px 9px;font:inherit}
       #mufy-recovery-folder-search-results{grid-column:1/-1;max-height:132px;overflow:auto;padding:5px 8px;border:1px solid var(--mufy-panel-border,#555);border-radius:6px;font-size:12px}
-      .mufy-recovery-folder-search-item{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 8px;padding:4px 0;overflow-wrap:anywhere}
+      .mufy-recovery-folder-search-item{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:start;gap:4px 8px;padding:5px 0;overflow-wrap:anywhere}
+      .mufy-recovery-folder-search-item summary{cursor:pointer;font-weight:600}
+      .mufy-recovery-folder-roles{display:grid;gap:5px;margin:5px 0 0 12px}
       #mufy-recovery-auto-folder-label{display:flex;align-items:flex-start;gap:8px;margin-top:7px;padding:9px 10px;border:1px solid #4d4962;border-radius:8px;background:#292733;color:#ddd;cursor:pointer;user-select:none}
       #mufy-recovery-auto-folder-label input{flex:none;margin-top:2px;accent-color:#786bd4}
       #mufy-recovery-auto-folder-label span{display:grid;gap:2px;line-height:1.35}
@@ -12408,6 +12484,9 @@ roleStateReady = true;
     };
     const folderDeleteModal = panel.querySelector('#mufy-recovery-folder-delete-modal');
     panel.querySelector('#mufy-recovery-folder-search-query').oninput = () => renderInlineFavoriteFolderSearch();
+    panel.querySelector('#mufy-recovery-folder-search-results').addEventListener('toggle', event => {
+      if (event.target.matches('details[data-favorite-folder-preview]')) expandFavoriteFolder(event.target);
+    }, true);
     panel.querySelector('#mufy-recovery-folder-search').onsubmit = event => {
       event.preventDefault();
       searchFavoriteFoldersInline();
