@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手
 // @namespace    local.mufy.session-recovery
-// @version      3.0.3
+// @version      3.0.4
 // @description  管理 Mufy 角色、收藏、聊天记录、摘录和面具。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,12 +21,15 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.3';
+    : '3.0.4';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const STABLE_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-stable-update-check-v2';
   const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
   const MASK_LIBRARY_KEY = 'mufy-recovery-mask-library-v1';
+  const MASK_DELETED_BATCHES_KEY = 'mufy-recovery-mask-deleted-batches-v1';
+  const MASK_DELETE_UNDO_MS = 24 * 60 * 60 * 1000;
+  let maskDeletedCleanupTimer = 0;
   const MASK_LIBRARY_BACKUP_KEY = 'mufy-recovery-mask-library-backup-v1';
   const MASK_BINDINGS_KEY = 'mufy-recovery-mask-bindings-v1';
   const MASK_ACCOUNT_MIGRATION_OWNER_KEY = 'mufy-recovery-mask-account-migration-owner-v1';
@@ -37,7 +40,6 @@
   const ROLE_HISTORY_RECORD_PREFIX = 'role-history:';
   const ROLE_CACHE_RECORD_PREFIX = 'role-cache:';
   const AUTO_SWITCH_KEY = 'mufy-recovery-auto-switch-v1';
-  const AUTO_SWITCH_RELOAD_KEY = 'mufy-recovery-auto-switch-reload-v1';
   const TOGGLE_POSITION_KEY = 'mufy-recovery-toggle-position-v1';
   const TOGGLE_HINT_KEY = 'mufy-recovery-toggle-hint-v1';
   const PANEL_HEIGHT_KEY = 'mufy-recovery-panel-height-v1';
@@ -45,11 +47,13 @@
   const ROLE_CACHE_ACCOUNT_MIGRATION_OWNER_KEY = 'mufy-role-links-only-role-cache-migration-owner-v1';
   const AUTHOR_CACHE_KEY = 'mufy-role-links-only-author-cache-v1';
   const SHARE_CODE_CACHE_KEY = 'mufy-role-links-only-share-code-cache-v1';
+  const SHARE_CODE_NAMES_KEY = 'mufy-share-code-names-v1';
   const SHARE_CODE_ACCOUNT_MIGRATION_OWNER_KEY = 'mufy-role-links-only-share-code-migration-owner-v1';
   const SHARE_FAVORITE_JOB_KEY = 'mufy-role-links-only-share-favorite-job-v1';
   const SHARE_FAVORITE_RESULT_KEY = 'mufy-role-links-only-share-favorite-result-v1';
   const SHARE_FAVORITE_JOB_RECORD_KEY = 'share-favorite-job:active';
   const FAVORITE_SHARE_RECOVERY_JOB_KEY = 'mufy-role-links-only-favorite-share-recovery-test-v1';
+  const FAVORITE_SHARE_RECOVERY_FAILURES_KEY = 'mufy-favorite-share-recovery-failures-v1';
   const MANUAL_FAVORITE_CHAT_KEY = 'mufy-role-links-only-manual-favorite-chat-v1';
   const MANUAL_FAVORITE_CHAT_CURRENT_KEY = 'mufy-role-links-only-manual-favorite-chat-current-v1';
   const MANUAL_FAVORITE_NEXT_DISMISSED_KEY = 'mufy-role-links-only-manual-favorite-next-dismissed-v1';
@@ -78,6 +82,8 @@
   const SESSIONLESS_ROLE_IDS_KEY = 'mufy-role-links-only-sessionless-role-ids-v1';
   const ROLE_FALLBACK_PENDING_KEY = 'mufy-role-links-only-role-fallback-pending-v1';
   const DEFAULT_MANUAL_AUTO_CHAT_MESSAGE = '≽^⚈⩊⚈^≼';
+  // 一键扣数使用固定的低价非直连模型，不请求模型目录，也不跟随角色页当前选择。
+  const MANUAL_AUTO_CHAT_MODEL = { name: 'MUMU-1.5', modelId: 25, modelTemplateId: 67 };
   const AUTHOR_FOLDER_MIGRATION_KEY = 'mufy-recovery-author-folder-migration-v1';
   const AUTHOR_FOLDER_MAP_KEY = 'mufy-recovery-author-folder-map-v1';
   const AUTO_ADD_FAVORITE_FOLDER_KEY = 'mufy-recovery-auto-add-favorite-folder-v1';
@@ -118,17 +124,25 @@
   const AUTH_HOOK_MARK = '__mufyRecoveryAuthHookedV3Test';
   let authCaptureLogged = false;
   const observedChatApiSignatures = new Set();
+  const scriptFetchOptions = new WeakMap();
+  let chatPageAuthorization = null;
+  let chatPageAuthRequestId = 0;
 
-  function chatApiObservationTarget(requestUrl) {
+  function mufyApiUrl(requestUrl) {
     try {
       const url = new URL(String(requestUrl || ''), location.href);
       const hostname = String(url.hostname || '').toLowerCase();
       const isMufyHost = hostname === 'mufy.ai' || hostname.endsWith('.mufy.ai')
         || hostname === 'mufyai.com' || hostname.endsWith('.mufyai.com');
       if (!isMufyHost || !/(?:^|\/)api(?:\/|$)/i.test(url.pathname)) return null;
-      if (!/(conversation|message|chat|sessions?\/(?:history|detail|messages?))/i.test(url.pathname)) return null;
       return url;
     } catch (_) { return null; }
+  }
+
+  function chatApiObservationTarget(requestUrl) {
+    const url = mufyApiUrl(requestUrl);
+    if (!url || !/(conversation|message|chat|sessions?\/(?:history|detail|messages?))/i.test(url.pathname)) return null;
+    return url;
   }
 
   function chatRequestFieldSummary(url, body) {
@@ -220,6 +234,17 @@
     } catch (_) {
       return null;
     }
+  }
+
+  function loadScopedFlag(key, fallback = false) {
+    try {
+      const value = loadAndMigrateScopedValue(key);
+      return value == null ? fallback : value === '1';
+    } catch (_) { return fallback; }
+  }
+
+  function saveScopedFlag(key, enabled) {
+    try { localStorage.setItem(accountStorageKey(key), enabled ? '1' : '0'); } catch (_) {}
   }
 
   function maskAccountLabel() {
@@ -445,15 +470,14 @@
     try {
       const loginUrl = new URL('/api/users/login', pageWindow.location.origin);
       appendRunLog('info', '正在发送 POST /api/users/login。');
-      const response = await pageWindow.fetch(loginUrl.href, {
+      const response = await fetchFromScript(loginUrl.href, {
         method: 'POST',
         headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
         credentials: 'include',
         cache: 'no-store',
         body: JSON.stringify({ email: String(pending.email), password: String(password) })
       });
-      let body = null;
-      try { body = await response.json(); } catch (_) {}
+      const body = await readJsonResponse(response);
       const success = response.ok && (Number(body?.code) === 200 || String(body?.reason || '').toLowerCase() === 'success');
       if (!success) throw new Error(`官方 login 失败（HTTP ${response.status}${body?.reason ? `：${body.reason}` : body?.message ? `：${body.message}` : ''}）`);
       const data = body?.data?.data || body?.data || body || {};
@@ -631,14 +655,13 @@
       scanStoredAuthorization();
       const headers = { Accept: 'application/json' };
       if (authorization) headers.Authorization = authorization;
-      const response = await pageWindow.fetch('/api/users/logout', {
+      const response = await fetchFromScript('/api/users/logout', {
         method: 'POST',
         headers,
         credentials: 'include',
         cache: 'no-store'
       });
-      let body = null;
-      try { body = await response.json(); } catch (_) {}
+      const body = await readJsonResponse(response);
       const success = response.ok && (Number(body?.code) === 200 || String(body?.reason || '').toLowerCase() === 'success');
       if (!success) throw new Error(`官方 logout 失败（HTTP ${response.status}${body?.reason ? `：${body.reason}` : ''}）`);
       appendRunLog('info', '已通过 POST /api/users/logout 正式退出当前账号。');
@@ -727,7 +750,7 @@
     try {
       const requestedAt = Date.now();
       const installUrl = `${STABLE_UPDATE_URL}?check=${requestedAt}`;
-      const response = await pageWindow.fetch(installUrl, { cache: 'no-store', credentials: 'omit' });
+      const response = await fetchFromScript(installUrl, { cache: 'no-store', credentials: 'omit' });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const header = (await response.text()).slice(0, 3000);
       const latestVersion = String(header.match(/^\/\/\s*@version\s+([^\s]+)\s*$/mi)?.[1] || '');
@@ -850,11 +873,8 @@
 
   function captureAuthorization(headers, requestUrl) {
     try {
-      const url = new URL(String(requestUrl || ''), location.href);
-      const hostname = String(url.hostname || '').toLowerCase();
-      const isMufyHost = hostname === 'mufy.ai' || hostname.endsWith('.mufy.ai')
-        || hostname === 'mufyai.com' || hostname.endsWith('.mufyai.com');
-      if (!isMufyHost || !/(?:^|\/)api(?:\/|$)/i.test(url.pathname)) return;
+      const url = mufyApiUrl(requestUrl);
+      if (!url) return;
       const candidate = new pageWindow.Headers(headers || {}).get('authorization') || '';
       if (/^Bearer\s+\S+/i.test(candidate)) {
         authorization = candidate;
@@ -869,8 +889,31 @@
     } catch (_) {}
   }
 
-  function scanStoredAuthorization() {
-    if (authorization) return authorization;
+  function normalizeAuthorizationCandidate(value) {
+    const text = String(value || '').trim().replace(/^"|"$/g, '');
+    if (/^Bearer\s+\S+$/i.test(text)) return `Bearer ${text.replace(/^Bearer\s+/i, '')}`;
+    return /^[\w-]+\.[\w-]+\.[\w-]+$/.test(text) ? `Bearer ${text}` : '';
+  }
+
+  function authorizationTokenTimes(candidate) {
+    const payload = decodeJwtPayload(candidate);
+    const seconds = value => Number.isFinite(Number(value)) ? Number(value) : 0;
+    return {
+      expiresAt: seconds(payload?.exp),
+      issuedAt: seconds(payload?.iat),
+      notBefore: seconds(payload?.nbf)
+    };
+  }
+
+  function authorizationIsUsable(candidate) {
+    if (!candidate) return false;
+    const { expiresAt, notBefore } = authorizationTokenTimes(candidate);
+    const now = Date.now() / 1000;
+    return (!expiresAt || expiresAt > now) && (!notBefore || notBefore <= now);
+  }
+
+  function storedAuthorizationCandidates(scope) {
+    const found = new Set();
     const storages = [];
     try { if (pageWindow.localStorage) storages.push(pageWindow.localStorage); } catch (_) {}
     try { if (pageWindow.sessionStorage) storages.push(pageWindow.sessionStorage); } catch (_) {}
@@ -878,27 +921,77 @@
       try {
         for (let index = 0; index < storage.length; index += 1) {
           const key = String(storage.key(index) || '');
-          if (!/(token|authorization|access.?token|jwt)/i.test(key)) continue;
-          const rawValue = String(storage.getItem(key) || '').replace(/^"|"$/g, '');
-          let nestedValue = '';
+          if (!/(token|authorization|jwt)/i.test(key) || /refresh|id.?token/i.test(key)) continue;
+          const raw = String(storage.getItem(key) || '');
+          let value = raw;
           try {
-            const parsed = JSON.parse(rawValue);
-            nestedValue = String(parsed?.accessToken || parsed?.access_token || parsed?.token || parsed?.authorization || '');
+            const parsed = JSON.parse(raw);
+            value = typeof parsed === 'string' ? parsed
+              : parsed?.accessToken || parsed?.access_token || parsed?.authorization || parsed?.token || '';
           } catch (_) {}
-          const value = nestedValue || rawValue;
-          const candidate = /^Bearer\s+\S+/i.test(value)
-            ? value
-            : (/^[\w-]+\.[\w-]+\.[\w-]+$/.test(value) ? `Bearer ${value}` : '');
-          if (candidate) {
-            authorization = candidate;
-            adoptMaskAccountFromAuthorization(candidate);
-            completePendingAccountSwitch(candidate);
-            return authorization;
-          }
+          const candidate = normalizeAuthorizationCandidate(value);
+          if (authorizationIsUsable(candidate)) found.add(candidate);
         }
       } catch (_) {}
     }
+    return [...found].map(candidate => ({
+      candidate,
+      scope: maskAccountScopeFromAuthorization(candidate),
+      ...authorizationTokenTimes(candidate)
+    })).filter(row => !scope || row.scope === scope)
+      .sort((left, right) => right.issuedAt - left.issuedAt || right.expiresAt - left.expiresAt)
+      .map(row => row.candidate);
+  }
+
+  function scanStoredAuthorization() {
+    if (authorizationIsUsable(authorization)) return authorization;
+    const scope = maskAccountScope || maskAccountScopeFromAuthorization(authorization);
+    const candidates = storedAuthorizationCandidates(scope);
+    const candidate = scope || candidates.length === 1 ? candidates[0] : '';
+    authorization = candidate || '';
+    if (candidate) {
+      authorization = candidate;
+      adoptMaskAccountFromAuthorization(candidate);
+      completePendingAccountSwitch(candidate);
+      return authorization;
+    }
     return authorization;
+  }
+
+  function sameAccountRetryAuthorization(sentAuthorization, scope) {
+    if (!scope) return '';
+    if (authorization !== sentAuthorization && authorizationIsUsable(authorization)
+        && maskAccountScopeFromAuthorization(authorization) === scope) return authorization;
+    return storedAuthorizationCandidates(scope).find(candidate => candidate !== sentAuthorization) || '';
+  }
+
+  function fetchWithoutAuthCapture(url, options) {
+    return fetchFromScript(url, options, true);
+  }
+
+  function fetchFromScript(url, options, skipCapture = false) {
+    scriptFetchOptions.set(options, skipCapture);
+    return pageWindow.fetch(url, options);
+  }
+
+  function chatPageAuthRequest(url, headers) {
+    const api = mufyApiUrl(url);
+    if (!api || api.origin !== pageWindow.location.origin || pageWindow.location.pathname !== '/chat'
+        || /\/users\/(?:login|logout)(?:\/|$)/i.test(api.pathname)) return null;
+    const characterId = currentRoleContext().characterId;
+    let token;
+    try { token = normalizeAuthorizationCandidate(new pageWindow.Headers(headers).get('Authorization')); }
+    catch (_) { return null; }
+    if (!characterId || !authorizationIsUsable(token)) return null;
+    return { characterId, token, scope: maskAccountScopeFromAuthorization(token), id: ++chatPageAuthRequestId };
+  }
+
+  function rememberChatPageAuthorization(request, status, body) {
+    if (!request || status < 200 || status >= 300 || body?.success === false
+        || (body?.code != null && Number(body.code) !== 200)) return;
+    if (request.id < (chatPageAuthorization?.id || 0)) return;
+    if (pageWindow.location.pathname === '/chat' && currentRoleContext().characterId === request.characterId
+        && (!maskAccountScope || request.scope === maskAccountScope)) chatPageAuthorization = request;
   }
 
   function findAuthorizationStorageSlot() {
@@ -1035,9 +1128,17 @@
         this.__mufyRecoveryUrl = String(url || '');
         this.__mufyRecoveryMethod = String(method || 'GET');
         this.__mufyRecoveryPageScope = currentSiteCaptureScope();
+        this.__mufyRecoveryAuthRequest = null;
         if (!this.__mufyRecoveryCaptureHooked && this.addEventListener) {
           this.__mufyRecoveryCaptureHooked = true;
           this.addEventListener('loadend', function () {
+            if (this.__mufyRecoveryAuthRequest && this.status >= 200 && this.status < 300) {
+              try {
+                const body = this.responseType === 'json' ? this.response
+                  : this.getResponseHeader('Content-Type')?.includes('json') ? JSON.parse(this.responseText) : null;
+                rememberChatPageAuthorization(this.__mufyRecoveryAuthRequest, this.status, body);
+              } catch (_) {}
+            }
             tryCaptureSiteCharacterXhr(this.__mufyRecoveryUrl, this, this.__mufyRecoveryPageScope);
             recordChatApiObservation(this.__mufyRecoveryUrl, this, this.__mufyRecoveryMethod, this.__mufyRecoveryBody);
             captureChatModelConfigXhr(this.__mufyRecoveryUrl, this);
@@ -1046,7 +1147,11 @@
         return originalOpen.call(this, method, url, ...rest);
       };
       XHR.prototype.setRequestHeader = function (name, value) {
-        if (/^authorization$/i.test(String(name))) captureAuthorization({ authorization: value }, this.__mufyRecoveryUrl);
+        if (/^authorization$/i.test(String(name))) {
+          const headers = { authorization: value };
+          captureAuthorization(headers, this.__mufyRecoveryUrl);
+          this.__mufyRecoveryAuthRequest = chatPageAuthRequest(this.__mufyRecoveryUrl, headers);
+        }
         return originalSetRequestHeader.call(this, name, value);
       };
       XHR.prototype.send = function (body) {
@@ -1063,12 +1168,20 @@
         try {
           requestUrl = typeof input === 'string' ? input : input?.url || String(input || '');
         } catch (_) {}
-        captureAuthorization(init?.headers, requestUrl);
-        captureAuthorization(input?.headers, requestUrl);
+        const headers = init?.headers ?? input?.headers;
+        const authRequest = scriptFetchOptions.has(init) ? null : chatPageAuthRequest(requestUrl, headers);
+        if (!scriptFetchOptions.get(init)) captureAuthorization(headers, requestUrl);
         captureChatCompletionRequest(requestUrl, init?.body || '');
         const result = originalFetch.apply(this, arguments);
         try {
           return Promise.resolve(result).then(response => {
+            if (authRequest && response.ok && !response.redirected) {
+              if (response.headers.get('Content-Type')?.includes('json')) {
+                response.clone().json().then(body => rememberChatPageAuthorization(authRequest, response.status, body)).catch(() => {});
+              } else {
+                rememberChatPageAuthorization(authRequest, response.status);
+              }
+            }
             tryCaptureSiteCharacterResponse(requestUrl, response, pageScope);
             recordChatApiObservation(requestUrl, response, init?.method || input?.method || 'GET', init?.body || '');
             captureChatModelConfigResponse(requestUrl, response);
@@ -1166,28 +1279,29 @@
     }
   }
 
-  function enqueueManualFavoriteChats(rows) {
+  function enqueueManualFavoriteChats(rows, confirmedFavorite = true) {
     const queued = new Map([...state.manualFavoriteChats, ...loadManualFavoriteChats()]
       .map(row => [String(row.characterId), row]));
     const previousSize = queued.size;
     for (const row of rows) {
       const id = String(row?.characterId || '');
       if (!id || queued.has(id)) continue;
-      queued.set(id, { ...row, isFavorite: true, favoriteKnown: true, manualChatAddedAt: new Date().toISOString() });
+      queued.set(id, {
+        ...row,
+        ...(confirmedFavorite ? { isFavorite: true, favoriteKnown: true } : {}),
+        manualChatAddedAt: new Date().toISOString()
+      });
     }
     if (!saveManualFavoriteChats([...queued.values()])) return null;
     state.manualFavoriteChats = [...queued.values()];
     return queued.size - previousSize;
   }
 
-  function loadManualFavoriteNextDismissed() {
-    try { return loadAndMigrateScopedValue(MANUAL_FAVORITE_NEXT_DISMISSED_KEY) === '1'; }
-    catch (_) { return false; }
-  }
+  function loadManualFavoriteNextDismissed() { return loadScopedFlag(MANUAL_FAVORITE_NEXT_DISMISSED_KEY); }
 
   function dismissManualFavoriteNext() {
     state.manualFavoriteNextDismissed = true;
-    try { localStorage.setItem(accountStorageKey(MANUAL_FAVORITE_NEXT_DISMISSED_KEY), '1'); } catch (_) {}
+    saveScopedFlag(MANUAL_FAVORITE_NEXT_DISMISSED_KEY, true);
     render();
   }
 
@@ -1752,24 +1866,25 @@
     }
   }
 
-  function loadModelMonitorSelection() {
+  function loadScopedIdSet(key) {
     try {
-      const ids = JSON.parse(loadAndMigrateScopedValue(MODEL_MONITOR_SELECTION_KEY) || '[]');
+      const ids = JSON.parse(loadAndMigrateScopedValue(key) || '[]');
       return new Set(Array.isArray(ids) ? ids.map(String).filter(Boolean) : []);
     } catch (_) { return new Set(); }
   }
 
-  function saveModelMonitorSelection() {
-    try { localStorage.setItem(accountStorageKey(MODEL_MONITOR_SELECTION_KEY), JSON.stringify([...state.modelMonitorSelectedIds])); } catch (_) {}
+  function saveScopedIdSet(key, values) {
+    try { localStorage.setItem(accountStorageKey(key), JSON.stringify([...values])); } catch (_) {}
   }
 
-  function loadModelMonitorNotify() {
-    try { return loadAndMigrateScopedValue(MODEL_MONITOR_NOTIFY_KEY) === '1'; }
-    catch (_) { return false; }
-  }
+  function loadModelMonitorSelection() { return loadScopedIdSet(MODEL_MONITOR_SELECTION_KEY); }
+
+  function saveModelMonitorSelection() { saveScopedIdSet(MODEL_MONITOR_SELECTION_KEY, state.modelMonitorSelectedIds); }
+
+  function loadModelMonitorNotify() { return loadScopedFlag(MODEL_MONITOR_NOTIFY_KEY); }
 
   function saveModelMonitorNotify(enabled) {
-    try { localStorage.setItem(accountStorageKey(MODEL_MONITOR_NOTIFY_KEY), enabled ? '1' : '0'); } catch (_) {}
+    saveScopedFlag(MODEL_MONITOR_NOTIFY_KEY, enabled);
   }
 
   function loadModelMonitorSnapshot() {
@@ -1783,16 +1898,9 @@
     try { localStorage.setItem(accountStorageKey(MODEL_MONITOR_SNAPSHOT_KEY), JSON.stringify({ rows, checkedAt })); } catch (_) {}
   }
 
-  function loadSessionlessRoleIds() {
-    try {
-      const ids = JSON.parse(loadAndMigrateScopedValue(SESSIONLESS_ROLE_IDS_KEY) || '[]');
-      return new Set(Array.isArray(ids) ? ids.map(String).filter(Boolean) : []);
-    } catch (_) { return new Set(); }
-  }
+  function loadSessionlessRoleIds() { return loadScopedIdSet(SESSIONLESS_ROLE_IDS_KEY); }
 
-  function saveSessionlessRoleIds() {
-    try { localStorage.setItem(accountStorageKey(SESSIONLESS_ROLE_IDS_KEY), JSON.stringify([...state.sessionlessRoleIds])); } catch (_) {}
-  }
+  function saveSessionlessRoleIds() { saveScopedIdSet(SESSIONLESS_ROLE_IDS_KEY, state.sessionlessRoleIds); }
 
 
   function goToNextManualFavoriteChat() {
@@ -1823,6 +1931,10 @@
   const cachedRoles = legacyRoleCache?.snapshot;
   const authorProfileCache = loadAuthorProfileCache();
   const shareCodeCache = loadShareCodeCache();
+  const initialManualAutoChatDelay = loadManualAutoChatDelayRange();
+  const initialManualAutoChatJob = loadManualAutoChatJob();
+  const initialModelMonitorSnapshot = loadModelMonitorSnapshot();
+  const initialUpdateCheckSnapshot = loadUpdateCheckSnapshot();
 
   const state = {
     chatted: cachedRoles?.chatted || [],
@@ -1832,9 +1944,9 @@
     manualFavoriteChatCurrentId: (() => { try { return loadAndMigrateScopedValue(MANUAL_FAVORITE_CHAT_CURRENT_KEY) || ''; } catch (_) { return ''; } })(),
     manualFavoriteNextDismissed: loadManualFavoriteNextDismissed(),
     manualAutoChatMessage: loadManualAutoChatMessage(),
-    manualAutoChatDelayMin: loadManualAutoChatDelayRange().min,
-    manualAutoChatDelayMax: loadManualAutoChatDelayRange().max,
-    manualAutoChatRunning: Boolean(loadManualAutoChatJob() && !loadManualAutoChatJob()?.paused),
+    manualAutoChatDelayMin: initialManualAutoChatDelay.min,
+    manualAutoChatDelayMax: initialManualAutoChatDelay.max,
+    manualAutoChatRunning: Boolean(initialManualAutoChatJob && !initialManualAutoChatJob.paused),
     manualAutoChatStopRequested: false,
     chatExportLoading: false,
     chatExportStopRequested: false,
@@ -1855,10 +1967,10 @@
     materialKind: 'prompt',
     materialEditingId: '',
     accountSwitchProfiles: loadAccountSwitchProfiles(),
-    modelMonitorRows: loadModelMonitorSnapshot().rows || [],
+    modelMonitorRows: initialModelMonitorSnapshot.rows || [],
     modelMonitorSelectedIds: loadModelMonitorSelection(),
     modelMonitorLoading: false,
-    modelMonitorLastChecked: loadModelMonitorSnapshot().checkedAt || '',
+    modelMonitorLastChecked: initialModelMonitorSnapshot.checkedAt || '',
     modelMonitorError: '',
     modelMonitorNotify: loadModelMonitorNotify(),
     sessionlessRoleIds: loadSessionlessRoleIds(),
@@ -1881,9 +1993,17 @@
     siteSearchRows: [],
     siteFavoriteStates: cachedRoles?.siteFavoriteStates || {},
     selectedSiteCharacterIds: new Set(),
+    selectedFavoriteOnlyForChat: new Set(),
+    oldFavoritesManaging: false,
     siteRoleManaging: false,
     siteFavoriteStateLoading: false,
     maskQuery: '',
+    maskManaging: false,
+    selectedMaskKeys: new Set(),
+    maskDeleteRunning: false,
+    favoriteFolderSearchRows: null,
+    favoriteFolderSearchRequest: null,
+    favoriteFolderSearchDetails: new Map(),
     loading: false,
     roleLoading: false,
     rolePauseRequested: false,
@@ -1907,8 +2027,8 @@
     selectedFavoriteFolderIds: new Set(),
     favoriteFolderDeleteEmptyOnly: true,
     updateInstallUrl: '',
-    latestScriptVersion: loadUpdateCheckSnapshot().latestVersion || '',
-    updateAvailable: compareScriptVersions(loadUpdateCheckSnapshot().latestVersion, SCRIPT_VERSION) > 0,
+    latestScriptVersion: initialUpdateCheckSnapshot.latestVersion || '',
+    updateAvailable: compareScriptVersions(initialUpdateCheckSnapshot.latestVersion, SCRIPT_VERSION) > 0,
     updateChecking: false,
     updateError: '',
     favoritePendingIds: new Set(),
@@ -1931,6 +2051,7 @@
   };
   if (maskLibraryStorageWarning) state.status = maskLibraryStorageWarning;
 roleStateReady = true;
+  cleanExpiredDeletedMasks();
   chatModelConfigCache = loadChatModelConfigCache();
   if (pendingSiteCaptureRows.length) {
     pendingSiteCaptureRows.splice(0).forEach(item => addCapturedSiteRows(item.rows, item.pageScope));
@@ -2063,6 +2184,9 @@ roleStateReady = true;
   }
 
   function reloadRoleCacheForAccount() {
+    resetInlineFavoriteFolderSearch(true);
+    state.selectedFavoriteOnlyForChat.clear();
+    state.oldFavoritesManaging = false;
     const legacy = readLegacyRoleCache(maskAccountScope);
     applyRoleCacheSnapshot(legacy?.snapshot);
     initializeRoleCacheForAccount(maskAccountScope, legacy);
@@ -2095,6 +2219,8 @@ roleStateReady = true;
     }
   }
 
+  class ManualAutoChatAuthRejectedError extends Error {}
+
   function isVisibleElement(element) {
     if (!element || !element.isConnected) return false;
     const style = pageWindow.getComputedStyle?.(element);
@@ -2103,10 +2229,14 @@ roleStateReady = true;
     return !rect || rect.width > 0 && rect.height > 0;
   }
 
-  function findManualChatComposer() {
+  function findChatTextarea() {
     const textareas = [...document.querySelectorAll('textarea[placeholder*="发送消息"], textarea[placeholder*="Enter"]')]
       .filter(textarea => !textarea.closest('#mufy-recovery-panel') && isVisibleElement(textarea));
-    const textarea = textareas.find(item => String(item.placeholder || '').includes('发送消息')) || textareas[0] || null;
+    return textareas.find(item => String(item.placeholder || '').includes('发送消息')) || textareas[0] || null;
+  }
+
+  function findManualChatComposer() {
+    const textarea = findChatTextarea();
     if (!textarea) return { textarea: null, button: null };
     let container = textarea.parentElement;
     let buttons = [];
@@ -2183,179 +2313,77 @@ roleStateReady = true;
     while (Date.now() - startedAt < timeoutMs) {
       if (manualAutoChatWasStopped()) throw new ManualAutoChatPausedError('任务已暂停');
       const composer = findManualChatComposer();
-      if (composer.textarea && composer.button && !composer.textarea.disabled && !composer.textarea.readOnly) return composer;
+      if (composer.textarea && !composer.textarea.disabled && !composer.textarea.readOnly) return composer;
       await wait(300);
     }
     throw new Error('等待聊天输入框超过 60 秒');
   }
 
-  async function waitForEnabledManualChatButton(textarea, timeoutMs = 15000) {
-    const startedAt = Date.now();
-    while (Date.now() - startedAt < timeoutMs) {
-      if (manualAutoChatWasStopped()) throw new ManualAutoChatPausedError('任务已暂停');
-      const composer = findManualChatComposer();
-      if (composer.textarea === textarea && composer.button && !composer.button.disabled && composer.button.getAttribute('aria-disabled') !== 'true') {
-        return composer.button;
-      }
-      await wait(150);
-    }
-    throw new Error('消息已写入，但发送按钮在 15 秒内没有启用');
-  }
-
-  async function manualChatSendStarted(textarea, expectedText, previousSessionId, timeoutMs = 2200) {
-    const startedAt = Date.now();
-    while (Date.now() - startedAt < timeoutMs) {
-      const current = currentRoleContext();
-      const composer = findManualChatComposer();
-      const draftCleared = String(textarea?.value || '').trim() !== String(expectedText || '').trim();
-      const sessionCreated = Boolean(current.sessionId && current.sessionId !== String(previousSessionId || ''));
-      const sendControlChanged = Boolean(composer.button && !isManualChatSendButton(composer.button));
-      if (draftCleared || sessionCreated || sendControlChanged || hasVisibleChatStopControl()) return true;
-      await wait(120);
-    }
-    return false;
-  }
-
-  function reactPropsOf(element) {
-    if (!element) return null;
+  async function probeChatPageAuthorization(token, timeoutMs) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const key = Reflect.ownKeys(element).find(name => String(name).startsWith('__reactProps$'));
-      return key ? element[key] : null;
-    } catch (_) { return null; }
-  }
-
-  function callReactEventHandler(element, handlerNames, eventValues = {}) {
-    const props = reactPropsOf(element);
-    const handlerName = handlerNames.find(name => typeof props?.[name] === 'function');
-    if (!handlerName) return false;
-    let defaultPrevented = false;
-    const event = {
-      target: element,
-      currentTarget: element,
-      nativeEvent: null,
-      bubbles: true,
-      cancelable: true,
-      defaultPrevented: false,
-      preventDefault() { defaultPrevented = true; this.defaultPrevented = true; },
-      stopPropagation() {},
-      persist() {},
-      isDefaultPrevented() { return defaultPrevented; },
-      isPropagationStopped() { return false; },
-      ...eventValues
-    };
-    event.nativeEvent = event;
-    props[handlerName](event);
-    return true;
-  }
-
-  async function activateManualChatSend(textarea, button, message) {
-    const previousSessionId = currentRoleContext().sessionId;
-    const attempts = [
-      () => {
-        const nativeClick = pageWindow.HTMLElement?.prototype?.click;
-        if (nativeClick) nativeClick.call(button);
-        else button.click();
-      },
-      () => {
-        if (!callReactEventHandler(button, ['onClick', 'onPointerUp', 'onMouseUp'], { type: 'click', button: 0, buttons: 0 })) {
-          throw new Error('发送按钮上没有找到页面框架的点击处理器');
-        }
-      },
-      () => {
-        const form = textarea.closest('form') || button.closest('form');
-        if (!form) throw new Error('聊天输入区没有可提交的表单');
-        if (typeof form.requestSubmit === 'function') form.requestSubmit(button);
-        else form.dispatchEvent(new pageWindow.Event('submit', { bubbles: true, cancelable: true }));
-      },
-      () => {
-        const PointerEventCtor = pageWindow.PointerEvent || pageWindow.MouseEvent;
-        const MouseEventCtor = pageWindow.MouseEvent;
-        button.dispatchEvent(new PointerEventCtor('pointerdown', { bubbles: true, cancelable: true, pointerType: 'mouse', button: 0 }));
-        button.dispatchEvent(new PointerEventCtor('pointerup', { bubbles: true, cancelable: true, pointerType: 'mouse', button: 0 }));
-        button.dispatchEvent(new MouseEventCtor('click', { bubbles: true, cancelable: true, view: pageWindow, button: 0 }));
-      },
-      () => {
-        textarea.focus();
-        if (callReactEventHandler(textarea, ['onKeyDown', 'onKeyPress'], {
-          type: 'keydown', key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
-          shiftKey: false, ctrlKey: false, altKey: false, metaKey: false
-        })) return;
-        const KeyboardEventCtor = pageWindow.KeyboardEvent;
-        textarea.dispatchEvent(new KeyboardEventCtor('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
-        textarea.dispatchEvent(new KeyboardEventCtor('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
-      }
-    ];
-    const failures = [];
-    for (let index = 0; index < attempts.length; index += 1) {
-      try { attempts[index](); } catch (error) { failures.push(String(error?.message || error)); }
-      if (await manualChatSendStarted(textarea, message, previousSessionId)) return;
-      if (index + 1 < attempts.length) {
-        const composer = findManualChatComposer();
-        if (!composer.textarea || String(composer.textarea.value || '').trim() !== String(message || '').trim()) return;
-        button = composer.button || button;
-      }
-    }
-    throw new Error(`发送按钮已启用，但页面的点击、框架事件、表单提交和 Enter 都没有生效${failures.length ? `（${[...new Set(failures)].join('；')}）` : ''}`);
-  }
-
-  async function resolveManualChatModelConfig(characterId, timeoutMs = 12000) {
-    const id = String(characterId || '');
-    const startedAt = Date.now();
-    while (Date.now() - startedAt < Math.min(timeoutMs, 1800)) {
-      const cached = chatModelConfigCache.get(id);
-      if (cached?.modelId && cached?.modelTemplateId) return cached;
-      await wait(250);
-    }
-    try {
-      const headers = { Accept: 'application/json' };
-      if (authorization) headers.Authorization = authorization;
-      const response = await pageWindow.fetch(new URL('/api/models/tree', location.origin).href, {
-        method: 'GET', credentials: 'include', cache: 'no-store', headers
+      const response = await fetchWithoutAuthCapture(roleListPageUrl(1, false, 'pageNum').href, {
+        method: 'GET', credentials: 'include', cache: 'no-store', redirect: 'error',
+        signal: controller.signal, headers: { Accept: 'application/json', Authorization: token }
       });
-      const body = await response.json();
-      const rows = flattenModelMonitorRows(body?.data || body);
-      const normalizeLabel = value => String(value || '').toLocaleLowerCase('zh-CN').replace(/[\s·•—_()（）【】\[\]]+/g, '');
-      const composerRect = findManualChatComposer().textarea?.getBoundingClientRect?.();
-      const visibleLabels = [...document.querySelectorAll('button,[role="button"]')]
-        .filter(element => !element.closest('#mufy-recovery-panel') && isVisibleElement(element))
-        .map(element => {
-          const text = String(element.textContent || element.getAttribute('aria-label') || element.title || '').trim();
-          const rect = element.getBoundingClientRect?.();
-          const distance = composerRect && rect
-            ? Math.abs((rect.top + rect.bottom) / 2 - (composerRect.top + composerRect.bottom) / 2)
-            : 9999;
-          return { text, distance };
-        })
-        .filter(item => item.text && item.text.length <= 80 && item.distance <= 240);
-      const matches = rows.map(row => {
-        const name = normalizeLabel(row.name);
-        const score = visibleLabels.reduce((best, item) => {
-          const normalized = normalizeLabel(item.text);
-          if (!normalized || !name) return best;
-          if (normalized === name) return Math.max(best, 2000 + name.length - item.distance);
-          if (normalized.includes(name) || name.includes(normalized)) return Math.max(best, 1000 + name.length - item.distance);
-          return best;
-        }, 0);
-        return { row, score };
-      }).filter(item => item.score > 0 && item.row.modelId && item.row.templateId)
-        .sort((a, b) => b.score - a.score);
-      if (matches.length) {
-        const selected = { modelId: Number(matches[0].row.modelId), modelTemplateId: Number(matches[0].row.templateId) };
-        rememberChatModelConfig(id, selected);
-        appendRunLog('info', `一键扣数已按页面模型名称“${matches[0].row.name}”匹配 modelId=${selected.modelId}、modelTemplateId=${selected.modelTemplateId}。`);
-        return selected;
-      }
-    } catch (error) {
-      appendRunLog('warn', '一键扣数自动匹配当前模型失败', error);
+      const body = response.ok ? await readJsonResponse(response) : null;
+      return { verified: body?.code === 200 && Boolean(body.data), status: response.status };
+    } catch (_) {
+      return { verified: false, status: 0 };
+    } finally {
+      clearTimeout(timer);
     }
-    const recent = chatModelConfigCache.get('__last__');
-    if (recent?.modelId && recent?.modelTemplateId) return recent;
-    while (Date.now() - startedAt < timeoutMs) {
-      const cached = chatModelConfigCache.get(id);
-      if (cached?.modelId && cached?.modelTemplateId) return cached;
+  }
+
+  async function waitForChatPageAuthorization(job, timeoutMs = 20000) {
+    const characterId = String(job.activeCharacterId);
+    const deadline = Date.now() + timeoutMs;
+    const testedTokens = new Set();
+    let nextProbeAt = Date.now() + 1000;
+    let probes = 0;
+    let probeStatus = 0;
+    let announced = false;
+    while (Date.now() < deadline) {
+      if (manualAutoChatWasStopped()) throw new ManualAutoChatPausedError('任务已暂停');
+      if (pageWindow.location.pathname !== '/chat' || currentRoleContext().characterId !== characterId
+          || (job.accountScope && maskAccountScope && job.accountScope !== maskAccountScope)) {
+        throw new ManualAutoChatPausedError('角色页或 Mufy 账号已切换，已暂停发送');
+      }
+      const proof = chatPageAuthorization;
+      const scope = job.accountScope || maskAccountScope;
+      if (proof?.characterId === characterId && (!scope || proof.scope === scope)
+          && authorizationIsUsable(proof.token)) return proof;
+      if (!announced) {
+        announced = true;
+        state.status = '正在等待当前角色页完成登录验证……';
+        render();
+        showManualAutoChatToast(state.status);
+      }
+      if (probes < 3 && Date.now() >= nextProbeAt) {
+        if (!scope && !authorizationIsUsable(authorization)) scanStoredAuthorization();
+        const live = authorizationIsUsable(authorization) ? authorization : '';
+        const token = live && (!scope || maskAccountScopeFromAuthorization(live) === scope)
+          && !testedTokens.has(live) ? live : '';
+        const candidate = token || (scope && storedAuthorizationCandidates(scope).find(value => !testedTokens.has(value)));
+        nextProbeAt = Date.now() + 2500;
+        if (candidate) {
+          testedTokens.add(candidate);
+          probes += 1;
+          const request = { characterId, token: candidate, scope: maskAccountScopeFromAuthorization(candidate), id: ++chatPageAuthRequestId };
+          const result = await probeChatPageAuthorization(candidate, Math.min(4000, Math.max(1, deadline - Date.now())));
+          probeStatus = result.status;
+          if (result.verified && !manualAutoChatWasStopped()) {
+            rememberChatPageAuthorization(request, result.status);
+            continue;
+          }
+          if (probeStatus === 403 || probeStatus === 429) break;
+        }
+      }
       await wait(250);
     }
-    throw new Error('没有获取到当前角色所选模型的 modelId/modelTemplateId；请刷新该角色页面，等待模型名称显示后再继续');
+    const detail = probeStatus ? `会话列表未通过登录验证（HTTP ${probeStatus}）` : '暂未验证到当前角色页的登录凭证';
+    throw new Error(`${detail}。发送尚未开始，进度已保留。请等页面加载完成后点继续。`);
   }
 
   function realChatSessionId(value) {
@@ -2363,7 +2391,7 @@ roleStateReady = true;
     return id && id !== '00000000-0000-0000-0000-000000000000' ? id : '';
   }
 
-  async function confirmExistingManualChatSession(job, verifiedEmptySessions) {
+  async function confirmExistingManualChatSession(job, verifiedEmptySessions, pageAuth) {
     const characterId = String(job.activeCharacterId || '');
     const current = currentRoleContext();
     const sessions = new Set([
@@ -2380,7 +2408,7 @@ roleStateReady = true;
       const controller = new (pageWindow.AbortController || globalThis.AbortController)();
       const timeout = setTimeout(() => controller.abort(), 20000);
       try {
-        const data = await requestDialogPage({ characterId, sessionId }, 1, CHAT_EXPORT_SAFE_PAGE_SIZE, controller.signal);
+        const data = await requestDialogPage({ characterId, sessionId }, 1, CHAT_EXPORT_SAFE_PAGE_SIZE, controller.signal, pageAuth.token);
         if (manualAutoChatWasStopped()) throw new ManualAutoChatPausedError('任务已暂停');
         if (job.accountScope && job.accountScope !== maskAccountScope) throw new Error('核验期间切换了 Mufy 账号');
         const rows = dialogRowsFromPage(data, null);
@@ -2400,30 +2428,18 @@ roleStateReady = true;
     return false;
   }
 
-  async function sendManualChatViaApi(job, verifiedEmptySessions) {
-    scanStoredAuthorization();
+  async function sendManualChatViaApi(job, verifiedEmptySessions, pageAuth) {
     const characterId = String(job.activeCharacterId || '');
-    if (await confirmExistingManualChatSession(job, verifiedEmptySessions)) return false;
-    const config = await resolveManualChatModelConfig(characterId);
+    if (await confirmExistingManualChatSession(job, verifiedEmptySessions, pageAuth)) return false;
+    const config = MANUAL_AUTO_CHAT_MODEL;
     if (manualAutoChatWasStopped()) throw new ManualAutoChatPausedError('任务已暂停');
-    if (await confirmExistingManualChatSession(job, verifiedEmptySessions)) return false;
-    const headers = { Accept: 'text/event-stream', 'Content-Type': 'application/json' };
-    if (authorization) headers.Authorization = authorization;
-    const payload = {
-      userInput: String(job.message || DEFAULT_MANUAL_AUTO_CHAT_MESSAGE),
-      sessionId: '00000000-0000-0000-0000-000000000000',
-      modelId: Number(config.modelId),
-      modelTemplateId: Number(config.modelTemplateId),
-      characterId,
-      itemText: null,
-      skipRedPacket: false
-    };
+    if (await confirmExistingManualChatSession(job, verifiedEmptySessions, pageAuth)) return false;
     const controller = new (pageWindow.AbortController || globalThis.AbortController)();
     const deadline = setTimeout(() => controller.abort(), 7 * 60 * 1000);
     const startedAt = Date.now();
     let contentParts = 0;
     let lastContentAt = 0;
-    let reader = null;
+    const activeModelName = config.name;
     const updateProgress = () => {
       if (job.accountScope && job.accountScope !== maskAccountScope) return;
       const elapsed = Math.floor((Date.now() - startedAt) / 1000);
@@ -2431,53 +2447,123 @@ roleStateReady = true;
       const current = loadManualAutoChatJob();
       if (current && current.startedAt !== job.startedAt) return;
       const prefix = current
-        ? current.paused ? '已暂停，收尾中' : `一键扣数 ${Number(job.completed || 0) + 1}/${job.total}`
+        ? current.paused ? '已暂停，收尾中' : '一键扣数 ' + (Number(job.completed || 0) + 1) + '/' + job.total
         : '已取消，收尾中';
-      const progress = !contentParts ? '等待首段回复'
-        : quiet < 3 ? `正在接收回复 · ${contentParts} 段`
-        : `已收到 ${contentParts} 段 · ${quiet} 秒无新内容`;
-      state.status = `${prefix} · ${progress} · ${elapsed} 秒`;
+      const progress = !contentParts ? '等待“' + activeModelName + '”首段回复'
+        : quiet < 3 ? '正在接收回复 · ' + contentParts + ' 段'
+        : '已收到 ' + contentParts + ' 段 · ' + quiet + ' 秒无新内容';
+      state.status = prefix + ' · ' + progress + ' · ' + elapsed + ' 秒';
       const status = panel?.querySelector('#mufy-recovery-status');
       if (status) status.textContent = state.status;
       showManualAutoChatToast(state.status, { tone: !current || current.paused ? 'warn' : 'progress' });
     };
     const progressTimer = setInterval(updateProgress, 1000);
+    let reader = null;
     try {
       updateProgress();
-      const response = await pageWindow.fetch(new URL('/api/v1/chat/completions', location.origin).href, {
-        method: 'POST',
-        credentials: 'include',
-        signal: controller.signal,
-        headers,
-        body: JSON.stringify(payload)
-      });
-      if (response.status === 401 || response.status === 403) throw new Error(loginErrorMessage(response.status, '自动发送消息'));
+      const payload = {
+        userInput: String(job.message || DEFAULT_MANUAL_AUTO_CHAT_MESSAGE),
+        sessionId: '00000000-0000-0000-0000-000000000000',
+        modelId: Number(config.modelId),
+        modelTemplateId: Number(config.modelTemplateId),
+        characterId,
+        itemText: null,
+        skipRedPacket: false
+      };
+      const scope = job.accountScope || maskAccountScope;
+      const request = token => {
+        if (scope && scope !== maskAccountScope) throw new ManualAutoChatPausedError('发送前检测到 Mufy 账号已切换');
+        if (pageWindow.location.pathname !== '/chat' || currentRoleContext().characterId !== characterId) {
+          throw new ManualAutoChatPausedError('发送前检测到角色页已切换');
+        }
+        if (manualAutoChatWasStopped()) throw new ManualAutoChatPausedError('任务已暂停');
+        const headers = { Accept: 'text/event-stream', 'Content-Type': 'application/json' };
+        if (token) headers.Authorization = token;
+        return fetchWithoutAuthCapture(new URL('/api/v1/chat/completions', location.origin).href, {
+          method: 'POST',
+          credentials: 'include',
+          signal: controller.signal,
+          headers,
+          body: JSON.stringify(payload)
+        });
+      };
+
+      const sentAuthorization = pageAuth.token;
+      let response = await request(sentAuthorization);
+      const authAttempts = [`${sentAuthorization ? '页面令牌' : 'Cookie'} HTTP ${response.status}`];
+      if (response.status === 401) {
+        const replacement = sameAccountRetryAuthorization(sentAuthorization, scope);
+        if (replacement) {
+          response = await request(replacement);
+          authAttempts.push(`同账号备用令牌 HTTP ${response.status}`);
+        }
+        if (response.status === 401 && sentAuthorization) {
+          response = await request('');
+          authAttempts.push(`Cookie HTTP ${response.status}`);
+        }
+      }
+      if (authAttempts.length > 1 || response.status === 401 || response.status === 403) {
+        appendRunLog(response.ok ? 'info' : 'warn', `一键扣数鉴权：${authAttempts.join(' → ')}。`);
+      }
+      if (response.status === 401 || response.status === 403) {
+        if (chatPageAuthorization === pageAuth) chatPageAuthorization = null;
+        throw new ManualAutoChatAuthRejectedError(`自动发送消息被聊天接口拒绝（${authAttempts.join('，')}）。可在同一角色页用 Mufy 自带的发送按钮试一条，确认是网站发送也失败，还是只有一键扣数失败。`);
+      }
       if (!response.ok) {
         const raw = await response.text().catch(() => '');
-        throw new Error(`自动发送消息失败（HTTP ${response.status}${raw ? `：${raw.slice(0, 240)}` : ''}）`);
+        const error = new Error('“' + config.name + '”发送失败（HTTP ' + response.status + (raw ? '：' + raw.slice(0, 240) : '') + '）');
+
+        throw error;
       }
       if (!response.body?.getReader) throw new Error('聊天接口没有返回可读取的 EventStream');
+
       reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
       let doneReceived = false;
+      let attemptContentParts = 0;
+      let failureMessage = '';
+      let lastEventText = '';
       const inspectLine = line => {
         const trimmed = String(line || '').trim();
         if (!trimmed || trimmed.startsWith(':') || /^(?:event|id|retry):/i.test(trimmed)) return;
         const dataText = trimmed.replace(/^data:\s*/i, '');
-        if (dataText === '[DONE]') { doneReceived = true; return; }
+        if (dataText === '[DONE]') {
+          doneReceived = true;
+          return;
+        }
+        lastEventText = dataText.slice(0, 300);
         try {
           const event = JSON.parse(dataText);
-          const type = String(event?.type || '').toLowerCase();
-          if (type === 'done' || String(event?.content || '').trim() === '[DONE]') {
+          const type = String(event?.type || event?.event || '').toLowerCase();
+          const status = String(event?.status || '').toLowerCase();
+          const finishReason = event?.finishReason ?? event?.finish_reason ?? event?.choices?.[0]?.finish_reason;
+          if (['done', 'complete', 'completed', 'finish', 'finished', 'success', 'end'].includes(type)
+              || ['done', 'complete', 'completed', 'success', 'finished'].includes(status)
+              || event?.done === true || event?.completed === true || (finishReason != null && finishReason !== '')) {
             doneReceived = true;
-          } else if (type === 'content' && typeof event.content === 'string' && event.content.length) {
-            contentParts += 1;
+          }
+          const fragments = [
+            event?.content,
+            event?.delta?.content,
+            event?.data?.content,
+            event?.message?.content,
+            event?.choices?.[0]?.delta?.content,
+            event?.choices?.[0]?.message?.content
+          ].filter(value => typeof value === 'string' && value && value !== '[DONE]');
+          if (fragments.length) {
+            attemptContentParts += fragments.length;
+            contentParts += fragments.length;
             lastContentAt = Date.now();
+          }
+          const explicitFailure = event?.error?.message || event?.error || event?.reason || event?.message;
+          if (['error', 'failed', 'failure'].includes(type) || event?.success === false) {
+            failureMessage = typeof explicitFailure === 'string' ? explicitFailure : JSON.stringify(explicitFailure || event);
           }
         } catch (_) {}
       };
-      while (!doneReceived) {
+
+      while (!doneReceived && !failureMessage) {
         const chunk = await reader.read();
         buffer += decoder.decode(chunk.value || new Uint8Array(), { stream: !chunk.done });
         const lines = buffer.split(/\r?\n/);
@@ -2486,18 +2572,36 @@ roleStateReady = true;
         if (chunk.done) break;
       }
       if (buffer) inspectLine(buffer);
-      if (!doneReceived) throw new Error('EventStream 已结束，但没有收到 done/[DONE] 完成标记');
+      if (failureMessage) {
+        const error = new Error('“' + config.name + '”返回失败：' + failureMessage.slice(0, 300));
+
+        throw error;
+      }
+      if (!doneReceived && attemptContentParts > 0) {
+        appendRunLog('warn', '一键扣数的 EventStream 未带完成标记，但已收到回复内容并正常结束；按完成处理。', {
+          model: config.name,
+          contentParts: attemptContentParts,
+          lastEvent: lastEventText
+        });
+      } else if (!doneReceived) {
+        const error = new Error('EventStream 已结束，既没有完成标记，也没有收到回复内容'
+          + (lastEventText ? '；最后事件：' + lastEventText : ''));
+
+        throw error;
+      }
+      appendRunLog('info', '一键扣数已使用固定模型“' + config.name + '”完成发送。');
       return true;
     } catch (error) {
-      if (controller.signal.aborted) throw new Error('等待角色回复完成超过 7 分钟，请在对话里核对这一条');
+      if (controller.signal.aborted && !(error instanceof ManualAutoChatAuthRejectedError)) {
+        throw new Error('等待角色回复完成超过 7 分钟，请在对话里核对这一条');
+      }
       throw error;
     } finally {
+      if (reader) reader.cancel().catch(() => {});
       clearTimeout(deadline);
       clearInterval(progressTimer);
-      if (reader) reader.cancel().catch(() => {});
     }
   }
-
   async function waitForManualChatResponse(job) {
     const startedAt = Number(job.sentAt) || Date.now();
     let lastMutationAt = Date.now();
@@ -2641,10 +2745,12 @@ roleStateReady = true;
       if (job.phase === 'sending') {
         throw new Error('上一条消息的发送结果无法确认。为避免重复发送，请先在对话中核对。');
       }
-      if (!['response-complete', 'waiting-response', 'already-chatted'].includes(job.phase)
-        && await confirmExistingManualChatSession(job, verifiedEmptySessions)) {
-        job.phase = 'already-chatted';
-        if (!saveManualAutoChatJob(job)) throw new Error('无法保存跳过状态');
+      if (!['response-complete', 'waiting-response', 'already-chatted'].includes(job.phase)) {
+        const pageAuth = await waitForChatPageAuthorization(job);
+        if (await confirmExistingManualChatSession(job, verifiedEmptySessions, pageAuth)) {
+          job.phase = 'already-chatted';
+          if (!saveManualAutoChatJob(job)) throw new Error('无法保存跳过状态');
+        }
       }
       if (job.phase === 'waiting-response') {
         const composer = findManualChatComposer();
@@ -2665,19 +2771,20 @@ roleStateReady = true;
       if (!['waiting-response', 'response-complete', 'already-chatted'].includes(job.phase)) {
         state.status = `一键扣数 ${Number(job.completed || 0) + 1}/${job.total}：正在等待“${job.activeCharacterName || job.activeCharacterId}”的输入框……`;
         render();
-        showManualAutoChatToast(`一键扣数 ${Number(job.completed || 0) + 1}/${job.total}：正在准备并发送消息…`);
+        showManualAutoChatToast(state.status);
+        await waitForManualChatComposer();
+        const pageAuth = await waitForChatPageAuthorization(job);
         const { textarea } = await waitForManualChatComposer();
         const existingDraft = String(textarea.value || '').trim();
         if (existingDraft && existingDraft !== String(job.message || '').trim()) {
           throw new Error('输入框中已有其他草稿，为避免覆盖已暂停任务');
         }
         setManualChatTextareaValue(textarea, String(job.message || DEFAULT_MANUAL_AUTO_CHAT_MESSAGE));
-        await waitForEnabledManualChatButton(textarea);
         job.phase = 'sending';
         job.sentAt = Date.now();
         if (!saveManualAutoChatJob(job)) throw new Error('发送前无法保存任务状态');
         showManualAutoChatToast(`一键扣数 ${Number(job.completed || 0) + 1}/${job.total}：消息发送中，正在等待完整回复…`);
-        const sent = await sendManualChatViaApi(job, verifiedEmptySessions);
+        const sent = await sendManualChatViaApi(job, verifiedEmptySessions, pageAuth);
         const latest = loadManualAutoChatJob();
         if (!latest) {
           reportManualAutoChatCancelResult(job, sent ? true : null);
@@ -2740,6 +2847,10 @@ roleStateReady = true;
       if (persistedJob.startedAt !== job.startedAt || persistedJob.activeCharacterId !== job.activeCharacterId
           || (job.accountScope && job.accountScope !== maskAccountScope)) return;
       job = persistedJob;
+      if (error instanceof ManualAutoChatAuthRejectedError && job.phase === 'sending') {
+        job.phase = 'ready-to-send';
+        job.sentAt = 0;
+      }
       job.paused = true;
       job.pauseReason = String(error?.message || error || '未知错误');
       saveManualAutoChatJob(job);
@@ -2758,6 +2869,12 @@ roleStateReady = true;
 
   function startOrResumeManualAutoChat() {
     const existing = loadManualAutoChatJob();
+    const recoveryTask = loadFavoriteShareRecoveryJob();
+    if (!existing && (state.shareRecoveryLoading || (recoveryTask && !recoveryTask.paused))) {
+      state.status = '请等收藏检测结束或暂停后，再开始一键扣数。';
+      render();
+      return;
+    }
     if (existing && !existing.paused) {
       existing.paused = true;
       existing.pauseReason = '用户手动停止';
@@ -2778,7 +2895,7 @@ roleStateReady = true;
       return;
     }
     if (!state.manualFavoriteChats.length) {
-      state.status = '普通待聊为空。可在「网站角色」勾选已收藏角色，再点「加入普通待聊」。';
+      state.status = '普通待聊为空。可在「角色 → 收藏未聊」或「网站角色」勾选角色，再点「加入普通待聊」。';
       render();
       return;
     }
@@ -2796,7 +2913,7 @@ roleStateReady = true;
     const message = saveManualAutoChatMessage(state.manualAutoChatMessage);
     const delayRange = saveManualAutoChatDelayRange(state.manualAutoChatDelayMin, state.manualAutoChatDelayMax);
     if (!message) return;
-    if (!pageWindow.confirm(`将依次给 ${state.manualFavoriteChats.length} 个普通收藏角色发送：\n\n${message}\n\n每个角色会等待完整回复，再随机冷却 ${delayRange.min}～${delayRange.max} 秒后进入下一个。确定开始吗？`)) return;
+    if (!pageWindow.confirm(`将依次给 ${state.manualFavoriteChats.length} 个待聊角色发送：\n\n${message}\n\n固定模型：${MANUAL_AUTO_CHAT_MODEL.name}。\n每个角色会等待完整回复，再随机冷却 ${delayRange.min}～${delayRange.max} 秒后进入下一个。确定开始吗？`)) return;
     const first = state.manualFavoriteChats[0];
     const job = {
       active: true,
@@ -2850,14 +2967,14 @@ roleStateReady = true;
     const Controller = pageWindow.AbortController || globalThis.AbortController;
     if (!Controller) {
       return Promise.race([
-        pageWindow.fetch(url, options),
+        fetchFromScript(url, options),
         new Promise((_, reject) => setTimeout(() => reject(new Error(`${label}超过 ${Math.round(timeoutMs / 1000)} 秒未响应`)), timeoutMs))
       ]);
     }
     const controller = new Controller();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      return await pageWindow.fetch(url, { ...options, signal: controller.signal });
+      return await fetchFromScript(url, { ...options, signal: controller.signal });
     } catch (error) {
       if (error?.name === 'AbortError') throw new Error(`${label}超过 ${Math.round(timeoutMs / 1000)} 秒未响应`);
       throw error;
@@ -2892,6 +3009,17 @@ roleStateReady = true;
   function saveShareCodeCache() {
     if (!maskAccountScope) return;
     try { localStorage.setItem(accountStorageKey(SHARE_CODE_CACHE_KEY), JSON.stringify(Object.fromEntries(shareCodeCache))); } catch (_) {}
+  }
+
+  function saveShareCodeRoleName(row) {
+    const id = String(row?.characterId || '');
+    const name = String(row?.name || '').trim();
+    if (!maskAccountScope || !id || !name || name === '未命名角色') return;
+    try {
+      const key = accountStorageKey(SHARE_CODE_NAMES_KEY);
+      const names = JSON.parse(localStorage.getItem(key) || '{}');
+      if (names[id] !== name) localStorage.setItem(key, JSON.stringify({ ...names, [id]: name }));
+    } catch (_) {}
   }
 
   function reloadShareCodeCacheForAccount() {
@@ -3140,8 +3268,11 @@ roleStateReady = true;
   }
 
   function clearFavoriteShareRecoveryJob() {
-    if (!maskAccountScope) return;
-    try { localStorage.removeItem(accountStorageKey(FAVORITE_SHARE_RECOVERY_JOB_KEY)); } catch (_) {}
+    if (!maskAccountScope) return false;
+    try {
+      localStorage.removeItem(accountStorageKey(FAVORITE_SHARE_RECOVERY_JOB_KEY));
+      return true;
+    } catch (_) { return false; }
   }
 
   class RateLimitError extends Error {
@@ -3553,11 +3684,16 @@ roleStateReady = true;
   async function writeMaskDatabaseSnapshot(database, accountKey, snapshot, options = {}) {
     // Safari 会较积极地自动关闭空闲事务，因此读取和写入分成两个短事务。
     const existing = await readMaskDatabaseRecord(database, accountKey);
+    const previous = cloneValue(existing?.current || existing?.previous || snapshot);
+    if (options.deletedIds?.size) {
+      previous.library = (previous.library || []).filter(row => !options.deletedIds.has(String(row.libraryId)));
+      previous.bindings = (previous.bindings || []).filter(row => !options.deletedIds.has(String(row.libraryId || '')));
+    }
     const record = {
       accountKey,
       schemaVersion: 1,
       current: cloneValue(snapshot),
-      previous: cloneValue(existing?.current || existing?.previous || snapshot),
+      previous,
       updatedAt: new Date().toISOString(),
       migration: options.migration || existing?.migration || null
     };
@@ -3719,18 +3855,22 @@ roleStateReady = true;
     }
   }
 
-  function queueIndexedDbMaskPersist(reason) {
+  function queueIndexedDbMaskPersist(reason, options = {}) {
     const scope = maskAccountScope;
     const snapshot = maskDataSnapshot();
     maskStorageWriteQueue = maskStorageWriteQueue
       .catch(() => {})
       .then(async () => {
-        if (!scope || scope !== maskAccountScope || maskStorageMode !== 'indexedDB') return;
+        if (!scope || scope !== maskAccountScope || maskStorageMode !== 'indexedDB') return false;
         const database = await openMaskDatabase();
-        await writeMaskDatabaseSnapshot(database, scope, snapshot);
+        await writeMaskDatabaseSnapshot(database, scope, snapshot, options);
         appendRunLog('info', `${reason}已写入 IndexedDB`, { account: maskAccountLabel(), masks: snapshot.library.length, bindings: snapshot.bindings.length });
+        return true;
       })
-      .catch(error => handleIndexedDbStorageFailure(`${reason}写入 IndexedDB 失败。`, error, false));
+      .catch(error => {
+        if (scope === maskAccountScope) handleIndexedDbStorageFailure(`${reason}写入 IndexedDB 失败。`, error, false);
+        return false;
+      });
     return true;
   }
 
@@ -3949,15 +4089,14 @@ roleStateReady = true;
     url.searchParams.set('characterId', String(characterId));
     const headers = { Accept: 'application/json' };
     if (authorization) headers.Authorization = authorization;
-    const response = await pageWindow.fetch(url.href, {
+    const response = await fetchFromScript(url.href, {
       method: 'GET', credentials: 'include', headers
     });
     if (response.status === 429) throw new RateLimitError('归档记录');
     if (response.status === 401 || response.status === 403) {
       throw new Error(loginErrorMessage(response.status, '归档记录查询'));
     }
-    let body = null;
-    try { body = await response.json(); } catch (_) {}
+    const body = await readJsonResponse(response);
     if (!response.ok || body?.code !== 200) {
       throw new Error(body?.reason || body?.message || `归档接口请求失败（HTTP ${response.status}）`);
     }
@@ -4329,6 +4468,106 @@ roleStateReady = true;
       .filter(Boolean);
   }
 
+  function readDeletedMaskBatches(key) {
+    const rows = JSON.parse(localStorage.getItem(key) || '[]');
+    if (!Array.isArray(rows)) throw new Error('本地面具回收记录格式异常');
+    return rows.filter(row => row?.id && Array.isArray(row.library) && Array.isArray(row.bindings) && Number.isFinite(row.expiresAt));
+  }
+
+  function writeDeletedMaskBatches(key, rows) {
+    if (rows.length) localStorage.setItem(key, JSON.stringify(rows));
+    else localStorage.removeItem(key);
+  }
+
+  function cleanExpiredDeletedMasks() {
+    clearTimeout(maskDeletedCleanupTimer);
+    const now = Date.now();
+    let next = Infinity;
+    try {
+      const keys = Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i));
+      for (const key of keys) {
+        if (key !== MASK_DELETED_BATCHES_KEY && !key?.startsWith(`${MASK_DELETED_BATCHES_KEY}:account:`)) continue;
+        try {
+          const rows = readDeletedMaskBatches(key);
+          const retained = rows.filter(row => row.expiresAt > now);
+          if (retained.length !== rows.length) writeDeletedMaskBatches(key, retained);
+          for (const row of retained) next = Math.min(next, row.expiresAt);
+        } catch (_) {
+          next = Math.min(next, now + 60000);
+        }
+      }
+    } catch (_) {}
+    if (Number.isFinite(next)) {
+      maskDeletedCleanupTimer = setTimeout(() => {
+        cleanExpiredDeletedMasks();
+        if (panel) render();
+      }, Math.max(1, Math.min(MASK_DELETE_UNDO_MS, next - Date.now())));
+    }
+  }
+
+  function latestDeletedMaskBatch() {
+    try {
+      return readDeletedMaskBatches(accountStorageKey(MASK_DELETED_BATCHES_KEY))
+        .filter(row => row.expiresAt > Date.now()).at(-1) || null;
+    } catch (_) { return null; }
+  }
+
+  async function persistDeletedMaskChange(reason, deletedIds) {
+    if (maskStorageMode === 'indexedDB') {
+      queueIndexedDbMaskPersist(reason, { deletedIds });
+      return await maskStorageWriteQueue;
+    }
+    return persistMaskLibrary() && persistMaskBindings();
+  }
+
+  async function deleteLocalMaskBackups(targets) {
+    const ids = new Set(targets.map(row => String(row.libraryId)));
+    const key = accountStorageKey(MASK_DELETED_BATCHES_KEY);
+    const snapshot = maskDataSnapshot(targets, state.maskBindings.filter(row => ids.has(String(row.libraryId || ''))));
+    const now = Date.now();
+    const batch = { ...snapshot, id: makeLibraryId(), expiresAt: now + MASK_DELETE_UNDO_MS };
+    try {
+      const batches = readDeletedMaskBatches(key).filter(row => row.expiresAt > now);
+      writeDeletedMaskBatches(key, [...batches, batch]);
+    } catch (error) {
+      throw new Error(`无法保存 24 小时撤回记录，未删除面具：${explainFailure(error)}`);
+    }
+    cleanExpiredDeletedMasks();
+    state.undoLibrary = null;
+    state.undoBindings = null;
+    state.undoLabel = '';
+    state.undoSite = null;
+    state.library = state.library.filter(row => !ids.has(String(row.libraryId)));
+    state.maskBindings = state.maskBindings.filter(row => !ids.has(String(row.libraryId || '')));
+    if (!await persistDeletedMaskChange('删除本地面具备份', ids)) {
+      throw new Error('未能完整保存面具删除结果，24 小时撤回记录已保留');
+    }
+  }
+
+  async function restoreDeletedMaskBatch(batch) {
+    const key = accountStorageKey(MASK_DELETED_BATCHES_KEY);
+    const existingIds = new Set(state.library.map(row => String(row.libraryId)));
+    const library = batch.library.filter(row => !existingIds.has(String(row.libraryId)));
+    const occupiedCharacters = new Set(state.maskBindings.map(row => String(row.characterId)));
+    const restoredIds = new Set(batch.library.map(row => String(row.libraryId)));
+    const bindings = batch.bindings.filter(row => restoredIds.has(String(row.libraryId)) && !occupiedCharacters.has(String(row.characterId)));
+    state.maskDeleteRunning = true;
+    render();
+    try {
+      state.library = [...state.library, ...library];
+      state.maskBindings = [...state.maskBindings, ...bindings];
+      if (!await persistDeletedMaskChange('撤回本地面具删除')) throw new Error('恢复结果未能保存');
+      writeDeletedMaskBatches(key, readDeletedMaskBatches(key).filter(row => row.id !== batch.id));
+      cleanExpiredDeletedMasks();
+      state.status = `已撤回删除：恢复 ${library.length} 个本地面具备份、${bindings.length} 条绑定。`;
+    } catch (error) {
+      state.status = `撤回失败：${explainFailure(error)}。`;
+    } finally {
+      state.maskDeleteRunning = false;
+      render();
+    }
+  }
+
   function saveUndo(label, siteRestore = null) {
     state.undoLibrary = cloneValue(state.library);
     state.undoBindings = cloneValue(state.maskBindings);
@@ -4337,11 +4576,19 @@ roleStateReady = true;
   }
 
   async function undoLastLibraryChange() {
-    if (!state.undoLibrary) return;
+    if (!maskStorageReady || state.maskDeleteRunning || state.loading) return;
+    if (!state.undoLibrary) {
+      const batch = latestDeletedMaskBatch();
+      if (batch) await restoreDeletedMaskBatch(batch);
+      return;
+    }
     const library = state.undoLibrary;
     const bindings = state.undoBindings;
     const label = state.undoLabel;
     const siteRestore = state.undoSite;
+    const scope = maskAccountScope;
+    const generation = maskStorageGeneration;
+    const accountChanged = () => scope !== maskAccountScope || generation !== maskStorageGeneration;
     state.loading = Boolean(siteRestore);
     state.status = siteRestore ? '正在撤回上一次网站面具变更……' : '正在撤回上一次面具库变更……';
     render();
@@ -4349,6 +4596,7 @@ roleStateReady = true;
       if (siteRestore) {
         if (siteRestore.mode === 'created') await deleteMask(siteRestore.maskId);
         else await updateMask(siteRestore.maskId, siteRestore.source);
+        if (accountChanged()) return;
       }
       state.library = library;
       if (bindings) {
@@ -4362,13 +4610,12 @@ roleStateReady = true;
       persistMaskLibrary();
       if (siteRestore) {
         const refreshed = await fetchCurrentSiteMasks();
-        state.currentSiteMasks = refreshed.slice();
-        state.masks = refreshed;
-        state.siteMaskIds = state.masks.map(row => row.maskId);
+        if (accountChanged()) return;
+        updateSiteMaskState(refreshed);
       }
       state.status = `已撤回${label ? `：${label}` : '上一次本地变更'}。`;
     } catch (error) {
-      state.status = `撤回失败：${explainFailure(error)}`;
+      if (!accountChanged()) state.status = `撤回失败：${explainFailure(error)}`;
     } finally {
       state.loading = false;
       render();
@@ -4392,21 +4639,87 @@ roleStateReady = true;
     };
   }
 
-  async function requestPage(pageNum, isFollowed, pageParameter = 'pageNum') {
-    scanStoredAuthorization();
+  async function retryAuthenticatedRequest(response, url, options, label) {
+    if (response.status !== 401 && response.status !== 403) return response;
+    const headers = new pageWindow.Headers(options.headers);
+    const sentAuthorization = headers.get('Authorization') || '';
+    const scope = maskAccountScopeFromAuthorization(sentAuthorization);
+    if (response.status === 401 && scope === maskAccountScope) {
+      const replacement = sameAccountRetryAuthorization(sentAuthorization, scope);
+      if (replacement) {
+        headers.set('Authorization', replacement);
+        response = await fetchWithoutAuthCapture(url, { ...options, headers });
+        appendRunLog(response.ok ? 'info' : 'warn', `${label}备用令牌重试返回 HTTP ${response.status}。`);
+      }
+    }
+    if ((response.status === 401 || response.status === 403) && sentAuthorization) {
+      headers.delete('Authorization');
+      response = await fetchWithoutAuthCapture(url, { ...options, headers });
+    }
+    return response;
+  }
+
+  async function fetchWithCookieFallback(url, options) {
+    let response = await fetchFromScript(url, options);
+    const headers = new pageWindow.Headers(options.headers);
+    if ((response.status === 401 || response.status === 403) && headers.has('Authorization')) {
+      authorization = '';
+      headers.delete('Authorization');
+      response = await fetchFromScript(url, { ...options, headers });
+    }
+    return response;
+  }
+
+  async function readJsonResponseText(response) {
+    const raw = await response.text();
+    let body = null;
+    try { body = raw ? JSON.parse(raw) : null; } catch (_) {}
+    return { raw, body };
+  }
+
+  async function readJsonResponse(response) { try { return await response.json(); } catch (_) { return null; } }
+
+  async function postJsonResponse(url, payload, wrapNetworkError = true) {
+    const headers = { Accept: 'application/json', 'Content-Type': 'application/json' };
+    if (authorization) headers.Authorization = authorization;
+    let response;
+    try {
+      response = await fetchFromScript(url, {
+        method: 'POST',
+        credentials: 'include',
+        headers,
+        body: JSON.stringify(payload)
+      });
+    } catch (error) {
+      if (!wrapNetworkError) throw error;
+      throw new Error(`请求未发出：${error?.message || error}`);
+    }
+    const { raw, body } = await readJsonResponseText(response);
+    const detail = body?.reason || body?.message || body?.error || raw || '服务器没有返回错误说明';
+    return { response, body, detail };
+  }
+
+  function roleListPageUrl(pageNum, isFollowed, pageParameter) {
     const url = new URL('/api/characters/query_session', location.origin);
     url.searchParams.set(pageParameter, String(pageNum));
     url.searchParams.set('pageSize', '20');
     url.searchParams.set('isFollowed', String(isFollowed));
+    return url;
+  }
 
+  async function requestPage(pageNum, isFollowed, pageParameter = 'pageNum') {
+    scanStoredAuthorization();
+    const url = roleListPageUrl(pageNum, isFollowed, pageParameter);
     const headers = { Accept: 'application/json' };
     if (authorization) headers.Authorization = authorization;
-    const response = await pageWindow.fetch(url.href, {
+    const options = {
       method: 'GET',
       credentials: 'include',
       cache: 'no-store',
       headers
-    });
+    };
+    let response = await fetchFromScript(url.href, options);
+    response = await retryAuthenticatedRequest(response, url.href, options, '角色列表读取');
     if (response.status === 429) throw new RateLimitError('角色列表');
     if (response.status === 401 || response.status === 403) {
       throw new Error(loginErrorMessage(response.status, '读取角色列表'));
@@ -4557,19 +4870,22 @@ roleStateReady = true;
     return { ...row, availability: '', metadataChecked: false, metadataError: '旧版把分享状态或 HTTP 状态误作角色状态，等待重新检测', metadataErrorCode: 0 };
   }
 
-  function explicitCharacterDeleted(body, raw = '') {
+  function responseErrorContext(body, raw = '') {
     const codes = [body?.error, body?.errorCode, body?.reasonCode, body?.data?.error, body?.data?.errorCode]
       .filter(value => value != null).map(value => String(value).trim().toLowerCase());
     const text = `${codes.join(' ')} ${String(raw || '')}`.toLowerCase();
+    return { codes, text };
+  }
+
+  function explicitCharacterDeleted(body, raw = '') {
+    const { codes, text } = responseErrorContext(body, raw);
     return codes.some(code => ['character_deleted', 'character_not_found', 'role_deleted', 'role_not_found', 'character removed by creator'].includes(code))
       || /角色.{0,18}(?:已被.{0,10}删除|已删除|不存在|找不到|已下架)/.test(text)
       || /(?:character|role).{0,30}(?:removed by creator|deleted|not found|does not exist)/i.test(text);
   }
 
   function isShareLinkResponse(body, raw = '') {
-    const codes = [body?.error, body?.errorCode, body?.reasonCode, body?.data?.error, body?.data?.errorCode]
-      .filter(value => value != null).map(value => String(value).trim().toLowerCase());
-    const text = `${codes.join(' ')} ${String(raw || '')}`.toLowerCase();
+    const { codes, text } = responseErrorContext(body, raw);
     return codes.some(code => ['share_link_expired', 'share_expired', 'invalid_share_link'].includes(code))
       || /分享(?:链接|码).{0,12}(?:失效|过期|不存在)/.test(text)
       || /share.{0,16}(?:expired|invalid|not found)/i.test(text);
@@ -4581,21 +4897,11 @@ roleStateReady = true;
     const headers = { Accept: 'application/json' };
     if (authorization) headers.Authorization = authorization;
     try {
-      let response = await pageWindow.fetch(url.href, { method: 'GET', credentials: 'include', headers, signal });
+      const options = { method: 'GET', credentials: 'include', headers, signal };
       // 网页可能已经用 Cookie 刷新登录，但脚本内存里仍保留旧 Bearer。
       // 服务端会优先校验这个旧令牌并返回 401/403，因此去掉它后用当前 Cookie 重试一次。
-      if ((response.status === 401 || response.status === 403) && headers.Authorization) {
-        authorization = '';
-        response = await pageWindow.fetch(url.href, {
-          method: 'GET',
-          credentials: 'include',
-          headers: { Accept: 'application/json' },
-          signal
-        });
-      }
-      const raw = await response.text();
-      let body = null;
-      try { body = raw ? JSON.parse(raw) : null; } catch (_) {}
+      const response = await fetchWithCookieFallback(url.href, options);
+      const { raw, body } = await readJsonResponseText(response);
       const apiSucceeded = response.ok && (body?.code == null || Number(body.code) === 200);
       if (!apiSucceeded) {
         if (response.status === 429) throw new RateLimitError('角色详情');
@@ -4632,20 +4938,10 @@ roleStateReady = true;
     const headers = { Accept: 'application/json' };
     if (authorization) headers.Authorization = authorization;
     try {
-      let response = await pageWindow.fetch(url.href, { method: 'GET', credentials: 'include', headers, signal });
-      if ((response.status === 401 || response.status === 403) && headers.Authorization) {
-        authorization = '';
-        response = await pageWindow.fetch(url.href, {
-          method: 'GET',
-          credentials: 'include',
-          headers: { Accept: 'application/json' },
-          signal
-        });
-      }
+      const options = { method: 'GET', credentials: 'include', headers, signal };
+      const response = await fetchWithCookieFallback(url.href, options);
       if (response.status === 429) throw new RateLimitError('作者资料');
-      const raw = await response.text();
-      let body = null;
-      try { body = raw ? JSON.parse(raw) : null; } catch (_) {}
+      const { raw, body } = await readJsonResponseText(response);
       if (!response.ok || body?.code !== 200) {
         if (response.status !== 500 && response.status !== 503) {
           metadataFailureReasons.add(explainFailure(new Error(`作者资料返回 HTTP ${response.status}${body?.message ? `：${body.message}` : body?.reason ? `：${body.reason}` : ''}`)));
@@ -4765,14 +5061,14 @@ roleStateReady = true;
         ...(search ? { search } : {})
       })
     };
-    let response = await pageWindow.fetch(url.href, requestOptions);
+    let response = await fetchFromScript(url.href, requestOptions);
     // Mufy 页面加载后偶尔会保留或发出一枚旧 Bearer。服务器会优先拒绝
     // 这枚旧令牌，即使当前浏览器的 Cookie 登录仍然有效；去掉它重试可避免
     // 出现“页面未加载完能读取，加载完成反而显示没有登录权限”的误报。
     if ((response.status === 401 || response.status === 403) && authorization) {
       const cookieHeaders = new pageWindow.Headers(headers);
       cookieHeaders.delete('Authorization');
-      response = await pageWindow.fetch(url.href, { ...requestOptions, headers: cookieHeaders });
+      response = await fetchFromScript(url.href, { ...requestOptions, headers: cookieHeaders });
       if (response.ok) {
         authorization = '';
         appendRunLog('warn', '面具接口拒绝了页面令牌，已改用当前登录 Cookie 并读取成功。');
@@ -4975,24 +5271,7 @@ roleStateReady = true;
 
   async function updateMask(targetMaskId, source) {
     const url = new URL('/api/masks/update', location.origin);
-    const headers = { Accept: 'application/json', 'Content-Type': 'application/json' };
-    if (authorization) headers.Authorization = authorization;
-    const payload = maskUpdatePayload(targetMaskId, source);
-    let response;
-    try {
-      response = await pageWindow.fetch(url.href, {
-        method: 'POST',
-        credentials: 'include',
-        headers,
-        body: JSON.stringify(payload)
-      });
-    } catch (error) {
-      throw new Error(`请求未发出：${error?.message || error}`);
-    }
-    const raw = await response.text();
-    let body = null;
-    try { body = raw ? JSON.parse(raw) : null; } catch (_) {}
-    const detail = body?.reason || body?.message || body?.error || raw || '服务器没有返回错误说明';
+    const { response, body, detail } = await postJsonResponse(url.href, maskUpdatePayload(targetMaskId, source));
     if (!response.ok) {
       if (response.status === 401 || response.status === 403) {
         throw new Error(`HTTP ${response.status}：没有面具更新权限或登录令牌已失效。服务器：${detail}`);
@@ -5015,23 +5294,7 @@ roleStateReady = true;
 
   async function createMask(source) {
     const url = new URL('/api/masks/create', location.origin);
-    const headers = { Accept: 'application/json', 'Content-Type': 'application/json' };
-    if (authorization) headers.Authorization = authorization;
-    let response;
-    try {
-      response = await pageWindow.fetch(url.href, {
-        method: 'POST',
-        credentials: 'include',
-        headers,
-        body: JSON.stringify(maskContentPayload(source))
-      });
-    } catch (error) {
-      throw new Error(`请求未发出：${error?.message || error}`);
-    }
-    const raw = await response.text();
-    let body = null;
-    try { body = raw ? JSON.parse(raw) : null; } catch (_) {}
-    const detail = body?.reason || body?.message || body?.error || raw || '服务器没有返回错误说明';
+    const { response, body, detail } = await postJsonResponse(url.href, maskContentPayload(source));
     if (!response.ok) {
       if (response.status === 401 || response.status === 403) {
         throw new Error(`HTTP ${response.status}：没有新增面具权限或登录令牌已失效。服务器：${detail}`);
@@ -5045,20 +5308,63 @@ roleStateReady = true;
 
   async function deleteMask(maskId) {
     const url = new URL('/api/masks/delete', location.origin);
-    const headers = { Accept: 'application/json', 'Content-Type': 'application/json' };
-    if (authorization) headers.Authorization = authorization;
-    const response = await pageWindow.fetch(url.href, {
-      method: 'POST',
-      credentials: 'include',
-      headers,
-      body: JSON.stringify({ maskId: Number.isSafeInteger(Number(maskId)) ? Number(maskId) : String(maskId || '') })
-    });
-    const raw = await response.text();
-    let body = null;
-    try { body = raw ? JSON.parse(raw) : null; } catch (_) {}
-    const detail = body?.reason || body?.message || body?.error || raw || '服务器没有返回错误说明';
+    const payload = { maskId: Number.isSafeInteger(Number(maskId)) ? Number(maskId) : String(maskId || '') };
+    const { response, body, detail } = await postJsonResponse(url.href, payload, false);
     if (!response.ok || body?.code !== 200) {
       throw new Error(`删除面具失败（HTTP ${response.status}）：${detail}`);
+    }
+  }
+
+  function selectedMaskKey(row, category = state.active) {
+    return category === 'masks' ? `site:${String(row.maskId)}` : `library:${String(row.libraryId)}`;
+  }
+
+  async function deleteSelectedMasks() {
+    if (state.maskDeleteRunning || !state.selectedMaskKeys.size) return;
+    const category = state.active;
+    if (category === 'library' && !maskStorageReady) {
+      state.status = '面具库尚未准备好，暂不能删除本地备份。';
+      render();
+      return;
+    }
+    const source = category === 'masks' ? state.masks : state.library;
+    const targets = source.filter(row => state.selectedMaskKeys.has(selectedMaskKey(row, category)));
+    if (!targets.length) return;
+    const site = category === 'masks';
+    const notice = site
+      ? `将从 Mufy 网站永久删除 ${targets.length} 个面具。建议先导出备份。删除后不能用“撤回”恢复网站面具。`
+      : `将从本地面具库删除 ${targets.length} 份备份及其本地自动绑定。24 小时内可点“撤回”恢复。`;
+    if (!pageWindow.confirm(`${notice}\n\n确定继续吗？`)) return;
+    state.maskDeleteRunning = true;
+    const failed = [];
+    let deleted = 0;
+    try {
+      if (site) {
+        for (const row of targets) {
+          try {
+            await deleteMask(row.maskId);
+            state.masks = state.masks.filter(item => String(item.maskId) !== String(row.maskId));
+            state.siteMaskIds = state.siteMaskIds.filter(id => String(id) !== String(row.maskId));
+            state.selectedMaskKeys.delete(selectedMaskKey(row, category));
+            deleted += 1;
+          } catch (error) {
+            failed.push(`${row.name}：${explainFailure(error)}`);
+            if (error instanceof RateLimitError) break;
+          }
+          state.status = `正在删除网站面具：${deleted}/${targets.length} 成功`;
+          render();
+        }
+      } else {
+        await deleteLocalMaskBackups(targets);
+        targets.forEach(row => state.selectedMaskKeys.delete(selectedMaskKey(row, category)));
+        deleted = targets.length;
+      }
+      state.status = `已删除 ${deleted} 个${site ? '网站面具' : '本地面具备份'}${failed.length ? `；${failed.length} 个失败：${failed.slice(0, 3).join('；')}` : ''}。`;
+    } catch (error) {
+      state.status = explainFailure(error);
+    } finally {
+      state.maskDeleteRunning = false;
+      render();
     }
   }
 
@@ -5223,10 +5529,16 @@ roleStateReady = true;
     }
     let checks = 0;
     const timer = setInterval(() => {
+      const current = currentRoleContext();
+      if (pageWindow.location.pathname !== '/chat' || current.characterId !== context.characterId
+          || current.sessionId !== context.sessionId) {
+        clearInterval(timer);
+        return;
+      }
       checks += 1;
       const failure = exactRoleFailureOnPage();
       const textarea = findChatTextarea();
-      const ready = Boolean(textarea && !textarea.disabled && isVisibleElement(textarea));
+      const ready = Boolean(textarea && !textarea.disabled);
       if (pending) {
         if (ready && checks >= 3) {
           clearInterval(timer);
@@ -5411,28 +5723,12 @@ roleStateReady = true;
 
   async function setCharacterDefaultMask(characterId, maskId) {
     const url = new URL('/api/characters/mask', location.origin);
-    const headers = { Accept: 'application/json', 'Content-Type': 'application/json' };
-    if (authorization) headers.Authorization = authorization;
     const numericMaskId = Number(maskId);
     const payload = {
       characterId: String(characterId),
       maskId: Number.isSafeInteger(numericMaskId) ? numericMaskId : String(maskId)
     };
-    let response;
-    try {
-      response = await pageWindow.fetch(url.href, {
-        method: 'POST',
-        credentials: 'include',
-        headers,
-        body: JSON.stringify(payload)
-      });
-    } catch (error) {
-      throw new Error(`请求未发出：${error?.message || error}`);
-    }
-    const raw = await response.text();
-    let body = null;
-    try { body = raw ? JSON.parse(raw) : null; } catch (_) {}
-    const detail = body?.reason || body?.message || body?.error || raw || '服务器没有返回错误说明';
+    const { response, body, detail } = await postJsonResponse(url.href, payload);
     if (!response.ok) {
       if (response.status === 401 || response.status === 403) {
         throw new Error(`HTTP ${response.status}：没有角色面具绑定权限或登录令牌已失效。服务器：${detail}`);
@@ -5447,21 +5743,11 @@ roleStateReady = true;
   async function setSessionMask(sessionId, maskId) {
     if (!sessionId || !maskId) return;
     const url = new URL('/api/sessions/mask', location.origin);
-    const headers = { Accept: 'application/json', 'Content-Type': 'application/json' };
-    if (authorization) headers.Authorization = authorization;
-    const response = await pageWindow.fetch(url.href, {
-      method: 'POST',
-      credentials: 'include',
-      headers,
-      body: JSON.stringify({
-        sessionId: String(sessionId),
-        maskId: Number.isSafeInteger(Number(maskId)) ? Number(maskId) : String(maskId)
-      })
-    });
-    const raw = await response.text();
-    let body = null;
-    try { body = raw ? JSON.parse(raw) : null; } catch (_) {}
-    const detail = body?.reason || body?.message || body?.error || raw || '服务器没有返回错误说明';
+    const payload = {
+      sessionId: String(sessionId),
+      maskId: Number.isSafeInteger(Number(maskId)) ? Number(maskId) : String(maskId)
+    };
+    const { response, body, detail } = await postJsonResponse(url.href, payload, false);
     if (!response.ok || (body?.code != null && body.code !== 200)) {
       throw new Error(`当前会话面具切换失败（HTTP ${response.status}）：${detail}`);
     }
@@ -5524,15 +5810,7 @@ roleStateReady = true;
     const binding = localBindingForCharacter(context.characterId);
     if (!binding) return;
     const key = `${context.characterId}|${context.sessionId}|${binding.libraryId || binding.sourceMaskId || binding.savedAt}`;
-    const reloadKey = JSON.stringify([maskAccountScope, key, binding.savedAt || '']);
     if (!options.force && state.autoSwitchKey === key) return;
-    try {
-      const appliedKey = pageWindow.sessionStorage.getItem(AUTO_SWITCH_RELOAD_KEY);
-      if (!options.force && (appliedKey === reloadKey || appliedKey === key)) {
-        state.autoSwitchKey = key;
-        return;
-      }
-    } catch (_) {}
     const targetMask = resolveLocalBinding(binding);
     if (!targetMask) {
       state.status = `角色“${binding.characterName || context.characterId}”绑定的本地面具已不存在，请重新绑定。`;
@@ -5543,39 +5821,19 @@ roleStateReady = true;
     state.loading = true;
     state.status = `正在为当前角色准备绑定面具“${maskBindingLabel(targetMask)}”……`;
     render();
-    let reloadChat = false;
     try {
       const active = await ensureMaskAvailable(targetMask);
       if (!active?.maskId) throw new Error('网站没有返回可用的面具 ID');
       await setCharacterDefaultMask(context.characterId, active.maskId);
       if (context.sessionId) await setSessionMask(context.sessionId, active.maskId);
       state.autoSwitchKey = key;
-      const current = currentRoleContext();
-      const sameChat = Boolean(context.sessionId) && current.characterId === context.characterId && current.sessionId === context.sessionId;
-      const navigationType = pageWindow.performance?.getEntriesByType?.('navigation')?.[0]?.type;
-      if (sameChat) {
-        try {
-          pageWindow.sessionStorage.setItem(AUTO_SWITCH_RELOAD_KEY, reloadKey);
-          reloadChat = options.force || navigationType === 'navigate' || navigationType === 'back_forward';
-        } catch (_) {
-          // 无法留下跨刷新标记时，只同步网站面具，不主动刷新。
-        }
-      }
-      state.status = `已自动切换当前角色面具：“${maskBindingLabel(targetMask)}”${reloadChat ? '，正在同步聊天页选中状态……' : sameChat ? '。如需同步页面显示，可手动刷新。' : '。'}`;
+      state.status = `已自动切换当前角色面具：“${maskBindingLabel(targetMask)}”。`;
     } catch (error) {
       state.status = `自动切换面具失败：${explainFailure(error)}`;
     } finally {
       state.autoSwitchRunning = false;
       state.loading = false;
       render();
-    }
-    if (reloadChat) {
-      try {
-        pageWindow.location.reload();
-      } catch (_) {
-        state.status = `面具已切换为“${maskBindingLabel(targetMask)}”，请手动刷新聊天页以同步选中状态。`;
-        render();
-      }
     }
   }
 
@@ -5586,7 +5844,7 @@ roleStateReady = true;
     autoSwitchTimer = setTimeout(() => {
       autoSwitchTimer = null;
       try { syncSiteCaptureScope(); } catch (error) { console.warn('[Mufy 角色与面具找回助手] 网站角色页面切换同步失败，面板仍可继续使用。', error); }
-      try { render(); } catch (error) { console.warn('[Mufy 角色与面具找回助手] 自动面具刷新失败，面板仍可继续使用。', error); }
+      try { render(); } catch (error) { console.warn('[Mufy 角色与面具找回助手] 自动面具面板渲染失败，面板仍可继续使用。', error); }
       try { ensureAutoMaskForCurrentRole(); } catch (error) { console.warn('[Mufy 角色与面具找回助手] 自动面具切换失败，面板仍可继续使用。', error); }
       recordCurrentChatHistory();
     }, 700);
@@ -5795,9 +6053,7 @@ roleStateReady = true;
       return;
     }
     state.loading = false;
-    state.currentSiteMasks = siteMasks.slice();
-    state.masks = siteMasks;
-    state.siteMaskIds = siteMasks.map(row => row.maskId);
+    updateSiteMaskState(siteMasks);
     render();
     const emptySlots = Math.max(0, MAX_SITE_MASKS - siteMasks.length);
     if (!siteMasks.length && !emptySlots) {
@@ -5844,9 +6100,7 @@ roleStateReady = true;
       }
       persistMaskLibrary();
       const refreshed = await fetchCurrentSiteMasks();
-      state.currentSiteMasks = refreshed.slice();
-      state.masks = refreshed;
-      state.siteMaskIds = state.masks.map(row => row.maskId);
+      updateSiteMaskState(refreshed);
       state.status = existingBackup >= 0
         ? `置换完成：“${libraryItem.name}”已写入网站面具；被换出的“${target.name}”在面具库已有备份，未重复保存，原本地备份也已保留。请刷新聊天页。`
         : `置换完成：“${libraryItem.name}”已写入网站面具，“${target.name}”已保存回面具库。请刷新聊天页。`;
@@ -5858,25 +6112,28 @@ roleStateReady = true;
     }
   }
 
-  function removeLibraryMask(libraryItem) {
+  async function removeLibraryMask(libraryItem) {
+    if (!maskStorageReady || state.maskDeleteRunning) return;
     const boundCharacters = state.maskBindings
       .filter(binding => String(binding.libraryId || '') === String(libraryItem.libraryId))
       .map(binding => binding.characterName || binding.characterId);
     const bindingNotice = boundCharacters.length
       ? `\n\n它当前绑定了：${boundCharacters.join('、')}。删除后会解除这些本地自动绑定。`
       : '';
-    if (!confirm(`从本地面具库删除“${libraryItem.name}”吗？这不会删除 Mufy 服务器上的面具。${bindingNotice}`)) return;
-    saveUndo('删除面具备份');
-    state.library = state.library.filter(item => item.libraryId !== libraryItem.libraryId);
-    if (boundCharacters.length) {
-      state.maskBindings = state.maskBindings.filter(binding => String(binding.libraryId || '') !== String(libraryItem.libraryId));
-      persistMaskBindings();
-    }
-    persistMaskLibrary();
-    state.status = boundCharacters.length
-      ? `已删除“${libraryItem.name}”，并解除 ${boundCharacters.length} 个本地自动绑定。`
-      : `已从本地面具库删除“${libraryItem.name}”。`;
+    if (!confirm(`从本地面具库删除“${libraryItem.name}”吗？24 小时内可撤回。${bindingNotice}`)) return;
+    state.maskDeleteRunning = true;
     render();
+    try {
+      await deleteLocalMaskBackups([libraryItem]);
+      state.status = boundCharacters.length
+        ? `已删除“${libraryItem.name}”，并解除 ${boundCharacters.length} 个本地自动绑定。24 小时内可撤回。`
+        : `已从本地面具库删除“${libraryItem.name}”。24 小时内可撤回。`;
+    } catch (error) {
+      state.status = explainFailure(error);
+    } finally {
+      state.maskDeleteRunning = false;
+      render();
+    }
   }
 
   function maskEditorText(value) {
@@ -5887,6 +6144,10 @@ roleStateReady = true;
 
   let maskEditorSource = null;
   let maskEditorOrigin = '';
+  let maskEditorAccountScope = '';
+  let maskEditorSaving = false;
+  let maskEditorSyncedOriginal = null;
+  let maskEditorSyncedContent = null;
 
   function closeMaskEditor() {
     const editor = panel?.querySelector('#mufy-recovery-mask-editor');
@@ -5894,6 +6155,9 @@ roleStateReady = true;
     editor.hidden = true;
     maskEditorSource = null;
     maskEditorOrigin = '';
+    maskEditorAccountScope = '';
+    maskEditorSyncedOriginal = null;
+    maskEditorSyncedContent = null;
   }
 
   function openMaskEditor(mask, origin) {
@@ -5902,6 +6166,9 @@ roleStateReady = true;
     if (!editor || !mask || (isLibrary ? !mask.libraryId : !mask.maskId)) return;
     maskEditorSource = cloneValue(mask);
     maskEditorOrigin = isLibrary ? 'library' : 'site';
+    maskEditorAccountScope = maskAccountScope;
+    maskEditorSyncedOriginal = null;
+    maskEditorSyncedContent = null;
     editor.querySelector('#mufy-recovery-mask-editor-title').textContent = `${isLibrary ? '编辑本地面具' : '编辑面具'} · ${mask.name || '未命名面具'}`;
     editor.querySelector('[name="remark"]').value = maskEditorText(mask.remark);
     editor.querySelector('[name="maskName"]').value = maskEditorText(mask.maskName);
@@ -5911,8 +6178,8 @@ roleStateReady = true;
     editor.querySelector('[name="command"]').value = maskEditorText(mask.command);
     editor.querySelector('#mufy-recovery-mask-editor-hint').textContent = isLibrary
       ? '正在编辑面具库中的本地面具。“保存修改”会更新当前这份面具并保留已有角色绑定；“另存为新面具”会新增一份，原面具和原绑定不变。'
-      : '编辑的是上方选中的网站面具，但保存只写入浏览器本地面具库。另存会新增一份；替换会删除面具库中的旧副本再写入当前内容，网站原面具不受影响。';
-    editor.querySelector('#mufy-recovery-mask-editor-replace').textContent = isLibrary ? '保存修改' : '替换本地原面具';
+      : '「同步替换」会更新选中的网站面具和它在面具库中的原副本，并保留原有绑定。「另存为新面具」只在面具库新增一份。';
+    editor.querySelector('#mufy-recovery-mask-editor-replace').textContent = isLibrary ? '保存修改' : '同步替换网站和本地';
     editor.hidden = false;
     editor.querySelector('[name="remark"]').focus();
   }
@@ -5925,7 +6192,70 @@ roleStateReady = true;
     openMaskEditor(mask, 'library');
   }
 
+  async function syncMaskEditorReplacement(editor, source, edited, replacedItem) {
+    const scope = maskAccountScope;
+    const generation = maskStorageGeneration;
+    const maskId = String(source.maskId);
+    const libraryId = String(replacedItem.libraryId);
+    const accountChanged = () => scope !== maskAccountScope || generation !== maskStorageGeneration;
+    const matches = (left, right) => JSON.stringify(maskUpdatePayload(maskId, left)) === JSON.stringify(maskUpdatePayload(maskId, right));
+    const currentIndex = () => state.library.findIndex(item => String(item.libraryId) === libraryId);
+    const buttons = [...editor.querySelectorAll('#mufy-recovery-mask-editor-close, #mufy-recovery-mask-editor-save-as, #mufy-recovery-mask-editor-replace')];
+    let websiteSaved = false;
+    maskEditorSaving = true;
+    buttons.forEach(button => { button.disabled = true; });
+    try {
+      editor.querySelector('#mufy-recovery-mask-editor-hint').textContent = '正在核对网站面具和本地副本……';
+      let siteMasks = await fetchCurrentSiteMasks();
+      if (accountChanged()) return;
+      let siteMask = siteMasks.find(item => String(item.maskId) === maskId);
+      if (!siteMask) throw new Error('网站上已找不到这份面具，请重新读取面具列表');
+      if (state.library[currentIndex()] !== replacedItem) throw new Error('本地副本已变更，请重新打开编辑器');
+      if (!matches(siteMask, edited)) {
+        if (!matches(siteMask, maskEditorSyncedContent || source)) throw new Error('网站面具已变更，请重新读取后再编辑');
+        const original = maskEditorSyncedOriginal || siteMask;
+        await updateMask(maskId, edited);
+        websiteSaved = true;
+        if (accountChanged()) return;
+        maskEditorSyncedOriginal = original;
+        maskEditorSyncedContent = edited;
+        saveUndo('同步替换网站和本地面具', { maskId, source: original });
+        siteMasks = await fetchCurrentSiteMasks();
+        if (accountChanged()) return;
+        siteMask = siteMasks.find(item => String(item.maskId) === maskId);
+        if (!siteMask || !matches(siteMask, edited)) throw new Error('网站回读的内容与本次修改不一致，请稍后重试');
+      }
+      websiteSaved = true;
+      const index = currentIndex();
+      if (state.library[index] !== replacedItem) throw new Error('本地副本已变更，请重新打开编辑器');
+      if (!maskEditorSyncedOriginal) saveUndo('替换本地面具');
+      state.library.splice(index, 1, maskSnapshot(siteMask, { libraryId, name: edited.name }));
+      const queued = persistMaskLibrary();
+      const saved = queued && (maskStorageMode !== 'indexedDB' || await maskStorageWriteQueue);
+      if (accountChanged()) return;
+      updateSiteMaskState(siteMasks);
+      if (!saved) throw new Error('本地副本未能保存，请检查浏览器存储后重试');
+      closeMaskEditor();
+      state.active = 'library';
+      state.section = 'masks';
+      state.status = `已同步更新“${edited.name}”的网站面具和本地副本。`;
+      render();
+    } catch (error) {
+      if (!accountChanged()) {
+        const message = `${websiteSaved ? '网站已接受修改，本地同步尚未完成' : '同步替换未完成'}：${explainFailure(error)}`;
+        editor.querySelector('#mufy-recovery-mask-editor-hint').textContent = message;
+        state.status = message;
+        render();
+      }
+    } finally {
+      maskEditorSaving = false;
+      buttons.forEach(button => { button.disabled = false; });
+      if (accountChanged()) closeMaskEditor();
+    }
+  }
+
   function saveMaskEditor(mode) {
+    if (maskEditorSaving) return;
     const editor = panel?.querySelector('#mufy-recovery-mask-editor');
     const source = maskEditorSource;
     const isLibrarySource = maskEditorOrigin === 'library';
@@ -5935,6 +6265,10 @@ roleStateReady = true;
         ? '原本地面具已经不存在，未保存编辑内容。'
         : '原网站面具已经不存在，未保存编辑内容。';
       render();
+      return;
+    }
+    if (maskEditorAccountScope !== maskAccountScope || !maskStorageReady) {
+      editor.querySelector('#mufy-recovery-mask-editor-hint').textContent = '账号或面具库状态已变化，请重新打开编辑器。';
       return;
     }
     const value = name => String(editor.querySelector(`[name="${name}"]`)?.value || '');
@@ -5957,17 +6291,18 @@ roleStateReady = true;
       const exactSourceIndex = state.library.findIndex(item =>
         String(item.sourceMaskId || '') === sourceMaskId && sameMaskContent(item, source));
       const sourceIndex = state.library.findIndex(item => String(item.sourceMaskId || '') === sourceMaskId);
-      const contentIndex = state.library.findIndex(item => sameMaskContent(item, source));
+      const contentIndex = state.library.findIndex(item => !item.sourceMaskId && sameMaskContent(item, source));
       replaceIndex = exactSourceIndex >= 0 ? exactSourceIndex : (sourceIndex >= 0 ? sourceIndex : contentIndex);
     }
     if (replacing && replaceIndex < 0) {
       state.status = isLibrarySource
         ? '面具库中已经找不到这份原面具，无法保存修改；可以选择“另存为新面具”。'
         : '面具库中没有找到这份面具的旧副本，无法替换；请先选择“另存为新面具”。';
-      panel.querySelector('#mufy-recovery-status').textContent = state.status;
+      editor.querySelector('#mufy-recovery-mask-editor-hint').textContent = state.status;
       return;
     }
     const replacedItem = replacing ? state.library[replaceIndex] : null;
+    if (replacing && !isLibrarySource) return syncMaskEditorReplacement(editor, source, edited, replacedItem);
     const snapshot = maskSnapshot(edited, {
       libraryId: replacing ? replacedItem.libraryId : makeLibraryId(),
       name: edited.name,
@@ -5979,7 +6314,7 @@ roleStateReady = true;
       render();
       return;
     }
-    saveUndo(replacing ? (isLibrarySource ? '保存本地面具修改' : '替换本地面具') : '另存编辑后的面具');
+    saveUndo(replacing ? '保存本地面具修改' : '另存编辑后的面具');
     if (replacing) {
       // 保留 libraryId，让原本绑定到这份本地面具的角色继续跟随编辑后的版本。
       state.library.splice(replaceIndex, 1, snapshot);
@@ -5991,9 +6326,7 @@ roleStateReady = true;
     state.active = 'library';
     state.section = 'masks';
     state.status = replacing
-      ? (isLibrarySource
-        ? `已保存“${snapshot.name}”的修改；原有角色绑定继续有效。`
-        : `已删除面具库中的旧副本，并存入编辑后的“${snapshot.name}”；网站原面具未修改。`)
+      ? `已保存“${snapshot.name}”的修改；原有角色绑定继续有效。`
       : (isLibrarySource
         ? `已将编辑后的“${snapshot.name}”另存为新面具；原面具和原有角色绑定未修改。`
         : `已将编辑后的“${snapshot.name}”另存到面具库；网站原面具未修改。`);
@@ -6045,6 +6378,15 @@ roleStateReady = true;
       .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
   }
 
+  async function finishPausedRoleRead(resuming, includeFavorites) {
+    state.rolePaused = true;
+    applyRoleFetchResults(state.rolePendingRecent, state.rolePendingFavorites, state.roleReadMode === 'full' && !resuming);
+    saveRoleCache();
+    const historySaved = await queueRoleHistoryPersist(state.rolePendingRecent);
+    const count = state.rolePendingRecent.length + (includeFavorites ? state.rolePendingFavorites.length : 0);
+    state.status = `已暂停角色链接读取，当前已读 ${count} ${includeFavorites ? '条记录' : '条会话记录'}。${historySaved ? '已保存到本账号历史索引。' : '历史索引未保存，请查看运行日志。'}点击“继续读取”可接着读取。`;
+  }
+
   async function recoverRoles() {
     if (state.roleLoading || state.metadataLoading || state.loading) return;
     scanStoredAuthorization();
@@ -6071,11 +6413,7 @@ roleStateReady = true;
         for (const row of result.rows) state.lastRoleReadIds.add(String(row.characterId));
         state.roleProgress.recentPage = result.nextPage;
         if (result.paused) {
-          state.rolePaused = true;
-          applyRoleFetchResults(state.rolePendingRecent, state.rolePendingFavorites, state.roleReadMode === 'full' && !resuming);
-          saveRoleCache();
-          const historySaved = await queueRoleHistoryPersist(state.rolePendingRecent);
-          state.status = `已暂停角色链接读取，当前已读 ${state.rolePendingRecent.length} 条会话记录。${historySaved ? '已保存到本账号历史索引。' : '历史索引未保存，请查看运行日志。'}点击“继续读取”可接着读取。`;
+          await finishPausedRoleRead(resuming, false);
           return;
         }
         state.roleProgress.phase = 'favorites';
@@ -6086,11 +6424,7 @@ roleStateReady = true;
         for (const row of result.rows) state.lastRoleReadIds.add(String(row.characterId));
         state.roleProgress.favoritePage = result.nextPage;
         if (result.paused) {
-          state.rolePaused = true;
-          applyRoleFetchResults(state.rolePendingRecent, state.rolePendingFavorites, state.roleReadMode === 'full' && !resuming);
-          saveRoleCache();
-          const historySaved = await queueRoleHistoryPersist(state.rolePendingRecent);
-          state.status = `已暂停角色链接读取，当前已读 ${state.rolePendingRecent.length + state.rolePendingFavorites.length} 条记录。${historySaved ? '已保存到本账号历史索引。' : '历史索引未保存，请查看运行日志。'}点击“继续读取”可接着读取。`;
+          await finishPausedRoleRead(resuming, true);
           return;
         }
       }
@@ -6132,6 +6466,15 @@ roleStateReady = true;
       else found.set(row.characterId, mergeRole(found.get(row.characterId), row));
     });
     return [...found.values()];
+  }
+
+  function updateCachedRoleRows(rows) {
+    const byId = new Map(rows.map(row => [row.characterId, row]));
+    const replace = row => byId.get(row.characterId) || row;
+    state.chatted = state.chatted.map(replace);
+    state.chattedNotFavorite = state.chattedNotFavorite.map(replace);
+    state.favoriteOnly = state.favoriteOnly.map(replace);
+    saveRoleCache();
   }
 
   function scopeRoleRows(rows) {
@@ -6186,6 +6529,14 @@ roleStateReady = true;
     render();
   }
 
+  function finishMetadataTask() {
+    state.metadataAbortControllers.clear();
+    state.metadataLoading = false;
+    state.metadataTask = null;
+    state.metadataStopRequested = false;
+    render();
+  }
+
   async function refreshCachedRoleMetadata() {
     if (state.loading || state.roleLoading || state.metadataLoading) return;
     const cachedRows = pendingMetadataRows();
@@ -6199,12 +6550,7 @@ roleStateReady = true;
     try {
       const result = await enrichRoles(cachedRows);
       const enriched = result.rows;
-      const byId = new Map(enriched.map(row => [row.characterId, row]));
-      const replace = row => byId.get(row.characterId) || row;
-      state.chatted = state.chatted.map(replace);
-      state.chattedNotFavorite = state.chattedNotFavorite.map(replace);
-      state.favoriteOnly = state.favoriteOnly.map(replace);
-      saveRoleCache();
+      updateCachedRoleRows(enriched);
       const remaining = pendingMetadataRows().length;
       if (result.stopped) {
         state.status = `已停止作者和状态更新：已保存已经完成的结果，剩余 ${remaining} 个角色没有继续请求。再次点击“更新状态”可继续。`;
@@ -6222,11 +6568,7 @@ roleStateReady = true;
       const remaining = pendingMetadataRows().length;
       state.status = `作者信息更新失败：${explainFailure(error)}仍有 ${remaining} 个角色待更新，可点击“更新状态”继续。`;
     } finally {
-      state.metadataAbortControllers.clear();
-      state.metadataLoading = false;
-      state.metadataTask = null;
-      state.metadataStopRequested = false;
-      render();
+      finishMetadataTask();
     }
   }
 
@@ -6278,12 +6620,7 @@ roleStateReady = true;
       }
 
       const refreshed = [...enriched.values()];
-      const byId = new Map(refreshed.map(row => [row.characterId, row]));
-      const replace = row => byId.get(row.characterId) || row;
-      state.chatted = state.chatted.map(replace);
-      state.chattedNotFavorite = state.chattedNotFavorite.map(replace);
-      state.favoriteOnly = state.favoriteOnly.map(replace);
-      saveRoleCache();
+      updateCachedRoleRows(refreshed);
       const counts = roleStatusCounts(refreshed);
       const reason = [...metadataFailureReasons].slice(0, 2).join('；');
       const stopped = queueResult.stopped || authorResult.stopped;
@@ -6296,11 +6633,7 @@ roleStateReady = true;
     } catch (error) {
       state.status = `作者和角色状态重新查询失败：${explainFailure(error)}`;
     } finally {
-      state.metadataAbortControllers.clear();
-      state.metadataLoading = false;
-      state.metadataTask = null;
-      state.metadataStopRequested = false;
-      render();
+      finishMetadataTask();
     }
   }
 
@@ -6309,9 +6642,7 @@ roleStateReady = true;
     const headers = { Accept: 'application/json', 'Content-Type': 'application/json' };
     if (authorization) headers.Authorization = authorization;
     const response = await favoriteFetch(url.href, { method: 'POST', credentials: 'include', headers, body: JSON.stringify({ characterId: String(characterId), isFavorite }) }, isFavorite ? '收藏请求' : '取消收藏请求');
-    const raw = await response.text();
-    let body = null;
-    try { body = raw ? JSON.parse(raw) : null; } catch (_) {}
+    const { raw, body } = await readJsonResponseText(response);
     if (response.status === 429) throw new RateLimitError('收藏请求');
     if (response.status === 401 || response.status === 403) throw new Error(loginErrorMessage(response.status, '收藏操作'));
     if (!response.ok || (body?.code != null && body.code !== 200)) throw new Error(body?.message || body?.reason || raw || `HTTP ${response.status}`);
@@ -6409,28 +6740,15 @@ roleStateReady = true;
     return visible.length === 1 ? visible[0].element : null;
   }
 
-  async function tryWebsiteFavoriteClick(characterId, isFavorite, row = {}) {
-    const control = findWebsiteFavoriteControl(characterId, row);
-    if (!control) return false;
-    const before = nativeFavoriteState(control);
-    if (before === Boolean(isFavorite)) return true;
-    if (before === null) throw new Error(`无法确认“${row?.name || characterId}”当前是否已收藏，已跳过以避免反向切换`);
-    try {
-      control.click();
-    } catch (error) {
-      throw new Error(`点击“${row?.name || characterId}”的收藏按钮失败：${String(error?.message || error)}`);
-    }
-    for (let attempt = 0; attempt < 12; attempt += 1) {
-      await wait(250);
-      const latestControl = findWebsiteFavoriteControl(characterId, row) || control;
-      const current = nativeFavoriteState(latestControl);
-      if (current === Boolean(isFavorite)) return true;
-      if (current === before && attempt < 11) continue;
-    }
-    throw new Error(`“${row?.name || characterId}”的收藏按钮点击后没有变成目标状态，未写入本地成功记录`);
-  }
+  async function ensureFavoriteFromCharacterDetail(characterId, row = {}) {
+    const scope = maskAccountScope;
+    const assertAccount = () => {
+      if (scope !== maskAccountScope) throw new Error('确认收藏期间切换了 Mufy 账号');
+    };
+    const detail = await requestCharacterDetail(String(characterId));
+    assertAccount();
+    if (detail?.favoriteKnown === true && detail.isFavorite) return true;
 
-  async function clickWebsiteFavoriteFromKnownUnfavorite(characterId, row = {}) {
     let control = null;
     // 分享链接刚打开时页面组件可能还没有挂载，短暂等待原生收藏按钮出现。
     for (let attempt = 0; attempt < 20; attempt += 1) {
@@ -6438,35 +6756,25 @@ roleStateReady = true;
       if (control) break;
       await wait(250);
     }
-    if (!control) throw new Error(`没有找到“${row?.name || characterId}”对应的网页收藏按钮`);
-
-    try {
+    assertAccount();
+    if (!control || nativeFavoriteState(control) !== false) {
+      await requestFavorite(characterId, true);
+    } else {
       control.click();
-    } catch (error) {
-      throw new Error(`点击“${row?.name || characterId}”的收藏按钮失败：${String(error?.message || error)}`);
     }
 
-    // 进入队列前已经根据可靠列表状态或单角色详情确认未收藏；
-    // 这里直接交给网站原生点击流程，不再为每个角色重复请求详情。
-    await wait(750);
-    return true;
-  }
-
-  async function ensureFavoriteFromCharacterDetail(characterId, row = {}) {
-    // 作者作品列表的 isFollowed 目前不可靠；单角色详情才是服务器当前收藏状态。
-    // 分享链接打开后网站有时已经自动恢复收藏，此时无需再切换一次按钮。
-    const detail = await requestCharacterDetail(String(characterId));
-    if (detail?.favoriteKnown === true) {
-      if (detail.isFavorite) return true;
-      return clickWebsiteFavoriteFromKnownUnfavorite(characterId, row);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await wait(attempt === 0 ? 750 : 1000);
+      assertAccount();
+      const confirmed = await requestCharacterDetail(String(characterId));
+      assertAccount();
+      if (confirmed?.favoriteKnown === true && confirmed.isFavorite) return true;
     }
-    // 接口没有返回收藏字段或临时失败时，才退回页面按钮的状态识别。
-    const nativeHandled = await tryWebsiteFavoriteClick(characterId, true, row);
-    if (!nativeHandled) throw new Error(`角色详情和当前页面都无法确认“${row?.name || characterId}”的收藏状态`);
-    return true;
+    throw new Error(`角色详情接口尚未确认“${row?.name || characterId}”已收藏`);
   }
-  async function requestShareCode(characterId) {
+  async function requestShareCode(characterId, confirmMissing = false) {
     scanStoredAuthorization();
+    const scope = maskAccountScope;
     const url = new URL('/api/characters/share_code', location.origin);
     url.searchParams.set('id', String(characterId));
     const headers = { Accept: 'application/json' };
@@ -6481,16 +6789,26 @@ roleStateReady = true;
         headers: { Accept: 'application/json' }
       }, '分享链接查询（Cookie 重试）');
     }
-    const raw = await response.text();
-    let body = null;
-    try { body = raw ? JSON.parse(raw) : null; } catch (_) {}
+    const { raw, body } = await readJsonResponseText(response);
     if (response.status === 429) throw new RateLimitError('分享链接查询');
+    if (confirmMissing && response.status === 404) {
+      const detail = await requestCharacterDetail(String(characterId));
+      if (detail?.favoriteKnown === true && detail.isFavorite) return null;
+      throw new Error('分享链接查询返回 HTTP 404，且角色详情未能确认仍在收藏');
+    }
+    if (confirmMissing && (response.status === 401 || response.status === 403)) {
+      throw new Error(loginErrorMessage(response.status, '分享链接查询'));
+    }
     if (response.status === 401 || response.status === 403) return null;
     if (response.status === 404) return null;
     if (!response.ok) throw new Error(body?.message || body?.reason || raw || `HTTP ${response.status}`);
-    if (body?.code != null && body.code !== 200) return null;
+    if (confirmMissing && (!body || body.success === false || (body.code != null && Number(body.code) !== 200))) {
+      throw new Error(body?.message || body?.reason || '网站未确认分享链接查询成功');
+    }
+    if (body?.code != null && Number(body.code) !== 200) return null;
     const code = String(body?.data?.shareCode || '').trim();
     if (!code) return null;
+    if (scope !== maskAccountScope) throw new Error('查询分享链接期间切换了 Mufy 账号');
     shareCodeCache.set(String(characterId), code);
     saveShareCodeCache();
     return code;
@@ -6504,6 +6822,44 @@ roleStateReady = true;
 
   function favoriteShareRecoveryRemaining(task) {
     return Math.max(0, (task?.rows?.length || 0) - Number(task?.index || 0));
+  }
+
+  function loadFavoriteShareRecoveryFailures() {
+    if (!maskAccountScope) return [];
+    try {
+      const rows = JSON.parse(localStorage.getItem(accountStorageKey(FAVORITE_SHARE_RECOVERY_FAILURES_KEY)) || '[]');
+      return Array.isArray(rows) ? rows.filter(row => row?.characterId) : [];
+    } catch (_) { return []; }
+  }
+
+  function cancelFailedFavoriteShareRecovery(task, row, error) {
+    const characterId = String(row.characterId);
+    const name = row.name || characterId;
+    const shareCode = String(task.shareCode || shareCodeCache.get(characterId) || '');
+    const reason = explainFailure(error);
+    const record = { characterId, name, shareCode, reason, time: new Date().toISOString() };
+    let saved = false;
+    task.paused = true;
+    task.pauseRequested = false;
+    task.cancelRequested = false;
+    task.pauseReason = '重新收藏失败';
+    try {
+      if (maskAccountScope && (!task.accountScope || task.accountScope === maskAccountScope)) {
+        const records = loadFavoriteShareRecoveryFailures().filter(item => item.characterId !== characterId);
+        localStorage.setItem(accountStorageKey(FAVORITE_SHARE_RECOVERY_FAILURES_KEY), JSON.stringify([record, ...records]));
+        saved = true;
+      }
+    } catch (_) {}
+    const cancelled = saved && clearFavoriteShareRecoveryJob();
+    if (!cancelled && (!task.accountScope || task.accountScope === maskAccountScope)) saveFavoriteShareRecoveryJob(task);
+    const link = shareCode ? shareUrlFromCode(shareCode) : roleUrl(characterId);
+    appendRunLog('error', `收藏恢复需要核对：${name}`, `${reason}\n${link}`);
+    state.status = cancelled
+      ? `“${name}”的收藏未能确认，检测任务已自动取消。请在日志顶部打开该角色的链接并核对收藏。`
+      : `“${name}”的收藏未能确认，浏览器未能完整保存恢复状态，已停止检测。请保存此链接：${link}`;
+    render();
+    if (saved) openRunLogModal();
+    else pageWindow.alert(state.status);
   }
 
   function pauseFavoriteShareRecoveryTask(task, reason = '用户中断') {
@@ -6547,6 +6903,7 @@ roleStateReady = true;
   async function processFavoriteShareRecoveryJob(automatic = false) {
     let task = loadFavoriteShareRecoveryJob();
     if (!task || !Array.isArray(task.rows) || state.shareRecoveryLoading || task.paused) return;
+    task.accountScope ||= maskAccountScope;
     state.shareRecoveryLoading = true;
     let navigating = false;
     let automaticWait = Boolean(automatic);
@@ -6571,13 +6928,7 @@ roleStateReady = true;
             await ensureFavoriteFromCharacterDetail(row.characterId, row);
             applyRecoveredFavoriteState(row);
           } catch (error) {
-            task.paused = true;
-            task.pauseRequested = false;
-            task.pauseReason = '重新收藏失败';
-            saveFavoriteShareRecoveryJob(task);
-            appendRunLog('error', `分享链接重新收藏失败：${row.name || row.characterId}`, error);
-            state.status = `“${row.name || '未命名角色'}”重新收藏失败，任务已暂停：${explainFailure(error)}请点击继续重试，恢复任务不会丢失。`;
-            pageWindow.alert(state.status);
+            cancelFailedFavoriteShareRecovery(task, row, error);
             return;
           }
           appendRunLog('info', `分享链接重新收藏成功：${row.name || row.characterId}`, {
@@ -6599,6 +6950,7 @@ roleStateReady = true;
 
         if (stopFavoriteShareRecoveryAtSafePoint(task)) return;
         if (shareCodeCache.has(String(row.characterId))) {
+          saveShareCodeRoleName(row);
           task.cachedSkipped = Number(task.cachedSkipped || 0) + 1;
           task.index += 1;
           task.phase = 'checking';
@@ -6610,8 +6962,9 @@ roleStateReady = true;
         render();
         let shareCode = '';
         try {
-          shareCode = shareCodeCache.get(String(row.characterId)) || await requestShareCode(row.characterId) || '';
+          shareCode = await requestShareCode(row.characterId, true) || '';
         } catch (error) {
+          if (task.accountScope !== maskAccountScope) return;
           if (error instanceof RateLimitError) {
             pauseFavoriteShareRecoveryTask(task, '网站限流');
             state.status += ' 检测到 HTTP 429，请稍后再继续。';
@@ -6625,8 +6978,12 @@ roleStateReady = true;
           saveFavoriteShareRecoveryJob(task);
           continue;
         }
-        if (stopFavoriteShareRecoveryAtSafePoint(task)) return;
+        if (task.accountScope !== maskAccountScope || stopFavoriteShareRecoveryAtSafePoint(task)) return;
         if (!shareCode) {
+          if (loadManualAutoChatJob()) throw new Error('检测到一键扣数任务，已暂停加入普通待聊');
+          const added = enqueueManualFavoriteChats([row]);
+          if (added == null) throw new Error('无法保存普通待聊列表');
+          task.queuedForChat = Number(task.queuedForChat || 0) + added;
           task.skipped = Number(task.skipped || 0) + 1;
           task.index += 1;
           task.phase = 'checking';
@@ -6635,6 +6992,7 @@ roleStateReady = true;
           continue;
         }
 
+        saveShareCodeRoleName(row);
         task.shareCode = shareCode;
         task.shareUrl = shareUrlFromCode(shareCode);
         task.phase = 'link-ready';
@@ -6651,8 +7009,8 @@ roleStateReady = true;
           applyFavoriteState(row.characterId, false);
           state.status = `正在打开“${row.name || '未命名角色'}”的分享链接，打开后会自动重新收藏……`;
           render();
-          navigating = true;
           pageWindow.location.assign(task.shareUrl);
+          navigating = true;
           return;
         } catch (error) {
           if (unfavorited) {
@@ -6668,32 +7026,29 @@ roleStateReady = true;
               saveFavoriteShareRecoveryJob(task);
             } catch (restoreError) {
               task.phase = 'unfavorited';
-              task.paused = true;
-              saveFavoriteShareRecoveryJob(task);
-              appendRunLog('error', `打开分享链接失败且恢复收藏失败：${row.name || row.characterId}`, restoreError);
-              state.status = `“${row.name || '未命名角色'}”恢复收藏失败，任务已保留：${explainFailure(restoreError)}`;
-              pageWindow.alert(state.status);
+              cancelFailedFavoriteShareRecovery(task, row, restoreError);
               return;
             }
           } else {
-            task.failures = [...(task.failures || []), `${row.name || row.characterId}：${explainFailure(error)}`];
-            task.index += 1;
-            task.phase = 'checking';
-            task.shareCode = '';
-            task.shareUrl = '';
-            saveFavoriteShareRecoveryJob(task);
+            cancelFailedFavoriteShareRecovery(task, row, error);
+            return;
           }
           appendRunLog('error', `分享链接转换失败：${row.name || row.characterId}`, error);
         }
       }
 
-      const summary = `链接收藏检测完成：本次待处理 ${task.rows.length} 个，成功转为分享链接收藏 ${Number(task.converted || 0)} 个，本地已有记录跳过 ${Number(task.cachedSkipped || 0) + Number(task.cachedAtStart || 0)} 个，无可用链接 ${Number(task.skipped || 0)} 个，失败 ${(task.failures || []).length} 个。`;
+      const summary = `链接收藏检测完成：本次待处理 ${task.rows.length} 个，成功转为分享链接收藏 ${Number(task.converted || 0)} 个，本地已有记录跳过 ${Number(task.cachedSkipped || 0) + Number(task.cachedAtStart || 0)} 个，无可用链接 ${Number(task.skipped || 0)} 个（新加入普通待聊 ${Number(task.queuedForChat || 0)} 个），失败 ${(task.failures || []).length} 个。`;
       clearFavoriteShareRecoveryJob();
       state.status = summary;
       appendRunLog('info', summary, { failures: task.failures || [] });
       pageWindow.alert(summary);
     } catch (error) {
       task = loadFavoriteShareRecoveryJob() || task;
+      const row = task?.rows?.[task.index];
+      if (row?.characterId && ['link-ready', 'unfavorited'].includes(task.phase)) {
+        cancelFailedFavoriteShareRecovery(task, row, error);
+        return;
+      }
       if (task) {
         task.paused = true;
         task.pauseRequested = false;
@@ -6715,6 +7070,11 @@ roleStateReady = true;
 
   async function startFavoriteShareRecoveryJob() {
     if (state.shareRecoveryLoading || state.favoriteRunning) return;
+    if (loadManualAutoChatJob()) {
+      state.status = '请先结束当前一键扣数任务，再检测收藏未聊。';
+      render();
+      return;
+    }
     scanStoredAuthorization();
     if (!maskAccountScope) {
       state.status = '暂时无法识别当前账号，未开始检测。请先打开任意角色聊天页，等待页面加载完成后重试。';
@@ -6749,11 +7109,12 @@ roleStateReady = true;
     }
     const confirmed = pageWindow.confirm(
       `检测 ${rows.length} 个尚无本地分享链接记录的“收藏未聊”角色吗？${cachedAtStart ? `\n本账号已有记录的 ${cachedAtStart} 个会直接跳过。` : ''}\n\n` +
-      '脚本会严格一次处理一个：先取得并保存分享链接，再取消原收藏，从分享链接打开后重新收藏。没有分享链接的角色会保持原收藏不变。任务可以中断。'
+      '有分享链接的角色会先保存链接，再取消原收藏并重新收藏。确认没有分享链接的角色会保留原收藏并加入普通待聊。如果收藏未能恢复，任务会自动取消，角色链接会保存在运行日志顶部。'
     );
     if (!confirmed) return;
     const task = {
       version: 2,
+      accountScope: maskAccountScope,
       rows,
       index: 0,
       phase: 'checking',
@@ -6763,6 +7124,7 @@ roleStateReady = true;
       pauseRequested: false,
       cancelRequested: false,
       converted: 0,
+      queuedForChat: 0,
       cachedAtStart,
       cachedSkipped: 0,
       skipped: 0,
@@ -6811,9 +7173,8 @@ roleStateReady = true;
         await ensureFavoriteFromCharacterDetail(row.characterId, row);
         applyRecoveredFavoriteState(row);
       } catch (error) {
-        state.status = `恢复当前角色收藏失败，任务没有清除：${explainFailure(error)}`;
         state.shareRecoveryLoading = false;
-        render();
+        cancelFailedFavoriteShareRecovery(task, row, error);
         return;
       }
       state.shareRecoveryLoading = false;
@@ -6893,32 +7254,34 @@ roleStateReady = true;
     // 遇到鉴权拒绝时去掉旧令牌重试一次，避免把“登录状态正常”误判成收藏夹失败。
     if ((response.status === 401 || response.status === 403) && authorization) {
       const cookieHeaders = new Headers(options.headers || {});
+      cookieHeaders.delete('Authorization');
       response = await favoriteFetch(url, { ...options, headers: cookieHeaders, credentials: 'include' }, '收藏夹请求（Cookie 重试）');
     }
     return response;
   }
 
-  async function requestFavoriteFolders() {
-    scanStoredAuthorization();
+  function validateFavoriteApiResponse(response, body, raw, label, requireSuccess = false) {
+    if (response.status === 429) throw new RateLimitError(label);
+    if (response.status === 401 || response.status === 403) throw new Error(loginErrorMessage(response.status, label));
+    if (!response.ok || (body?.code != null && Number(body.code) !== 200) || (requireSuccess && body?.data?.success === false)) {
+      throw new Error(body?.message || body?.reason || raw || `HTTP ${response.status}`);
+    }
+  }
+
+  async function requestFavoriteFolders(expectedScope) {
     const folders = [];
     const pageSize = 20;
     const seenPageSignatures = new Set();
     for (let page = 1; page <= 500; page += 1) {
+      if (expectedScope != null && expectedScope !== maskAccountScope) throw new Error('读取收藏夹期间切换了 Mufy 账号');
       // /api/favorites/ 是读取某个收藏夹内容的接口，需要 ID；列表接口使用 /api/favorites/list.
       const url = new URL('/api/favorites/list', location.origin);
       url.searchParams.set('pageNum', String(page));
       url.searchParams.set('pageSize', String(pageSize));
       const headers = { Accept: 'application/json' };
-      if (authorization) headers.Authorization = authorization;
       const response = await fetchFavoriteApi(url.href, { method: 'GET', headers });
-      const raw = await response.text();
-      let body = null;
-      try { body = raw ? JSON.parse(raw) : null; } catch (_) {}
-      if (response.status === 429) throw new RateLimitError('收藏夹列表查询');
-      if (response.status === 401 || response.status === 403) throw new Error(loginErrorMessage(response.status, '收藏夹列表查询'));
-      if (!response.ok || (body?.code != null && Number(body.code) !== 200)) {
-        throw new Error(body?.message || body?.reason || raw || `HTTP ${response.status}`);
-      }
+      const { raw, body } = await readJsonResponseText(response);
+      validateFavoriteApiResponse(response, body, raw, '收藏夹列表查询');
       const data = body?.data || {};
       const rows = favoriteFolderRows(body);
       const signature = rows.map(folder => `${String(folder?.id || '')}:${String(folder?.name || '')}`).join('|');
@@ -6941,20 +7304,14 @@ roleStateReady = true;
   async function createFavoriteFolder(name) {
     const url = new URL('/api/favorites/', location.origin);
     const headers = { Accept: 'application/json', 'Content-Type': 'application/json' };
-    if (authorization) headers.Authorization = authorization;
     const response = await fetchFavoriteApi(url.href, {
       method: 'POST',
       headers,
       body: JSON.stringify({ name: String(name) })
     });
-    const raw = await response.text();
-    let body = null;
-    try { body = raw ? JSON.parse(raw) : null; } catch (_) {}
-    if (response.status === 429) throw new RateLimitError('创建收藏夹');
-    if (response.status === 401 || response.status === 403) throw new Error(loginErrorMessage(response.status, '创建收藏夹'));
-    if (!response.ok || (body?.code != null && Number(body.code) !== 200)) {
-      throw new Error(body?.message || body?.reason || raw || `HTTP ${response.status}`);
-    }
+    const { raw, body } = await readJsonResponseText(response);
+    validateFavoriteApiResponse(response, body, raw, '创建收藏夹');
+    resetInlineFavoriteFolderSearch();
     const folder = body?.data;
     if (!folder?.id) throw new Error('创建收藏夹成功，但返回结果没有收藏夹 ID。');
     return folder;
@@ -6965,20 +7322,13 @@ roleStateReady = true;
     if (!folderId || !ids.length) return;
     const url = new URL('/api/favorites/characters', location.origin);
     const headers = { Accept: 'application/json', 'Content-Type': 'application/json' };
-    if (authorization) headers.Authorization = authorization;
     const response = await fetchFavoriteApi(url.href, {
       method: 'PUT',
       headers,
       body: JSON.stringify({ folderId: Number(folderId) || folderId, addCharacterIds: ids })
     });
-    const raw = await response.text();
-    let body = null;
-    try { body = raw ? JSON.parse(raw) : null; } catch (_) {}
-    if (response.status === 429) throw new RateLimitError('加入收藏夹');
-    if (response.status === 401 || response.status === 403) throw new Error(loginErrorMessage(response.status, '加入收藏夹'));
-    if (!response.ok || (body?.code != null && Number(body.code) !== 200) || body?.data?.success === false) {
-      throw new Error(body?.message || body?.reason || raw || `HTTP ${response.status}`);
-    }
+    const { raw, body } = await readJsonResponseText(response);
+    validateFavoriteApiResponse(response, body, raw, '加入收藏夹', true);
   }
 
   function favoriteFolderCharacterLists(body) {
@@ -6997,48 +7347,32 @@ roleStateReady = true;
   }
 
   async function requestFavoriteFolder(folderId) {
-    scanStoredAuthorization();
     const url = new URL('/api/favorites/', location.origin);
     url.searchParams.set('id', String(folderId));
     const headers = { Accept: 'application/json' };
-    if (authorization) headers.Authorization = authorization;
     const response = await fetchFavoriteApi(url.href, { method: 'GET', headers });
-    const raw = await response.text();
-    let body = null;
-    try { body = raw ? JSON.parse(raw) : null; } catch (_) {}
-    if (response.status === 429) throw new RateLimitError('读取收藏夹内容');
-    if (response.status === 401 || response.status === 403) throw new Error(loginErrorMessage(response.status, '读取收藏夹内容'));
-    if (!response.ok || (body?.code != null && Number(body.code) !== 200)) {
-      throw new Error(body?.message || body?.reason || raw || `HTTP ${response.status}`);
-    }
+    const { raw, body } = await readJsonResponseText(response);
+    validateFavoriteApiResponse(response, body, raw, '读取收藏夹内容');
     return body;
   }
 
   async function deleteFavoriteFolder(folderId) {
-    scanStoredAuthorization();
     const headers = { Accept: 'application/json', 'Content-Type': 'application/json' };
-    if (authorization) headers.Authorization = authorization;
     const url = new URL('/api/favorites/', location.origin);
     let response = await fetchFavoriteApi(url.href, {
       method: 'DELETE', headers, body: JSON.stringify({ id: Number(folderId) || folderId })
     });
-    let raw = await response.text();
-    let body = null;
-    try { body = raw ? JSON.parse(raw) : null; } catch (_) {}
+    let { raw, body } = await readJsonResponseText(response);
     const succeeded = response.ok && (body?.code == null || Number(body.code) === 200) && body?.data?.success !== false;
     if (!succeeded && (response.status === 400 || response.status === 404 || response.status === 405)) {
       // 兼容把 ID 放在查询参数中的接口版本；仅在第一次请求明确失败时重试。
       const queryUrl = new URL('/api/favorites/', location.origin);
       queryUrl.searchParams.set('id', String(folderId));
       response = await fetchFavoriteApi(queryUrl.href, { method: 'DELETE', headers: { Accept: 'application/json' } });
-      raw = await response.text();
-      try { body = raw ? JSON.parse(raw) : null; } catch (_) { body = null; }
+      ({ raw, body } = await readJsonResponseText(response));
     }
-    if (response.status === 429) throw new RateLimitError('删除收藏夹');
-    if (response.status === 401 || response.status === 403) throw new Error(loginErrorMessage(response.status, '删除收藏夹'));
-    if (!response.ok || (body?.code != null && Number(body.code) !== 200) || body?.data?.success === false) {
-      throw new Error(body?.message || body?.reason || raw || `HTTP ${response.status}`);
-    }
+    validateFavoriteApiResponse(response, body, raw, '删除收藏夹', true);
+    resetInlineFavoriteFolderSearch();
   }
 
   function favoriteFolderId(folder) {
@@ -7047,6 +7381,309 @@ roleStateReady = true;
 
   function favoriteFolderName(folder) {
     return String(folder?.name || folder?.folderName || `收藏夹 ${favoriteFolderId(folder) || '未知'}`);
+  }
+
+  function resetInlineFavoriteFolderSearch(clearInput = false) {
+    state.favoriteFolderSearchRows = null;
+    state.favoriteFolderSearchRequest = null;
+    state.favoriteFolderSearchDetails.clear();
+    const input = panel?.querySelector('#mufy-recovery-folder-search-query');
+    if (input && clearInput) input.value = '';
+    renderInlineFavoriteFolderSearch();
+  }
+
+  function renderFavoriteFolderRoles(container, detail) {
+    if (!detail || detail.loading || detail.error || !detail.rows.length) {
+      container.textContent = detail?.error || (detail?.loading ? '正在读取角色……' : detail ? '收藏夹里没有角色' : '');
+      return;
+    }
+    container.innerHTML = detail.rows.map((row, index) => {
+      const href = esc(roleUrl(row.characterId));
+      return `<div class="mufy-recovery-row">
+        ${row.avatarUrl ? `<img src="${esc(row.avatarUrl)}" loading="lazy" alt="">` : ''}
+        <div class="mufy-recovery-info">
+          <div class="mufy-recovery-row-title"><b>${index + 1}. ${esc(row.name)}</b></div>
+          <div class="mufy-recovery-muted">作者：${esc(authorLabel(row))} ${visibilityBadge(row)}</div>
+          <div class="mufy-recovery-row-actions"><a href="${href}">打开角色</a></div>
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  function nativeFavoriteFolderUrl(folder, siteLinks) {
+    const id = favoriteFolderId(folder);
+    for (const value of [folder?.url, folder?.href, folder?.link, folder?.folderUrl, ...siteLinks]) {
+      if (typeof value !== 'string' || !value) continue;
+      try {
+        const url = new URL(value, location.origin);
+        if (url.origin !== location.origin || !/^\/favorites(?:\/|$)/.test(url.pathname)) continue;
+        if (url.pathname === '/favorites/' + encodeURIComponent(id)
+            || ['folderId', 'favoriteId', 'id'].some(key => url.searchParams.get(key) === id)) return url.href;
+      } catch (_) {}
+    }
+    return '';
+  }
+
+  const FAVORITE_FOLDER_JUMP_KEY = 'mufy-native-favorite-folder-jump-v1';
+
+  function openFavoriteFolderOnWebsite(folder) {
+    scanStoredAuthorization();
+    if (!maskAccountScope) {
+      showRecoveryNotice('请先登录 Mufy，再打开收藏夹。', 'warn');
+      return;
+    }
+    const id = favoriteFolderId(folder);
+    const sameName = state.favoriteFolderSearchRows.filter(row => favoriteFolderName(row) === favoriteFolderName(folder));
+    try {
+      sessionStorage.setItem(FAVORITE_FOLDER_JUMP_KEY, JSON.stringify({
+        id, name: favoriteFolderName(folder), scope: maskAccountScope,
+        matchByName: sameName.every(row => favoriteFolderId(row) === id),
+        expiresAt: Date.now() + 90000
+      }));
+    } catch (_) {
+      showRecoveryNotice('浏览器未能保存跳转目标，请手动打开网站收藏夹。', 'warn');
+      return;
+    }
+    if (location.pathname.replace(/\/$/, '') === '/favorites') resumeFavoriteFolderJump();
+    else pageWindow.location.assign(new URL('/favorites', location.origin).href);
+  }
+
+  function findNativeFavoriteFolderControl(target) {
+    const eligible = element => !element.closest('#mufy-recovery-panel')
+      && !element.matches(':disabled, [aria-disabled="true"]') && isVisibleElement(element);
+    const controls = [...document.querySelectorAll('button, a[href], [role="button"], [data-folder-id], [data-favorite-id]')]
+      .filter(eligible);
+    const ids = controls.filter(element => element.getAttribute('data-folder-id') === target.id
+      || element.getAttribute('data-favorite-id') === target.id);
+    const byId = ids.filter(element => !ids.some(other => other !== element && other.contains(element)));
+    if (byId.length) return byId.length === 1 ? byId[0] : null;
+    if (!target.matchByName) return null;
+    const tidy = value => String(value || '').trim().replace(/\s+/g, ' ');
+    const name = tidy(target.name);
+    const byName = controls.filter(element => [element.textContent, element.getAttribute('title'), element.getAttribute('aria-label')]
+      .some(value => tidy(value) === name));
+    const unique = byName.filter(element => !byName.some(other => other !== element && element.contains(other)));
+    if (unique.length) return unique.length === 1 ? unique[0] : null;
+
+    // 卡片可以用 div 绑定点击，标题也可能与角色数量分开显示。
+    const root = document.querySelector('main') || document.body;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const cards = new Set();
+    while (walker.nextNode()) {
+      const label = walker.currentNode.parentElement;
+      if (!label || tidy(walker.currentNode.nodeValue) !== name || !eligible(label)) continue;
+      for (let element = label, depth = 0; element && element !== root && depth < 5; element = element.parentElement, depth += 1) {
+        if (!eligible(element)) break;
+        const pointerRoot = pageWindow.getComputedStyle(element).cursor === 'pointer'
+          && (!element.parentElement || pageWindow.getComputedStyle(element.parentElement).cursor !== 'pointer');
+        if (element.matches('button, [role="button"], a[href], [onclick], [tabindex="0"], .cursor-pointer') || pointerRoot) {
+          cards.add(element);
+          break;
+        }
+      }
+    }
+    return cards.size === 1 ? cards.values().next().value : null;
+  }
+
+  function findNativeFavoriteFoldersTab() {
+    const candidates = [...document.querySelectorAll('[role="tab"], button, a, [role="button"], [tabindex="0"], .cursor-pointer')]
+      .filter(element => !element.closest('#mufy-recovery-panel')
+        && !element.matches(':disabled, [aria-disabled="true"]')
+        && element.textContent.trim() === '收藏夹' && isVisibleElement(element));
+    const tabs = candidates.filter(element => element.matches('[role="tab"]'));
+    const controls = tabs.length ? tabs : candidates.filter(element =>
+      !candidates.some(other => other !== element && other.contains(element)));
+    return controls.length === 1 ? controls[0] : null;
+  }
+
+  function findFavoriteFoldersScroller(tab) {
+    const root = tab.closest('main, [role="main"]') || document.querySelector('main, [role="main"]') || document.body;
+    const canScroll = element => element.clientHeight >= 100 && element.scrollHeight > element.clientHeight + 2
+      && /^(auto|scroll|overlay)$/.test(pageWindow.getComputedStyle(element).overflowY);
+    for (let element = tab.parentElement; element; element = element.parentElement) {
+      if (canScroll(element)) return element;
+    }
+    let best = null;
+    let bestArea = 0;
+    for (const element of root.querySelectorAll('div, section, ul, [role="tabpanel"]')) {
+      if (element.closest('#mufy-recovery-panel') || !isVisibleElement(element) || !canScroll(element)) continue;
+      const area = element.clientWidth * element.clientHeight;
+      if (area > bestArea) {
+        best = element;
+        bestArea = area;
+      }
+    }
+    return best || document.scrollingElement;
+  }
+
+  async function resumeFavoriteFolderJump() {
+    if (location.pathname.replace(/\/$/, '') !== '/favorites') return;
+    let target;
+    try {
+      target = JSON.parse(sessionStorage.getItem(FAVORITE_FOLDER_JUMP_KEY) || 'null');
+      if (!target) return;
+      sessionStorage.removeItem(FAVORITE_FOLDER_JUMP_KEY);
+    } catch (_) { return; }
+    let tab = null;
+    let nextScrollAt = 0;
+    let scrollArea = null;
+    let lastHeight = 0;
+    let bottomSince = null;
+    while (Date.now() < target.expiresAt && location.pathname.replace(/\/$/, '') === '/favorites') {
+      scanStoredAuthorization();
+      if (maskAccountScope && maskAccountScope !== target.scope) break;
+      const control = maskAccountScope === target.scope ? findNativeFavoriteFolderControl(target) : null;
+      if (control) {
+        if (panel) panel.style.display = 'none';
+        control.scrollIntoView?.({ block: 'nearest' });
+        control.click();
+        return;
+      }
+      const now = Date.now();
+      if (!tab && maskAccountScope === target.scope) {
+        tab = findNativeFavoriteFoldersTab();
+        if (tab) {
+          if (panel) panel.style.display = 'none';
+          if (tab.getAttribute('aria-selected') !== 'true') {
+            tab.click();
+          }
+          nextScrollAt = now + 1200;
+        }
+      } else if (tab && maskAccountScope === target.scope && now >= nextScrollAt) {
+        if (!scrollArea || !scrollArea.isConnected || bottomSince !== null) {
+          const activeTab = findNativeFavoriteFoldersTab() || tab;
+          const nextArea = findFavoriteFoldersScroller(activeTab);
+          if (nextArea !== scrollArea) {
+            scrollArea = nextArea;
+            bottomSince = null;
+            lastHeight = 0;
+          }
+        }
+        if (scrollArea) {
+          const { scrollTop, scrollHeight, clientHeight } = scrollArea;
+          if (scrollHeight !== lastHeight) bottomSince = null;
+          lastHeight = scrollHeight;
+          const bottom = Math.max(0, scrollHeight - clientHeight);
+          if (scrollTop < bottom - 2) {
+            bottomSince = null;
+            scrollArea.scrollTo({ top: bottom, behavior: 'instant' });
+          } else {
+            bottomSince ??= now;
+            if (now - bottomSince >= 7000) break;
+          }
+        }
+        nextScrollAt = now + 600;
+      }
+      await wait(300);
+    }
+    if (location.pathname.replace(/\/$/, '') === '/favorites') {
+      showRecoveryNotice('自动查找未找到唯一的收藏夹，请在网站收藏页手动打开。', 'warn', 7000);
+    }
+  }
+
+  async function expandFavoriteFolder(details) {
+    const id = details.dataset.favoriteFolderPreview;
+    if (!details.open || !id) return;
+    const cache = state.favoriteFolderSearchDetails;
+    const existing = cache.get(id);
+    if (existing && !existing.error) return;
+    const scope = maskAccountScope;
+    const entry = { loading: true, rows: [] };
+    cache.set(id, entry);
+    const update = () => {
+      if (scope !== maskAccountScope || cache.get(id) !== entry) return;
+      const output = panel?.querySelector('#mufy-recovery-folder-search-results');
+      for (const row of output?.querySelectorAll('details[data-favorite-folder-preview]') || []) {
+        if (row.dataset.favoriteFolderPreview === id) renderFavoriteFolderRoles(row.querySelector('.mufy-recovery-folder-roles'), entry);
+      }
+    };
+    update();
+    try {
+      const body = await requestFavoriteFolder(id);
+      const list = favoriteFolderCharacterLists(body)[0];
+      if (!list) throw new Error('网站未返回角色列表');
+      const unique = new Map();
+      for (const item of list) {
+        const characterId = item?.characterId || item?.characterID || item?.roleId
+          || item?.character?.characterId || item?.character?.id || item?.id;
+        if (!characterId) continue;
+        const row = normalize({ ...item, characterId });
+        unique.set(row.characterId, row);
+      }
+      entry.rows = [...unique.values()];
+    } catch (error) {
+      entry.error = `读取收藏夹失败：${explainFailure(error)}。收起后再展开可重试。`;
+    } finally {
+      entry.loading = false;
+      update();
+    }
+  }
+
+  function renderInlineFavoriteFolderSearch(error = '') {
+    const form = panel?.querySelector('#mufy-recovery-folder-search');
+    if (!form) return;
+    const query = form.querySelector('input').value.trim().toLowerCase();
+    const output = panel.querySelector('#mufy-recovery-folder-search-results');
+    const roles = panel.querySelector('#mufy-recovery-list');
+    const searching = Boolean(state.favoriteFolderSearchRequest);
+    form.querySelector('button').disabled = !query || searching;
+    const showResults = Boolean(query && (searching || state.favoriteFolderSearchRows || error));
+    output.hidden = state.section !== 'favorites' || !showResults;
+    if (state.section === 'favorites') roles.hidden = showResults;
+    if (output.hidden) {
+      if (!showResults) output.replaceChildren();
+      return;
+    }
+    if (searching || error) {
+      output.textContent = error || '正在读取收藏夹……';
+      return;
+    }
+    const rows = state.favoriteFolderSearchRows.filter(folder => favoriteFolderName(folder).toLowerCase().includes(query)
+      || favoriteFolderId(folder).toLowerCase().includes(query));
+    const openIds = new Set([...output.querySelectorAll('details[open]')].map(row => row.dataset.favoriteFolderPreview));
+    const siteLinks = [...document.querySelectorAll('a[href*="/favorites"]')]
+      .filter(link => !link.closest('#mufy-recovery-panel')).map(link => link.href);
+    output.innerHTML = rows.length ? rows.map(folder => {
+      const count = favoriteFolderCount(folder);
+      const id = favoriteFolderId(folder);
+      const nativeUrl = nativeFavoriteFolderUrl(folder, siteLinks);
+      const jump = nativeUrl
+        ? `<a class="mufy-recovery-author-favorite mufy-recovery-folder-open" href="${esc(nativeUrl)}">打开收藏夹</a>`
+        : `<button type="button" class="mufy-recovery-author-favorite mufy-recovery-folder-open" data-favorite-folder-jump="${esc(id)}">打开收藏夹</button>`;
+      return `<div class="mufy-recovery-author mufy-recovery-folder-search-item">
+        <details data-favorite-folder-preview="${esc(id)}" ${openIds.has(id) ? 'open' : ''}>
+          <summary class="mufy-recovery-author-toggle"><span class="mufy-folder-expand">展开</span><span class="mufy-folder-collapse">收起</span> ${esc(favoriteFolderName(folder))}${count == null ? '' : `（${count} 个角色）`}</summary>
+          <div class="mufy-recovery-author-works mufy-recovery-folder-roles"></div>
+        </details>
+        ${jump}
+      </div>`;
+    }).join('') : '没有匹配的收藏夹';
+    for (const row of output.querySelectorAll('details[open]')) {
+      renderFavoriteFolderRoles(row.querySelector('.mufy-recovery-folder-roles'), state.favoriteFolderSearchDetails.get(row.dataset.favoriteFolderPreview));
+    }
+  }
+
+  async function searchFavoriteFoldersInline() {
+    const input = panel?.querySelector('#mufy-recovery-folder-search-query');
+    if (!input?.value.trim() || state.favoriteFolderSearchRequest) return;
+    const query = input.value;
+    scanStoredAuthorization();
+    input.value = query;
+    const request = { scope: maskAccountScope };
+    state.favoriteFolderSearchRequest = request;
+    renderInlineFavoriteFolderSearch();
+    let error = '';
+    try {
+      const rows = await requestFavoriteFolders(request.scope);
+      if (state.favoriteFolderSearchRequest === request && request.scope === maskAccountScope) state.favoriteFolderSearchRows = rows;
+    } catch (failure) {
+      error = `读取收藏夹失败：${explainFailure(failure)}`;
+    } finally {
+      if (state.favoriteFolderSearchRequest === request) {
+        state.favoriteFolderSearchRequest = null;
+        renderInlineFavoriteFolderSearch(error);
+      }
+    }
   }
 
   function favoriteFolderCount(folder) {
@@ -7311,20 +7948,13 @@ roleStateReady = true;
     return authorId ? `id:${authorId}` : (name ? `name:${name}` : `unknown:${String(row?.characterId || '')}`);
   }
 
-  function authorFolderMigrationDone() {
-    try { return loadAndMigrateScopedValue(AUTHOR_FOLDER_MIGRATION_KEY) === '1'; } catch (_) { return false; }
-  }
+  function authorFolderMigrationDone() { return loadScopedFlag(AUTHOR_FOLDER_MIGRATION_KEY); }
 
   function markAuthorFolderMigrationDone() {
-    try { localStorage.setItem(accountStorageKey(AUTHOR_FOLDER_MIGRATION_KEY), '1'); } catch (_) {}
+    saveScopedFlag(AUTHOR_FOLDER_MIGRATION_KEY, true);
   }
 
-  function loadAutoAddFavoriteFolderSetting() {
-    try {
-      const saved = loadAndMigrateScopedValue(AUTO_ADD_FAVORITE_FOLDER_KEY);
-      return saved == null ? true : saved === '1';
-    } catch (_) { return true; }
-  }
+  function loadAutoAddFavoriteFolderSetting() { return loadScopedFlag(AUTO_ADD_FAVORITE_FOLDER_KEY, true); }
 
   function setAutoAddFavoriteFolderSetting(enabled) {
     state.autoAddFavoriteFolder = Boolean(enabled);
@@ -7752,6 +8382,18 @@ roleStateReady = true;
     render();
   }
 
+  async function cancelFailedShareFavoriteJob(job, row, error) {
+    const name = row?.name || row?.characterId || '当前角色';
+    const reason = explainFailure(error);
+    const cleared = await clearShareFavoriteJob();
+    clearFavoritePendingState(job);
+    appendRunLog('error', `收藏失败：${name}`, row?.characterId ? `${reason}\n${roleUrl(row.characterId)}` : error);
+    state.status = cleared
+      ? `“${name}”收藏失败，本次任务已自动取消。此前已成功收藏的角色仍保留。${reason}`
+      : `“${name}”收藏失败，任务已停止。浏览器未能删除收藏队列：${reason}`;
+    render();
+  }
+
   async function finishShareFavoriteJob(job) {
     const normalIds = new Set((job.normalFallback || []).map(item => String(item.characterId)));
     const favoritedIds = new Set((job.favoritedIds || []).map(String));
@@ -7820,9 +8462,7 @@ roleStateReady = true;
         await wait(2500);
         if (applyFavoriteInterruption(job)) return;
         try {
-          // 趋势榜等可靠列表已直接给出收藏状态；作者页角色则在入队前逐个查过详情。
-          // 因此到达角色页后直接执行网站原生收藏，不再重复请求每个角色详情。
-          await clickWebsiteFavoriteFromKnownUnfavorite(activeRow.characterId, activeRow);
+          await ensureFavoriteFromCharacterDetail(activeRow.characterId, activeRow);
           if (applyFavoriteInterruption(job)) return;
           applyFavoriteState(activeRow.characterId, true);
           state.status = `已通过分享链接页面收藏“${activeRow.name}”（${job.index + 1}/${job.rows.length}）……`;
@@ -7839,18 +8479,8 @@ roleStateReady = true;
         } catch (error) {
             if (applyFavoriteInterruption(job)) return;
             if (error instanceof FavoriteStorageError) throw error;
-            if (error instanceof RateLimitError) {
-              await pauseShareFavoriteJob(job, error);
-              return;
-            }
-            state.favoritePendingIds.delete(String(activeRow.characterId));
-            appendRunLog('error', `${openedByShareLink ? '分享链接' : '普通'}收藏失败：${activeRow.name || activeRow.characterId}`, error);
-            job.failures.push(`${activeRow.name}：${explainFailure(error)}`);
-            job.index += 1;
-            job.activeCharacterId = '';
-            job.activeShareCode = '';
-            job.navigationStartedAt = 0;
-            await persistFavoriteCheckpoint(job);
+            await cancelFailedShareFavoriteJob(job, activeRow, error);
+            return;
         }
       }
 
@@ -7881,14 +8511,15 @@ roleStateReady = true;
           job.shareLookupFailures.push(`${row.name}：${explainFailure(error)}`);
         }
         if (shareCode) {
+          saveShareCodeRoleName(row);
           job.activeCharacterId = String(row.characterId);
           job.activeShareCode = shareCode;
           job.navigationStartedAt = Date.now();
           await persistFavoriteCheckpoint(job);
-          navigating = true;
           state.status = `正在打开“${row.name}”的角色分享链接，打开成功后会自动完成收藏……`;
           render();
           pageWindow.location.assign(shareUrlFromCode(shareCode));
+          navigating = true;
           return;
         }
         if (!(job.normalFallback || []).some(item => String(item?.characterId || '') === String(row.characterId))) {
@@ -7916,18 +8547,8 @@ roleStateReady = true;
           await wait(250);
         } catch (error) {
           if (error instanceof FavoriteStorageError) throw error;
-          if (error instanceof RateLimitError) {
-            await pauseShareFavoriteJob(job, error);
-            return;
-          }
-          state.favoritePendingIds.delete(String(row.characterId));
-          appendRunLog('error', `普通收藏失败：${row.name || row.characterId}`, error);
-          job.failures.push(`${row.name}：${explainFailure(error)}`);
-          job.index += 1;
-          job.activeCharacterId = '';
-          job.activeShareCode = '';
-          job.navigationStartedAt = 0;
-          await persistFavoriteCheckpoint(job);
+          await cancelFailedShareFavoriteJob(job, row, error);
+          return;
         }
       }
       if (applyFavoriteInterruption(job)) return;
@@ -7942,20 +8563,7 @@ roleStateReady = true;
       } else if (error instanceof RateLimitError) {
         await pauseShareFavoriteJob(job, error);
       } else {
-        const failedRow = job.rows[job.index];
-        if (failedRow?.characterId) state.favoritePendingIds.delete(String(failedRow.characterId));
-        appendRunLog('error', '收藏任务异常中断', error);
-        job.failures.push(`${failedRow?.name || '当前角色'}：${explainFailure(error)}`);
-        job.index = Math.min(job.rows.length, job.index + 1);
-        job.activeCharacterId = '';
-        job.activeShareCode = '';
-        job.navigationStartedAt = 0;
-        const preserved = await saveShareFavoriteJob(job);
-        if (!preserved) clearFavoritePendingState(job);
-        state.status = preserved
-          ? `收藏过程中出现问题：${explainFailure(error)}已保留队列，重新点击收藏可继续。`
-          : `收藏过程中出现问题且队列无法保存：${explainFailure(error)}任务已停止，请查看运行日志。`;
-        render();
+        await cancelFailedShareFavoriteJob(job, job.rows[job.index], error);
       }
     } finally {
       if (state.favoriteInterruptMode) applyFavoriteInterruption(job);
@@ -8083,10 +8691,8 @@ roleStateReady = true;
       url.searchParams.set('pageSize', '20');
       const headers = { Accept: 'application/json' };
       if (authorization) headers.Authorization = authorization;
-      const response = await pageWindow.fetch(url.href, { method: 'GET', credentials: 'include', headers });
-      const raw = await response.text();
-      let body = null;
-      try { body = raw ? JSON.parse(raw) : null; } catch (_) {}
+      const response = await fetchFromScript(url.href, { method: 'GET', credentials: 'include', headers });
+      const { raw, body } = await readJsonResponseText(response);
       if (response.status === 429) throw new RateLimitError('作者作品列表');
       if (response.status === 401 || response.status === 403) throw new Error(loginErrorMessage(response.status, '读取作者全部作品'));
       if (!response.ok || body?.code != null && body.code !== 200) {
@@ -8368,9 +8974,19 @@ roleStateReady = true;
     render();
   }
 
-  function clearSiteSelection() {
-    state.selectedSiteCharacterIds.clear();
-    state.status = '已清空网站角色勾选。';
+  function allSiteRowsSelected() {
+    return state.siteSearchRows.length > 0
+      && state.siteSearchRows.every(row => state.selectedSiteCharacterIds.has(String(row.characterId)));
+  }
+
+  function toggleAllSiteRows() {
+    if (allSiteRowsSelected()) {
+      state.selectedSiteCharacterIds.clear();
+      state.status = '已取消全选。';
+    } else {
+      state.selectedSiteCharacterIds = new Set(state.siteSearchRows.map(row => String(row.characterId)));
+      state.status = `已选中 ${state.selectedSiteCharacterIds.size} 个网站角色。`;
+    }
     render();
   }
 
@@ -8398,11 +9014,21 @@ roleStateReady = true;
     const output = panel?.querySelector('#mufy-recovery-log-output');
     if (!output) return;
     const rows = loadRunLogs();
-    if (!rows.length) {
+    const recoveryFailures = loadFavoriteShareRecoveryFailures();
+    if (!rows.length && !recoveryFailures.length) {
       output.innerHTML = '<div class="mufy-recovery-log-empty">暂无运行日志</div>';
       return;
     }
-    output.innerHTML = rows.map(row => {
+    const recoveryLinks = recoveryFailures.map(row => {
+      const directLink = roleUrl(row.characterId);
+      const shareLink = row.shareCode ? shareUrlFromCode(row.shareCode) : '';
+      return `<article class="mufy-recovery-log-entry is-error">
+        <div class="mufy-recovery-log-message">待核对收藏：${esc(row.name || row.characterId)}</div>
+        <div class="mufy-recovery-log-summary">${esc(row.reason || '')}</div>
+        ${shareLink ? `<a href="${esc(shareLink)}" target="_blank" rel="noopener">打开分享链接</a> · ` : ''}<a href="${esc(directLink)}" target="_blank" rel="noopener">打开角色链接</a>
+      </article>`;
+    }).join('');
+    output.innerHTML = recoveryLinks + rows.map(row => {
       const level = ['error', 'warn', 'info'].includes(String(row.level || '').toLowerCase())
         ? String(row.level).toLowerCase()
         : 'info';
@@ -8475,12 +9101,36 @@ roleStateReady = true;
       render();
       return;
     }
-    const rows = selectedSiteRows().filter(row => row.favoriteKnown === true && row.isFavorite);
-    const added = enqueueManualFavoriteChats(rows);
+    const rows = selectedSiteRows();
+    if (!rows.length) return;
+    const added = enqueueManualFavoriteChats(rows, false);
     state.status = added == null ? '普通待聊保存失败，请检查浏览器存储后重试。'
-      : added ? `已将 ${added} 个已收藏角色加入普通待聊。`
-      : '选中的已收藏角色已在待聊列表里。';
+      : added ? `已将 ${added} 个角色加入普通待聊。`
+      : '选中的角色已在待聊列表里。';
     if (added) state.active = 'manualFavoriteChats';
+    render();
+  }
+
+  function queueSelectedOldFavoritesForChat() {
+    if (!state.oldFavoritesManaging || !maskAccountScope || loadManualAutoChatJob() || state.shareRecoveryLoading) return;
+    const selected = state.selectedFavoriteOnlyForChat;
+    const rows = state.favoriteOnly.filter(row => selected.has(String(row.characterId))
+      && row.favoriteKnown === true && row.isFavorite && !realChatSessionId(row.lastSessionId));
+    if (!rows.length) {
+      state.status = '请勾选仍在「收藏未聊」里的角色。';
+      render();
+      return;
+    }
+    const added = enqueueManualFavoriteChats(rows);
+    if (added == null) {
+      state.status = '普通待聊保存失败，请检查浏览器存储后重试。';
+    } else {
+      selected.clear();
+      state.oldFavoritesManaging = false;
+      state.section = 'favorites';
+      state.active = 'manualFavoriteChats';
+      state.status = added ? `已将 ${added} 个旧收藏加入普通待聊。` : '选中的角色已在普通待聊里。';
+    }
     render();
   }
 
@@ -8624,26 +9274,22 @@ roleStateReady = true;
     return fallback;
   }
 
-  async function requestDialogPage(context, pageNum, pageSize, signal) {
+  async function requestDialogPage(context, pageNum, pageSize, signal, token = authorization) {
     const url = new URL('/api/dialogs/query', location.origin);
     url.searchParams.set('sessionId', context.sessionId);
     url.searchParams.set('pageNum', String(pageNum));
     url.searchParams.set('pageSize', String(pageSize));
     url.searchParams.set('characterId', context.characterId);
     const headers = { Accept: 'application/json' };
-    if (authorization) headers.Authorization = authorization;
+    if (token) headers.Authorization = token;
     const options = { method: 'GET', credentials: 'include', cache: 'no-store', headers, signal };
     let response;
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      response = await pageWindow.fetch(url.href, options);
+      response = await fetchWithoutAuthCapture(url.href, options);
       if (response.status !== 429 && response.status < 500) break;
       if (attempt < 2) await wait(1200 * (attempt + 1));
     }
-    if ((response.status === 401 || response.status === 403) && authorization) {
-      const cookieHeaders = new pageWindow.Headers(headers);
-      cookieHeaders.delete('Authorization');
-      response = await pageWindow.fetch(url.href, { ...options, headers: cookieHeaders });
-    }
+    response = await retryAuthenticatedRequest(response, url.href, options, '聊天记录读取');
     if (response.status === 401 || response.status === 403) throw new Error(loginErrorMessage(response.status, '聊天记录读取'));
     if (!response.ok) throw new Error(`聊天记录接口失败（HTTP ${response.status}）`);
     const body = await response.json();
@@ -9803,6 +10449,9 @@ roleStateReady = true;
     const manualDoneButton = state.active === 'manualFavoriteChats' ? `<button data-action="manual-chat-done" data-character-id="${esc(row.characterId)}">已完成</button>` : '';
     const roleActions = `${manualDoneButton}<button data-action="bind-role-mask" data-index="${index}" data-character-id="${esc(row.characterId)}">${hasLocalBinding ? '更换自动面具' : '绑定自动面具'}</button>${hasLocalBinding ? `<button data-action="unbind-role-mask" data-index="${index}" data-character-id="${esc(row.characterId)}">取消自动绑定</button>` : ''}`;
     const favoritePending = state.favoritePendingIds.has(String(row.characterId));
+    const queueSelection = state.oldFavoritesManaging && state.section === 'roles' && state.active === 'favoriteOnly' && row.favoriteKnown === true && row.isFavorite
+      ? `<input type="checkbox" data-queue-old-favorite="${esc(row.characterId)}" aria-label="选择${esc(row.name || '角色')}加入待聊" ${state.selectedFavoriteOnlyForChat.has(String(row.characterId)) ? 'checked' : ''}> `
+      : '';
     const favoriteUnknown = row.favoriteKnown !== true;
     const favoriteAction = favoritePending ? 'favorite-pending' : favoriteUnknown ? 'favorite-unknown' : (row.isFavorite ? 'unfavorite-role' : 'favorite-role');
     const favoriteTitle = favoritePending ? '收藏处理中…' : favoriteUnknown ? '当前页面没有返回收藏状态，请刷新后重试' : (row.isFavorite ? '取消收藏' : '收藏角色');
@@ -9831,7 +10480,7 @@ roleStateReady = true;
     return `<div class="mufy-recovery-row">
       ${row.avatarUrl ? `<img src="${esc(row.avatarUrl)}" alt="">` : ''}
       <div class="mufy-recovery-info">
-        <div class="mufy-recovery-row-title"><b>${index + 1}. ${esc(row.name)}</b>${rowTools}</div>
+        <div class="mufy-recovery-row-title">${queueSelection}<b>${index + 1}. ${esc(row.name)}</b>${rowTools}</div>
         <div class="mufy-recovery-muted">作者：${esc(authorLabel(row))} ${visibilityBadge(row)}</div>
         ${state.section === 'roles'
           ? `<details class="mufy-role-record"><summary>记录详情</summary><div>${esc(row.characterId)}</div></details>`
@@ -9863,13 +10512,7 @@ roleStateReady = true;
     const id = String(row.characterId || '');
     const managing = canSelectSiteRoles();
     const selected = managing && state.selectedSiteCharacterIds.has(id);
-    const selectable = row.favoriteKnown === true || row.favoriteNeedsDetail;
-    const selectTitle = row.favoriteNeedsDetail
-      ? '勾选后会先请求角色详情，确认未收藏再执行'
-      : row.favoriteKnown === true
-        ? '勾选后可批量收藏'
-        : '当前页面没有返回收藏状态，不能安全批量操作';
-    const selectBox = `<label class="mufy-recovery-site-select" title="${selectTitle}"><input type="checkbox" aria-label="选中 ${esc(row.name || '角色')}" data-action="toggle-site-select" data-character-id="${esc(id)}" ${selected ? 'checked' : ''} ${selectable ? '' : 'disabled'}><span>选中</span></label>`;
+    const selectBox = `<label class="mufy-recovery-site-select"><input type="checkbox" aria-label="选中 ${esc(row.name || '角色')}" data-action="toggle-site-select" data-character-id="${esc(id)}" ${selected ? 'checked' : ''}><span>选中</span></label>`;
     let card = roleCard(row, index).replace(
       '<div class="mufy-recovery-row">',
       `<div class="mufy-recovery-row mufy-recovery-site-role-row ${selected ? 'selected' : ''}" data-character-id="${esc(id)}">`
@@ -9901,6 +10544,27 @@ roleStateReady = true;
   let quoteAvatarQueue = Promise.resolve();
   let quoteAvatarRetryAt = 0;
 
+  function normalizedQuoteText(value) {
+    return String(value || '').replace(/\u200b/g, '').replace(/\n{3,}/g, '\n\n').trim();
+  }
+
+  function isQuoteStatusLine(value) {
+    return /^(?:偷看剧本中|思考中|正在思考|正在生成|thinking|reasoning)[.…·\s]*$/i.test(String(value || '').trim());
+  }
+
+  function quoteTextFromContainer(container) {
+    if (!container) return '';
+    const markdownTexts = [...container.querySelectorAll?.('.react-markdown') || []]
+      .filter(isVisibleElement)
+      .map(node => normalizedQuoteText(node.innerText || node.textContent))
+      .filter(text => text && !isQuoteStatusLine(text));
+    if (markdownTexts.length) return markdownTexts.sort((a, b) => b.length - a.length)[0];
+    const lines = normalizedQuoteText(container.innerText || container.textContent).split('\n')
+      .map(line => line.trim())
+      .filter(line => line && !isQuoteStatusLine(line) && !/^(?:复制|摘录)$/.test(line));
+    return normalizedQuoteText(lines.join('\n'));
+  }
+
   function messageContainerFromAction(actionBox) {
     let node = actionBox;
     for (let depth = 0; node && depth < 9; depth += 1, node = node.parentElement) {
@@ -9915,9 +10579,7 @@ roleStateReady = true;
     if (!selection || !selection.rangeCount || !text) return;
     const common = selection.getRangeAt(0).commonAncestorContainer;
     const element = common.nodeType === 1 ? common : common.parentElement;
-    const markdown = element?.closest?.('.react-markdown');
-    if (!markdown) return;
-    let container = markdown;
+    let container = element;
     for (let depth = 0; container && depth < 9; depth += 1, container = container.parentElement) {
       if (container.querySelector?.('[id="mufy_message_actions_box"]')) {
         lastQuoteSelection = { text, container, savedAt: Date.now() };
@@ -9970,8 +10632,7 @@ roleStateReady = true;
   function openQuoteEditor(container) {
     if (!container || !panel) return;
     rememberQuoteSelection();
-    const markdown = container.querySelector('.react-markdown');
-    const fullText = String(markdown?.innerText || markdown?.textContent || '').replace(/\n{3,}/g, '\n\n').trim();
+    const fullText = quoteTextFromContainer(container);
     const selected = lastQuoteSelection && lastQuoteSelection.container === container && Date.now() - lastQuoteSelection.savedAt < 120000
       ? lastQuoteSelection.text : '';
     const character = currentQuoteCharacter();
@@ -10458,7 +11119,7 @@ roleStateReady = true;
       scanStoredAuthorization();
       const headers = { Accept: 'application/json' };
       if (authorization) headers.Authorization = authorization;
-      const response = await pageWindow.fetch(new URL('/api/models/tree', location.origin).href, { method: 'GET', credentials: 'include', headers });
+      const response = await fetchFromScript(new URL('/api/models/tree', location.origin).href, { method: 'GET', credentials: 'include', headers });
       if (response.status === 401 || response.status === 403) throw new Error(loginErrorMessage(response.status, '读取模型状态'));
       if (!response.ok) throw new Error(`读取模型状态失败（HTTP ${response.status}）`);
       const body = await response.json();
@@ -10511,9 +11172,11 @@ roleStateReady = true;
       if (button) button.disabled = state.favoriteRunning || state.shareRecoveryLoading || state.siteFavoriteStateLoading || !state.siteSearchRows.length;
     });
     const queueForChat = panel.querySelector('#mufy-recovery-queue-site-for-chat');
+    const toggleAll = panel.querySelector('#mufy-recovery-clear-site-selection');
+    if (toggleAll) toggleAll.textContent = allSiteRowsSelected() ? '取消全选' : '全选';
     if (queueForChat) {
       queueForChat.disabled = state.favoriteRunning || state.siteFavoriteStateLoading
-        || !selectedSiteRows().some(row => row.favoriteKnown === true && row.isFavorite);
+        || !selectedSiteRows().length;
     }
     const refreshFavoriteStates = panel.querySelector('#mufy-recovery-refresh-favorite-states');
     if (refreshFavoriteStates) {
@@ -10569,7 +11232,10 @@ roleStateReady = true;
     }
     const roleRunButton = panel.querySelector('#mufy-recovery-run');
     roleRunButton.disabled = state.metadataLoading || state.roleLoading || state.shareRecoveryLoading || (state.loading && !state.roleLoading);
-    panel.querySelector('#mufy-recovery-undo').disabled = state.loading || !state.undoLibrary;
+    const undoMask = panel.querySelector('#mufy-recovery-undo');
+    const deletedBatch = state.section === 'masks' && latestDeletedMaskBatch();
+    undoMask.disabled = state.loading || state.maskDeleteRunning || !maskStorageReady || (!state.undoLibrary && !deletedBatch);
+    undoMask.title = state.undoLibrary ? '撤回上一次可恢复的面具操作' : deletedBatch ? '撤回最近一批本地面具删除' : '没有可撤回的面具操作';
     roleRunButton.textContent = state.roleLoading ? '正在找回…' : (state.rolePaused ? '继续读取' : (state.roleReadMode === 'latest' ? '查找最新几页' : '找回角色链接'));
     const stopActionButton = panel.querySelector('#mufy-recovery-stop-action');
     stopActionButton.hidden = !state.roleLoading;
@@ -10652,6 +11318,26 @@ roleStateReady = true;
     }
     const shareRecoveryControls = panel.querySelector('#mufy-recovery-share-recovery-controls');
     const shareRecoveryOne = panel.querySelector('#mufy-recovery-share-recovery-one');
+    const queueOldFavorites = panel.querySelector('#mufy-recovery-queue-old-favorites');
+    const manageOldFavorites = panel.querySelector('#mufy-recovery-manage-old-favorites');
+    const showOldFavorites = state.section === 'roles' && state.active === 'favoriteOnly';
+    if (!showOldFavorites && state.oldFavoritesManaging) {
+      state.oldFavoritesManaging = false;
+      state.selectedFavoriteOnlyForChat.clear();
+    }
+    if (manageOldFavorites) {
+      manageOldFavorites.hidden = !showOldFavorites;
+      manageOldFavorites.disabled = state.shareRecoveryLoading || !maskAccountScope || Boolean(loadManualAutoChatJob());
+      manageOldFavorites.setAttribute('aria-pressed', String(state.oldFavoritesManaging));
+      manageOldFavorites.textContent = state.oldFavoritesManaging ? '完成' : '管理';
+    }
+    if (queueOldFavorites) {
+      const count = state.favoriteOnly.filter(row => state.selectedFavoriteOnlyForChat.has(String(row.characterId))
+        && row.favoriteKnown === true && row.isFavorite).length;
+      queueOldFavorites.hidden = !showOldFavorites;
+      queueOldFavorites.disabled = !state.oldFavoritesManaging || !count || !maskAccountScope || state.shareRecoveryLoading || Boolean(loadManualAutoChatJob());
+      queueOldFavorites.textContent = count ? `加入待聊（${count}）` : '加入待聊';
+    }
     const shareRecoveryCancel = panel.querySelector('#mufy-recovery-share-recovery-cancel');
     if (shareRecoveryControls && shareRecoveryOne && shareRecoveryCancel) {
       const recoveryTask = loadFavoriteShareRecoveryJob();
@@ -10664,7 +11350,7 @@ roleStateReady = true;
         ? (recoveryTask?.pauseRequested ? '正在中断…' : `中断检测（${Math.min((recoveryTask?.index || 0) + 1, recoveryTask?.rows?.length || 0)}/${recoveryTask?.rows?.length || 0}）`)
         : recoveryTask
           ? `继续检测（剩余 ${remaining}）`
-          : (uncachedCount ? `检测未记录角色（${uncachedCount}）` : `本账号均已有链接记录`);
+          : (uncachedCount ? `检测（${uncachedCount}）` : '检测');
       shareRecoveryOne.disabled = state.favoriteRunning || state.loading || state.metadataLoading
         || Boolean(recoveryTask?.pauseRequested) || Boolean(recoveryTask?.cancelRequested)
         || (!recoveryTask && !uncachedCount);
@@ -10711,6 +11397,14 @@ roleStateReady = true;
     if (maskSection) maskSection.hidden = state.section !== 'masks';
     const resultList = panel.querySelector('#mufy-recovery-list');
     if (resultList) resultList.hidden = ['home', 'accounts', 'materials'].includes(state.section);
+    const folderResults = panel.querySelector('#mufy-recovery-folder-search-results');
+    if (state.section === 'favorites') {
+      const folderQuery = panel.querySelector('#mufy-recovery-folder-search-query').value.trim();
+      folderResults.hidden = !folderQuery || !folderResults.hasChildNodes();
+      resultList.hidden = !folderResults.hidden;
+    } else {
+      folderResults.hidden = true;
+    }
     if (state.section === 'materials') renderMaterialSection();
     if (state.section === 'accounts') renderAccountSection();
     const roleFilterRow = panel.querySelector('#mufy-recovery-role-filter-row');
@@ -10807,6 +11501,23 @@ roleStateReady = true;
                     : button.dataset.category === 'masks' ? '面具' : '面具库';
       button.textContent = `${label} (${count})`;
     });
+    const maskManageButton = panel.querySelector('#mufy-recovery-mask-manage');
+    const maskSelectionBar = panel.querySelector('#mufy-recovery-mask-selection-bar');
+    if (maskManageButton) {
+      maskManageButton.classList.toggle('active', state.maskManaging);
+      maskManageButton.setAttribute('aria-pressed', String(state.maskManaging));
+      maskManageButton.title = state.maskManaging ? '退出管理' : '管理面具';
+    }
+    if (maskSelectionBar) {
+      maskSelectionBar.hidden = !state.maskManaging;
+      const visibleKeys = rows.map(row => selectedMaskKey(row));
+      const selectedCount = (state.active === 'masks' ? state.masks : state.library).filter(row => state.selectedMaskKeys.has(selectedMaskKey(row))).length;
+      const visibleSelected = visibleKeys.filter(key => state.selectedMaskKeys.has(key)).length;
+      panel.querySelector('#mufy-recovery-mask-selection-count').textContent = `已选 ${selectedCount} 个（当前列表 ${visibleSelected}/${rows.length}）`;
+      panel.querySelector('#mufy-recovery-mask-select-all').disabled = state.maskDeleteRunning || !rows.length;
+      panel.querySelector('#mufy-recovery-mask-delete-selected').disabled = state.maskDeleteRunning || !selectedCount || (state.active === 'library' && !maskStorageReady);
+      panel.querySelector('#mufy-recovery-mask-delete-selected').textContent = state.maskDeleteRunning ? '正在删除…' : `删除已选 (${selectedCount})`;
+    }
     const saveAllMasksButton = panel.querySelector('#mufy-recovery-save-all');
     if (saveAllMasksButton) {
       saveAllMasksButton.hidden = false;
@@ -10814,11 +11525,9 @@ roleStateReady = true;
     }
     const importMasksButton = panel.querySelector('#mufy-recovery-import-masks');
     const exportMasksButton = panel.querySelector('#mufy-recovery-export-masks');
-    const undoMasksButton = panel.querySelector('#mufy-recovery-undo');
     if (importMasksButton) importMasksButton.disabled = state.loading || !maskStorageReady;
     // 存储故障时必须保留导出能力，方便抢救当前内存中的面具。
     if (exportMasksButton) exportMasksButton.disabled = maskStorageMode === 'initializing';
-    if (undoMasksButton) undoMasksButton.disabled = state.loading || !maskStorageReady || !state.undoLibrary;
     if (state.active === 'authors' || state.active === 'siteAuthors') {
       state.visibleAuthors = groups;
       state.visibleRows = groups.flatMap(group => group.rows);
@@ -10854,7 +11563,7 @@ roleStateReady = true;
         const boundNames = boundCharacterNames(row);
         return `<div class="mufy-recovery-row">
         <div class="mufy-recovery-info">
-          <div class="mufy-recovery-row-title"><b>${index + 1}. ${esc(row.name)}</b><button class="mufy-recovery-mask-copy" data-action="copy-mask" data-index="${index}" title="复制面具信息" aria-label="复制面具信息"><span aria-hidden="true">⧉</span></button></div>
+          <div class="mufy-recovery-row-title">${state.maskManaging ? `<input type="checkbox" data-mask-select="${esc(selectedMaskKey(row))}" ${state.selectedMaskKeys.has(selectedMaskKey(row)) ? 'checked' : ''} ${state.maskDeleteRunning ? 'disabled' : ''} aria-label="选择面具 ${esc(row.name)}">` : ''}<b>${index + 1}. ${esc(row.name)}</b><button class="mufy-recovery-mask-copy" data-action="copy-mask" data-index="${index}" title="复制面具信息" aria-label="复制面具信息"><span aria-hidden="true">⧉</span></button></div>
           <div class="mufy-recovery-muted">面具 ID：${esc(row.maskId)}${row.gender ? ` · ${esc(row.gender)}` : ''}${row.createdAt ? ` · ${esc(row.createdAt)}` : ''}</div>
           ${row.maskName ? `<div>名称：${esc(row.maskName)}</div>` : ''}
           ${boundNames ? `<div class="mufy-recovery-muted">已绑定角色：${esc(boundNames)}</div>` : ''}
@@ -10873,7 +11582,7 @@ roleStateReady = true;
           : '';
         return `<div class="mufy-recovery-row">
         <div class="mufy-recovery-info">
-          <div class="mufy-recovery-row-title"><b>${index + 1}. ${esc(row.name)}</b><span class="mufy-recovery-mask-title-tools">${slotBadge}<button class="mufy-recovery-mask-copy" data-action="copy-mask" data-index="${index}" title="复制面具信息" aria-label="复制面具信息"><span aria-hidden="true">⧉</span></button><button type="button" class="mufy-recovery-mask-remove" data-action="remove-library" data-index="${index}" title="移出面具库" aria-label="移出面具库"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5"/></svg></button></span></div>
+          <div class="mufy-recovery-row-title">${state.maskManaging ? `<input type="checkbox" data-mask-select="${esc(selectedMaskKey(row))}" ${state.selectedMaskKeys.has(selectedMaskKey(row)) ? 'checked' : ''} ${state.maskDeleteRunning ? 'disabled' : ''} aria-label="选择面具备份 ${esc(row.name)}">` : ''}<b>${index + 1}. ${esc(row.name)}</b><span class="mufy-recovery-mask-title-tools">${slotBadge}<button class="mufy-recovery-mask-copy" data-action="copy-mask" data-index="${index}" title="复制面具信息" aria-label="复制面具信息"><span aria-hidden="true">⧉</span></button><button type="button" class="mufy-recovery-mask-remove" data-action="remove-library" data-index="${index}" title="移出面具库" aria-label="移出面具库"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5"/></svg></button></span></div>
           <div class="mufy-recovery-muted">来源面具 ID：${esc(row.sourceMaskId || '未知')} · 保存于 ${esc(row.storedAt || '未知时间')}</div>
           ${row.maskName ? `<div>名称：${esc(row.maskName)}</div>` : ''}
           ${boundNames ? `<div class="mufy-recovery-muted">已绑定角色：${esc(boundNames)}</div>` : ''}
@@ -10921,7 +11630,7 @@ roleStateReady = true;
       #mufy-recovery-auto-chat-toast[data-tone="success"]{border-color:#4d9e78;background:#173528ef;color:#caffdf}
       #mufy-recovery-auto-chat-toast[data-tone="error"]{border-color:#b45f69;background:#421f25ef;color:#ffd1d6}
       #mufy-recovery-panel{position:fixed;right:16px;bottom:62px;z-index:2147483647;width:480px;max-width:calc(100vw - 32px);height:min(72vh,720px);min-height:300px;max-height:90vh;overflow:hidden;display:flex;flex-direction:column;background:#222228;color:#eee;border:1px solid #555;border-radius:8px;box-shadow:0 12px 35px #0008;font:13px system-ui}
-      #mufy-recovery-head{display:flex;align-items:center;justify-content:flex-start;gap:4px;padding:9px 9px 6px;background:#303038;border-radius:8px 8px 0 0;font-weight:700;flex:none}
+      #mufy-recovery-head{display:flex;align-items:center;justify-content:flex-start;gap:4px;font-weight:700;flex:none}
       #mufy-recovery-title{display:flex;align-items:center;gap:6px;min-width:0}
       #mufy-recovery-title>span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
       #mufy-recovery-head button{background:none;border:0;color:#bbb;font-size:20px;cursor:pointer}
@@ -10934,7 +11643,7 @@ roleStateReady = true;
       #mufy-recovery-history-entry.active{background:#786bd4!important;border-color:#8f84dd!important;color:#fff!important}
       #mufy-recovery-close{flex:none;width:27px;height:27px;padding:0!important;line-height:23px!important}
       #mufy-recovery-help{width:19px;height:19px;padding:0!important;border:1px solid #777!important;border-radius:50%!important;background:#3a3a43!important;color:#eee!important;font-size:12px!important;line-height:17px!important;font-weight:700}
-      .mufy-recovery-version{color:#f3c969;font-size:10px;font-weight:600}
+      .mufy-recovery-version{font-size:10px;font-weight:600}
       #mufy-recovery-help-modal{position:absolute;inset:48px 10px 10px;z-index:4;display:flex;flex-direction:column;overflow:hidden;background:#292930;border:1px solid #666;border-radius:7px;box-shadow:0 8px 24px #0008}
       #mufy-recovery-help-head{display:flex;align-items:center;justify-content:space-between;padding:9px 11px;background:#35353e;border-bottom:1px solid #4b4b55}
       #mufy-recovery-help-head button{padding:1px 6px!important}
@@ -11020,27 +11729,40 @@ roleStateReady = true;
       #mufy-recovery-resize-handle-bottom{bottom:0}
       #mufy-recovery-resize-handle::after,#mufy-recovery-resize-handle-bottom::after{content:'';width:48px;height:4px;border-radius:3px;background:#777;box-shadow:0 1px 2px #0007}
       #mufy-recovery-panel.is-resizing{user-select:none}
-      #mufy-recovery-controls{display:grid;gap:7px;padding:9px 10px;flex:none;overflow:auto;max-height:55%}
+      #mufy-recovery-controls{display:grid;flex:none;overflow:auto;max-height:55%}
       #mufy-recovery-controls.is-section-home,#mufy-recovery-controls.is-standalone-section{flex:1;min-height:0;max-height:none;align-content:start}
       #mufy-recovery-role-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;align-items:stretch}
       #mufy-recovery-favorite-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;align-items:stretch}
+      #mufy-recovery-folder-search{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px}
+      #mufy-recovery-folder-search-query{box-sizing:border-box;min-width:0;width:100%;padding:7px 9px;font:inherit}
+      #mufy-recovery-folder-search-results{flex:1 1 auto;min-height:0;overflow:auto;padding:0 10px 16px;border-top:1px solid var(--mufy-panel-border,#444)}
+      #mufy-recovery-folder-search-results[hidden]{display:none}
+      .mufy-recovery-folder-search-item{position:relative;overflow-wrap:anywhere}
+      #mufy-recovery-panel .mufy-recovery-folder-search-item summary,
+      #mufy-recovery-panel .mufy-recovery-folder-search-item .mufy-recovery-folder-open{background:var(--mufy-panel-surface,#2b2b32)!important;color:var(--mufy-panel-text,#ddd)!important;border:1px solid var(--mufy-panel-border,#555);border-radius:12px}
+      .mufy-recovery-folder-search-item summary{display:block;list-style:none;cursor:pointer;margin-right:83px;padding:8px 9px;min-height:20px}
+      .mufy-recovery-folder-search-item summary::-webkit-details-marker{display:none}
+      .mufy-recovery-folder-search-item details[open] .mufy-folder-expand,
+      .mufy-recovery-folder-search-item details:not([open]) .mufy-folder-collapse{display:none}
+      .mufy-recovery-folder-open{position:absolute;top:8px;right:2px;box-sizing:border-box;width:76px;text-align:center;text-decoration:none}
+      .mufy-recovery-folder-roles{margin-top:5px}
       #mufy-recovery-auto-folder-label{display:flex;align-items:flex-start;gap:8px;margin-top:7px;padding:9px 10px;border:1px solid #4d4962;border-radius:8px;background:#292733;color:#ddd;cursor:pointer;user-select:none}
       #mufy-recovery-auto-folder-label input{flex:none;margin-top:2px;accent-color:#786bd4}
       #mufy-recovery-auto-folder-label span{display:grid;gap:2px;line-height:1.35}
       #mufy-recovery-auto-folder-label small{color:#999;font-size:10px;font-weight:400}
-      #mufy-recovery-mask-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
+      #mufy-recovery-mask-actions{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}
+      #mufy-recovery-mask-actions #mufy-recovery-mask-manage.active{background:var(--mufy-panel-accent-button)!important;color:var(--mufy-panel-accent-text)!important}
       #mufy-recovery-role-actions > button,#mufy-recovery-mask-actions > button{min-width:0;white-space:normal;line-height:1.25}
       #mufy-recovery-favorite-visible{width:100%}
-      #mufy-recovery-share-recovery-controls{display:grid;grid-template-columns:1fr auto;gap:6px}
+      #mufy-recovery-share-recovery-controls{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;gap:6px}
+      #mufy-recovery-share-recovery-cancel{grid-column:1/-1}
       #mufy-recovery-share-recovery-controls[hidden]{display:none}
       #mufy-recovery-share-recovery-one{min-width:0;background:#453d69!important;border-color:#8578c8!important;color:#f4efff!important}
       #mufy-recovery-share-recovery-cancel{white-space:nowrap}
       #mufy-recovery-role-read-options{display:flex;align-items:center;gap:6px;flex-wrap:wrap;color:#bbb;font-size:11px}
       #mufy-recovery-role-read-options select,#mufy-recovery-role-read-options input{border:1px solid #555;border-radius:6px;background:#18181c;color:#fff;padding:5px 6px;font:inherit}
       #mufy-recovery-role-latest-pages{width:52px}
-      .mufy-recovery-export-group{display:flex;gap:6px}
-      #mufy-recovery-mask-actions .mufy-recovery-export-group{display:contents}
-      #mufy-recovery-panel button{border:1px solid #666;border-radius:6px;background:#35353c;color:#eee;padding:6px 9px;cursor:pointer}
+      #mufy-recovery-panel button{border:1px solid #666;padding:6px 9px;cursor:pointer}
       #mufy-recovery-panel button:disabled{opacity:.5;cursor:wait}
       #mufy-recovery-run{background:#786bd4!important;border-color:#8f84dd!important}
       #mufy-recovery-role-filter-row{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);gap:6px;min-width:0}
@@ -11062,33 +11784,35 @@ roleStateReady = true;
       #mufy-recovery-panel [hidden]{display:none!important}
       #mufy-recovery-auto-switch-label{display:flex;align-items:center;gap:6px;color:#bbb;font-size:11px;user-select:none}
       #mufy-recovery-auto-switch-label input{accent-color:#786bd4}
-      #mufy-recovery-status{color:#b9b4e9;line-height:1.45}
+      #mufy-recovery-status{line-height:1.45}
       #mufy-recovery-favorite-task-controls{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:6px;padding:7px;border:1px solid #665d35;border-radius:7px;background:#2c281d}
       #mufy-recovery-favorite-task-main{background:#735f22!important;border-color:#b69637!important;color:#fff0b0!important;font-weight:700}
       #mufy-recovery-favorite-task-cancel{background:#572b30!important;border-color:#945059!important;color:#ffc6cb!important}
-      #mufy-recovery-section-home{display:grid;gap:10px;padding:4px 1px 6px}
-      #mufy-recovery-section-home-head{display:grid;gap:3px;padding:2px 3px;color:#eee}#mufy-recovery-section-home-head small{color:#999;font-size:11px;font-weight:400}
-      #mufy-recovery-section-cards{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-      .mufy-recovery-section-card{min-height:74px!important;display:grid!important;align-content:center;justify-items:start;gap:5px;padding:11px 12px!important;text-align:left;background:#292934!important;border-color:#555566!important}
-      .mufy-recovery-section-card strong{font-size:14px;color:#f4f1ff}.mufy-recovery-section-card small{font-size:10px;line-height:1.35;color:#aaa;font-weight:400}
-      .mufy-recovery-section-card:first-child{border-color:#8275ca!important;background:#38324f!important}
+      #mufy-recovery-section-home{display:grid}
+      #mufy-recovery-section-home-head{display:grid;gap:3px;color:#eee}#mufy-recovery-section-home-head small{font-size:11px;font-weight:400}
+      #mufy-recovery-section-cards{display:grid;grid-template-columns:1fr 1fr}
+      .mufy-recovery-section-card{display:grid!important;align-content:center;justify-items:start;gap:5px;padding:11px 12px!important;text-align:left}
+      .mufy-recovery-section-card strong{color:#f4f1ff}.mufy-recovery-section-card small{font-size:10px;line-height:1.35;font-weight:400}
       #mufy-recovery-section-nav{display:flex;align-items:center;gap:9px;padding-bottom:2px;border-bottom:1px solid #414149}
-      #mufy-recovery-section-back{flex:none;background:#292934!important;border-color:#625b7e!important;color:#dcd6ff!important}
-      #mufy-recovery-section-title{font-size:14px;color:#f1efff}
+      #mufy-recovery-section-back{flex:none;border-color:#625b7e!important;color:#dcd6ff!important}
+      #mufy-recovery-section-title{color:#f1efff}
       #mufy-recovery-tabs{display:grid;grid-template-columns:1fr 1fr;gap:6px}
       #mufy-recovery-favorite-tabs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
       #mufy-recovery-mask-tabs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
+      #mufy-recovery-mask-selection-bar{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+      #mufy-recovery-mask-selection-bar[hidden]{display:none}
+      #mufy-recovery-mask-delete-selected{color:#ffc0c5;border-color:#a95159;background:#672e33}
+      #mufy-recovery-list [data-mask-select]{width:17px;height:17px;flex:none;accent-color:#786bd4}
       #mufy-recovery-tabs button.active,#mufy-recovery-favorite-tabs button.active,#mufy-recovery-mask-tabs button.active{background:#786bd4;border-color:#8f84dd;color:#fff}
       #mufy-recovery-tabs .mufy-recovery-tab-action,#mufy-recovery-mask-tabs .mufy-recovery-tab-action{background:#453d69;border-color:#8578c8;color:#f4efff}
       #mufy-recovery-role-section,#mufy-recovery-favorite-section,#mufy-recovery-chat-section,#mufy-recovery-account-section,#mufy-recovery-material-section,#mufy-recovery-mask-section{display:flex;flex-direction:column;gap:8px}
-      #mufy-recovery-account-current{display:grid;gap:3px;padding:12px;border:1px solid #766bb155;border-radius:12px;background:linear-gradient(145deg,#4c407055,#24232d)}#mufy-recovery-account-current strong{font-size:11px;color:#aaa3c6}#mufy-recovery-account-current span{font-size:15px;color:#f5f2ff;font-weight:700}#mufy-recovery-account-current small{color:#aaa;overflow-wrap:anywhere}#mufy-recovery-account-mode-guide{display:grid;grid-template-columns:1fr 1fr;gap:6px}#mufy-recovery-account-mode-guide>div{display:grid;gap:4px;padding:9px;border:1px solid #494653;border-radius:9px;background:#24232b}#mufy-recovery-account-mode-guide strong{font-size:11px;color:#eeeaff}#mufy-recovery-account-mode-guide small{color:#9993a6;font-size:9px;line-height:1.45}#mufy-recovery-account-tools{display:grid;grid-template-columns:1fr;gap:6px}#mufy-recovery-account-save{background:#6654a4!important;border-color:#927fd3!important;font-weight:700}#mufy-recovery-account-list{display:grid;align-content:start;gap:7px;overflow:auto;padding-bottom:12px}.mufy-account-card{display:flex;align-items:center;justify-content:space-between;gap:9px;padding:10px 11px;border:1px solid #494653;border-radius:11px;background:#272630}.mufy-account-card.is-current{border-color:#68ba8a88;box-shadow:inset 3px 0 #59b17f}.mufy-account-card>div{display:grid;min-width:0;gap:3px}.mufy-account-card strong{color:#f0edff}.mufy-account-card small{color:#aaa;overflow-wrap:anywhere}.mufy-account-badges{display:flex;gap:4px;flex-wrap:wrap}.mufy-account-card em{width:max-content;padding:2px 6px;border-radius:9px;background:#24553a;color:#a8e7bd;font-size:9px;font-style:normal}.mufy-account-card em.has-password{background:#4b3f72;color:#ddd3ff}.mufy-account-card em.login-mode.native{background:#394554;color:#c5d9ed}.mufy-account-card em.login-mode.direct{background:#5b3f70;color:#ead5ff}.mufy-account-card>span{display:flex;flex:none;gap:4px;flex-wrap:wrap;justify-content:flex-end}.mufy-account-card button{padding:4px 7px!important;font-size:10px!important}.mufy-recovery-account-hint{display:block;color:#8f8a9c;line-height:1.55}#mufy-recovery-account-password-modal{position:absolute;inset:92px 18px auto;z-index:18;display:grid;gap:11px;padding:14px;border:1px solid #8c7bd1;border-radius:13px;background:#292930;box-shadow:0 18px 50px #000d}#mufy-recovery-account-password-modal[hidden]{display:none}#mufy-recovery-account-password-modal h3{margin:0;color:#f5f2ff;font-size:15px}#mufy-recovery-account-password-summary{color:#aaa;line-height:1.55}#mufy-recovery-account-password-warning{padding:8px;border:1px solid #a7774766;border-radius:8px;background:#5e3d2633;color:#e5bd91;font-size:10px;line-height:1.5}#mufy-recovery-account-password-input{box-sizing:border-box;width:100%;border:1px solid #655c83;border-radius:9px;background:#17171c;color:#fff;padding:10px;font-size:14px;outline:none}#mufy-recovery-account-password-actions{display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px}#mufy-recovery-account-password-save{background:#6654a4!important;border-color:#927fd3!important}
+      #mufy-recovery-account-current{display:grid;gap:3px;padding:12px;border:1px solid #766bb155;border-radius:12px;background:linear-gradient(145deg,#4c407055,#24232d)}#mufy-recovery-account-current strong{font-size:11px;color:#aaa3c6}#mufy-recovery-account-current span{font-size:15px;color:#f5f2ff;font-weight:700}#mufy-recovery-account-current small{color:#aaa;overflow-wrap:anywhere}#mufy-recovery-account-mode-guide{display:grid;grid-template-columns:1fr 1fr;gap:6px}#mufy-recovery-account-mode-guide>div{display:grid;gap:4px;padding:9px;border:1px solid #494653;border-radius:9px;background:#24232b}#mufy-recovery-account-mode-guide strong{font-size:11px;color:#eeeaff}#mufy-recovery-account-mode-guide small{color:#9993a6;font-size:9px;line-height:1.45}#mufy-recovery-account-tools{display:grid;grid-template-columns:1fr;gap:6px}#mufy-recovery-account-save{background:#6654a4!important;border-color:#927fd3!important;font-weight:700}#mufy-recovery-account-list{display:grid;align-content:start;gap:7px;overflow:auto;padding-bottom:12px}.mufy-account-card{display:flex;align-items:center;justify-content:space-between;gap:9px;padding:10px 11px;border:1px solid #494653;border-radius:11px;background:#272630}.mufy-account-card.is-current{border-color:#68ba8a88;box-shadow:inset 3px 0 #59b17f}.mufy-account-card>div{display:grid;min-width:0;gap:3px}.mufy-account-card strong{color:#f0edff}.mufy-account-card small{color:#aaa;overflow-wrap:anywhere}.mufy-account-badges{display:flex;gap:4px;flex-wrap:wrap}.mufy-account-card em{width:max-content;padding:2px 6px;border-radius:9px;background:#24553a;color:#a8e7bd;font-size:9px;font-style:normal}.mufy-account-card em.has-password{background:#4b3f72;color:#ddd3ff}.mufy-account-card em.login-mode.native{background:#394554;color:#c5d9ed}.mufy-account-card em.login-mode.direct{background:#5b3f70;color:#ead5ff}.mufy-account-card>span{display:flex;flex:none;gap:4px;flex-wrap:wrap;justify-content:flex-end}.mufy-account-card button{padding:4px 7px!important;font-size:10px!important}#mufy-recovery-account-password-modal{position:absolute;inset:92px 18px auto;z-index:18;display:grid;gap:11px;padding:14px;border:1px solid #8c7bd1;border-radius:13px;background:#292930;box-shadow:0 18px 50px #000d}#mufy-recovery-account-password-modal[hidden]{display:none}#mufy-recovery-account-password-modal h3{margin:0;color:#f5f2ff;font-size:15px}#mufy-recovery-account-password-summary{color:#aaa;line-height:1.55}#mufy-recovery-account-password-warning{padding:8px;border:1px solid #a7774766;border-radius:8px;background:#5e3d2633;color:#e5bd91;font-size:10px;line-height:1.5}#mufy-recovery-account-password-input{box-sizing:border-box;width:100%;border:1px solid #655c83;border-radius:9px;background:#17171c;color:#fff;padding:10px;font-size:14px;outline:none}#mufy-recovery-account-password-actions{display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px}#mufy-recovery-account-password-save{background:#6654a4!important;border-color:#927fd3!important}
       #mufy-recovery-material-tabs{display:grid;grid-template-columns:1fr 1fr;gap:6px}#mufy-recovery-material-tabs button.active{background:#786bd4;border-color:#8f84dd;color:#fff}#mufy-recovery-material-tools{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}#mufy-recovery-material-add{background:#5e4f91!important;border-color:#8373bb!important;font-weight:700}
       #mufy-recovery-material-list{display:grid;align-content:start;gap:7px;overflow:auto;padding-bottom:20px}.mufy-material-card{display:flex;align-items:flex-start;justify-content:space-between;gap:9px;padding:10px 11px;border:1px solid #4c485d;border-radius:10px;background:#272630;cursor:pointer}.mufy-material-card:hover{border-color:#8c7bd1;background:#302d40}.mufy-material-card>div{min-width:0;display:grid;gap:4px}.mufy-material-card strong{color:#f0edff}.mufy-material-card small{display:-webkit-box;overflow:hidden;color:#aaa;font-size:10px;line-height:1.5;-webkit-line-clamp:4;-webkit-box-orient:vertical;white-space:pre-wrap;overflow-wrap:anywhere}.mufy-material-card>span{display:flex;flex:none;gap:5px}.mufy-material-card>span button{padding:4px 7px!important;font-size:10px!important}
       #mufy-recovery-material-editor{position:absolute;inset:48px 10px 10px;z-index:14;display:flex;flex-direction:column;overflow:hidden;border:1px solid #766bb1;border-radius:12px;background:#292930;box-shadow:0 16px 45px #000c}#mufy-recovery-material-editor[hidden]{display:none}#mufy-recovery-material-editor-head{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid #4b4b55;background:#35353e}#mufy-recovery-material-editor-head button{padding:1px 7px!important;font-size:20px!important}#mufy-recovery-material-editor-body{flex:1;min-height:0;display:grid;grid-template-rows:auto minmax(0,1fr);gap:10px;padding:12px}#mufy-recovery-material-editor-body label{display:grid;grid-template-rows:auto auto;align-content:start;min-height:0;gap:5px;color:#bbb;font-size:11px}#mufy-recovery-material-editor-body label:last-child{grid-template-rows:auto minmax(180px,1fr)}#mufy-recovery-material-editor-body input,#mufy-recovery-material-editor-body textarea{box-sizing:border-box;width:100%;border:1px solid #555;border-radius:8px;background:#18181c;color:#fff;padding:9px;font:13px/1.55 system-ui;outline:none}#mufy-recovery-material-editor-body textarea{height:100%;min-height:180px;resize:none}#mufy-recovery-material-editor-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:0 12px 12px}#mufy-recovery-material-editor-save{background:#62539a!important;border-color:#8878c5!important}
-      .mufy-recovery-section-note{display:grid;gap:4px;padding:10px 11px;border:1px solid #4d4962;border-radius:8px;background:#292733}.mufy-recovery-section-note span{color:#aaa;font-size:11px;line-height:1.5}
       #mufy-recovery-list{flex:1 1 auto;min-height:0;overflow:auto;border-top:1px solid #444;padding:0 10px 16px}
-      .mufy-recovery-row{display:flex;gap:8px;padding:7px 2px;border-bottom:1px solid #3e3e45}
-      .mufy-recovery-row img{width:40px;height:40px;flex:none;border-radius:10px;object-fit:cover}
+      .mufy-recovery-row{display:flex;gap:8px;border-bottom:1px solid #3e3e45}
+      .mufy-recovery-row img{width:40px;height:40px;flex:none;object-fit:cover}
       .mufy-recovery-info{flex:1;min-width:0;word-break:break-all}.mufy-recovery-info a{color:#aaa1ff}
       .mufy-recovery-row-title{display:flex;align-items:center;justify-content:space-between;gap:8px}
       .mufy-recovery-mask-title-tools{margin-left:auto;display:inline-flex;align-items:center;gap:4px;flex:none}
@@ -11127,15 +11851,12 @@ roleStateReady = true;
       .mufy-recovery-chat-match{display:grid;gap:3px;margin:6px 0;padding:7px 8px;border-left:3px solid #8b79db;border-radius:4px;background:#2c2939;color:#ddd;line-height:1.45}
       .mufy-recovery-chat-match b{color:#c9c0ff;font-size:10px}.mufy-recovery-chat-match span{word-break:break-word}
       .mufy-recovery-chat-match mark{padding:0 2px;border-radius:2px;background:#ffe16b;color:#201b00}
-      .mufy-recovery-chat-jump{padding:4px 8px!important;background:#493f70!important;border-color:#7e70b5!important;color:#eee!important;font-size:11px!important}
       .mufy-recovery-chat-target{outline:3px solid #a78bfa!important;outline-offset:4px!important;background-color:rgba(139,92,246,.16)!important;animation:mufy-chat-target-pulse 1.1s ease-in-out 4}
       @keyframes mufy-chat-target-pulse{0%,100%{box-shadow:0 0 0 0 rgba(167,139,250,.15)}50%{box-shadow:0 0 0 8px rgba(167,139,250,.3)}}
       .mufy-recovery-detail{margin-top:5px;white-space:pre-wrap;color:#ccc;line-height:1.45}
       .mufy-recovery-row-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:4px}
       .mufy-recovery-row-actions button{padding:4px 7px!important;font-size:11px}
       .mufy-recovery-mask-binding-info{color:#898995;font-size:10px;white-space:nowrap}
-      .mufy-recovery-share-select{flex:none;border:0!important;background:transparent!important;color:#aaa1ff!important;font-size:18px!important;line-height:1;padding:2px 5px!important}
-      .mufy-recovery-share-select.is-selected{color:#cabfff!important}
       .mufy-recovery-empty{padding:22px;text-align:center;color:#999}
       .mufy-quote-action-separator{height:14px;width:1px;flex:none;border-radius:999px;background:#ffffff33}
       .mufy-quote-action-button{display:flex;align-items:center;gap:4px;padding-right:16px;color:#e9c77f;font-size:14px;line-height:1;cursor:pointer;white-space:nowrap;user-select:none}
@@ -11145,7 +11866,7 @@ roleStateReady = true;
       #mufy-recovery-panel-beauty-modal{position:absolute;inset:48px 10px 10px;z-index:15;display:flex;flex-direction:column;overflow:hidden;border:1px solid #766bb1;border-radius:14px;background:#25252cf5;box-shadow:0 18px 48px #000c}#mufy-recovery-panel-beauty-modal[hidden]{display:none}#mufy-recovery-panel-beauty-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:11px 13px;border-bottom:1px solid #4b4b55;background:#35353e}#mufy-recovery-panel-beauty-head>span{display:grid;gap:3px}#mufy-recovery-panel-beauty-head small{color:#aaa;font-size:10px;font-weight:400}#mufy-recovery-panel-beauty-head button{padding:1px 7px!important;font-size:20px!important}#mufy-recovery-panel-beauty-fields{flex:1;min-height:0;overflow:auto;display:grid;grid-template-columns:1fr 1fr;align-content:start;gap:11px;padding:14px}#mufy-recovery-panel-beauty-fields label{display:grid;gap:6px;color:#c6c1d1;font-size:11px}#mufy-recovery-panel-beauty-fields select,#mufy-recovery-panel-beauty-fields input{box-sizing:border-box;width:100%}#mufy-recovery-panel-beauty-fields input[type="color"]{height:42px;padding:3px;border:1px solid #ffffff24;border-radius:10px;background:#111}#mufy-recovery-panel-beauty-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:0 14px 14px}#mufy-recovery-panel-beauty-done{background:var(--mufy-panel-accent,#786bd4)!important;color:#fff!important}
       #mufy-recovery-model-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 11px;background:#35353e;border-bottom:1px solid #4b4b55}#mufy-recovery-model-head>span{display:grid;gap:2px}#mufy-recovery-model-summary{color:#aaa;font-size:10px;font-weight:400}#mufy-recovery-model-head button{padding:1px 7px!important;font-size:20px!important}
       #mufy-recovery-model-tools{display:grid;grid-template-columns:1fr auto;gap:7px;padding:9px 10px;border-bottom:1px solid #414149}#mufy-recovery-model-search{box-sizing:border-box;min-width:0;width:100%;border:1px solid #555;border-radius:6px;background:#18181c;color:#fff;padding:7px 9px;font:inherit}#mufy-recovery-model-refresh{background:#51477b!important;border-color:#7e70b5!important}#mufy-recovery-model-notify-label{grid-column:1/-1;display:flex;align-items:center;gap:7px;color:#cfcfd7;font-size:11px;cursor:pointer}#mufy-recovery-model-notify{accent-color:#786bd4}
-      #mufy-recovery-model-list{flex:1;min-height:0;overflow:auto;padding:8px;display:grid;align-content:start;gap:6px;background:#1c1c21}.mufy-model-monitor-row{display:flex;align-items:center;gap:8px;padding:9px;border:1px solid #454550;border-radius:8px;background:#28282f;cursor:pointer}.mufy-model-monitor-row:has(input:checked){border-color:#796bb1;background:#332e46}.mufy-model-monitor-row input{flex:none;accent-color:#786bd4}.mufy-model-monitor-info{min-width:0;display:grid;gap:3px;flex:1}.mufy-model-monitor-info b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}.mufy-model-monitor-info small{color:#999;font-size:9px;line-height:1.4}.mufy-model-monitor-row em{flex:none;padding:2px 6px;border-radius:9px;background:#444;font-size:9px;font-style:normal;color:#ddd}
+      #mufy-recovery-model-list{flex:1;min-height:0;overflow:auto;padding:8px;display:grid;align-content:start;gap:6px;background:#1c1c21}.mufy-model-monitor-row{display:flex;align-items:center;gap:8px;padding:9px;border:1px solid #454550;cursor:pointer}.mufy-model-monitor-row input{flex:none;accent-color:#786bd4}.mufy-model-monitor-info{min-width:0;display:grid;gap:3px;flex:1}.mufy-model-monitor-info b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}.mufy-model-monitor-info small{color:#999;font-size:9px;line-height:1.4}.mufy-model-monitor-row em{flex:none;padding:2px 6px;border-radius:9px;background:#444;font-size:9px;font-style:normal;color:#ddd}
       #mufy-recovery-quote-editor-modal,#mufy-recovery-quote-library-modal{position:absolute;inset:8px;z-index:12;display:flex;flex-direction:column;overflow:hidden;border:1px solid #766bb1;border-radius:10px;background:#25252c;box-shadow:0 14px 42px #000c}
       #mufy-recovery-quote-editor-modal[hidden],#mufy-recovery-quote-library-modal[hidden]{display:none}
       .mufy-quote-modal-head{display:flex;align-items:center;justify-content:space-between;gap:9px;padding:10px 12px;background:#34333e;border-bottom:1px solid #4c4a5c}
@@ -11195,7 +11916,7 @@ roleStateReady = true;
       #mufy-recovery-panel #mufy-recovery-quote-save-text{background:var(--mufy-panel-accent-button);border-color:var(--mufy-panel-border)}
       #mufy-recovery-quote-preview:focus-visible{outline:2px solid var(--mufy-panel-accent);outline-offset:5px}
       #mufy-recovery-panel .mufy-quote-card-image strong,#mufy-recovery-panel .mufy-quote-card-image small,#mufy-recovery-panel .mufy-quote-stack-cover small{color:#fff!important}
-      #mufy-recovery-quote-preview{width:min(100%,300px);width:min(100%,380px,64cqh);aspect-ratio:9/14;cursor:pointer;perspective:1200px}
+      #mufy-recovery-quote-preview{width:min(100%,380px,64cqh);aspect-ratio:9/14;cursor:pointer;perspective:1200px}
       @media (prefers-reduced-motion:reduce){#mufy-recovery-quote-preview .mufy-quote-card-inner{transition:none}}
       .mufy-quote-card-inner{position:relative;width:100%;height:100%;transform-style:preserve-3d;transition:transform .65s cubic-bezier(.2,.75,.2,1)}#mufy-recovery-quote-preview.is-flipped .mufy-quote-card-inner{transform:rotateY(180deg)}
       .mufy-quote-card-face{position:absolute;inset:0;box-sizing:border-box;overflow:hidden;border:2px solid var(--quote-accent);border-radius:17px;backface-visibility:hidden;box-shadow:inset 0 0 0 6px color-mix(in srgb,var(--quote-accent) 24%,transparent),0 9px 24px #0004}
@@ -11211,14 +11932,13 @@ roleStateReady = true;
       #mufy-recovery-head{min-height:38px;padding:10px 13px 8px;background:linear-gradient(90deg,#ffffff0d,#8f7bff12,#ffffff08);border-bottom:1px solid #ffffff12;border-radius:18px 18px 0 0}#mufy-recovery-title>span{font-size:14px;letter-spacing:.01em}.mufy-recovery-version{color:#d9c7ff}
       #mufy-recovery-head #mufy-recovery-log-entry,#mufy-recovery-head #mufy-recovery-history-entry{border-color:#ffffff24!important;border-radius:999px!important;background:#ffffff0a!important;color:#d9d6e7!important;box-shadow:inset 0 1px #ffffff12}
       #mufy-recovery-controls{gap:10px;padding:12px 13px;background:linear-gradient(180deg,#ffffff03,transparent)}
-      #mufy-recovery-panel button{border-color:var(--mufy-panel-border);border-radius:10px;background:var(--mufy-panel-surface);color:#eeedf6;box-shadow:0 1px 3px #0001;transition:transform .16s ease,border-color .16s ease,background .16s ease,box-shadow .16s ease}#mufy-recovery-panel button:hover{border-color:var(--mufy-panel-accent);background:var(--mufy-panel-accent-soft)}#mufy-recovery-panel button:active{transform:translateY(1px) scale(.99)}
-      #mufy-recovery-panel button.active,#mufy-recovery-panel .mufy-recovery-section-card:first-child{background:var(--mufy-panel-accent-soft)!important;border-color:color-mix(in srgb,var(--mufy-panel-accent,#8f7be8) 72%,transparent)!important}#mufy-recovery-panel #mufy-recovery-head{border-bottom-color:color-mix(in srgb,var(--mufy-panel-accent,#8f7be8) 24%,transparent)}
-      #mufy-recovery-panel #mufy-recovery-title>span,#mufy-recovery-panel #mufy-recovery-section-title,#mufy-recovery-panel .mufy-recovery-row>div>strong,#mufy-recovery-panel .mufy-recovery-section-note strong{color:var(--mufy-panel-text,#f2efff)!important}
+      #mufy-recovery-panel button{border-color:var(--mufy-panel-border);border-radius:10px;background:var(--mufy-panel-surface);box-shadow:0 1px 3px #0001;transition:transform .16s ease,border-color .16s ease,background .16s ease,box-shadow .16s ease}#mufy-recovery-panel button:hover{border-color:var(--mufy-panel-accent);background:var(--mufy-panel-accent-soft)}#mufy-recovery-panel button:active{transform:translateY(1px) scale(.99)}
+      #mufy-recovery-panel #mufy-recovery-head{border-bottom-color:color-mix(in srgb,var(--mufy-panel-accent,#8f7be8) 24%,transparent)}
+      #mufy-recovery-panel #mufy-recovery-title>span,#mufy-recovery-panel #mufy-recovery-section-title,#mufy-recovery-panel .mufy-recovery-row>div>strong{color:var(--mufy-panel-text,#f2efff)!important}
       #mufy-recovery-section-home{gap:13px;padding:6px 2px 10px}#mufy-recovery-section-home-head{padding:4px 5px 1px}#mufy-recovery-section-home-head strong{font-size:17px;letter-spacing:.02em}#mufy-recovery-section-home-head small{color:#8e8a9e}
       #mufy-recovery-section-cards{gap:10px}.mufy-recovery-section-card{position:relative;min-height:86px!important;overflow:hidden;border-color:var(--mufy-panel-border)!important;border-radius:15px!important;background:var(--mufy-panel-surface)!important;box-shadow:inset 0 1px #ffffff12,0 10px 24px #0002!important}.mufy-recovery-section-card:before{content:'';position:absolute;inset:0;background:radial-gradient(circle at 12% 0,var(--mufy-panel-accent-soft),transparent 48%);pointer-events:none}.mufy-recovery-section-card:hover{transform:translateY(-2px);border-color:var(--mufy-panel-accent)!important}.mufy-recovery-section-card strong{position:relative;font-size:14px}.mufy-recovery-section-card small{position:relative;color:var(--mufy-panel-muted)}.mufy-recovery-section-card:first-child{background:var(--mufy-panel-accent-soft)!important;border-color:var(--mufy-panel-accent)!important}
       #mufy-recovery-update-entry.has-update{border-color:#61c99588!important;background:linear-gradient(145deg,#225a4166,#242c3250)!important;box-shadow:inset 0 1px #baffd022,0 0 22px #42c78322!important}#mufy-recovery-update-entry.has-update strong{color:#bfffd8}#mufy-recovery-update-entry.has-update small{color:#8de8b2}
       #mufy-recovery-section-nav{padding:1px 0 9px;border-color:#ffffff12}#mufy-recovery-section-back{border-radius:999px!important;background:#ffffff09!important}#mufy-recovery-section-title{font-size:16px;letter-spacing:.04em}
-      .mufy-recovery-section-note{padding:12px 13px;border-color:#a995ff2e;border-radius:14px;background:linear-gradient(135deg,#8d73df18,#ffffff06);box-shadow:inset 0 1px #ffffff0d}.mufy-recovery-section-note strong{color:#f1edff;font-size:13px}.mufy-recovery-section-note span{color:#9d98ad}
       #mufy-recovery-panel input:not([type="checkbox"]):not([type="range"]):not([type="color"]),#mufy-recovery-panel select,#mufy-recovery-panel textarea{border-color:var(--mufy-panel-border)!important;border-radius:11px!important;background:var(--mufy-panel-input)!important;color:var(--mufy-panel-text)!important;box-shadow:inset 0 1px 4px #0002!important;outline:none}#mufy-recovery-panel input:focus,#mufy-recovery-panel select:focus,#mufy-recovery-panel textarea:focus{border-color:var(--mufy-panel-accent)!important;box-shadow:0 0 0 3px var(--mufy-panel-accent-soft)!important}
       #mufy-recovery-panel #mufy-recovery-account-email-input,#mufy-recovery-panel #mufy-recovery-account-password-input{box-sizing:border-box;width:100%;padding:10px;font-size:14px}#mufy-recovery-panel #mufy-recovery-account-current,#mufy-recovery-panel #mufy-recovery-account-mode-guide>div{background:var(--mufy-panel-surface)!important;border-color:var(--mufy-panel-border)!important;color:var(--mufy-panel-text)!important;box-shadow:inset 0 1px color-mix(in srgb,#fff 55%,transparent)}#mufy-recovery-panel #mufy-recovery-account-current span,#mufy-recovery-panel #mufy-recovery-account-mode-guide strong,#mufy-recovery-panel #mufy-recovery-account-password-title{color:var(--mufy-panel-text)!important}#mufy-recovery-panel #mufy-recovery-account-current small,#mufy-recovery-panel #mufy-recovery-account-mode-guide small,#mufy-recovery-panel #mufy-recovery-account-password-summary{color:var(--mufy-panel-muted)!important}#mufy-recovery-panel #mufy-recovery-account-password-warning{background:var(--mufy-panel-accent-soft)!important;border-color:var(--mufy-panel-border)!important;color:var(--mufy-panel-text)!important}
       #mufy-recovery-panel[data-section="accounts"] #mufy-recovery-account-section { order: -1; }
@@ -11240,13 +11960,13 @@ roleStateReady = true;
       #mufy-recovery-status{border-radius:11px;color:#c6bfdc}#mufy-recovery-list{border-color:#ffffff12}.mufy-recovery-row{margin:5px 0;padding:10px 9px;border:1px solid #ffffff0d;border-radius:13px;background:#ffffff05}.mufy-recovery-row:hover{border-color:#a995ff28;background:#ffffff08}.mufy-recovery-row img{border-radius:12px;box-shadow:0 5px 13px #0007}
       #mufy-recovery-model-modal,#mufy-recovery-log-modal,#mufy-recovery-export-modal{border-color:#ffffff24;border-radius:16px;background:linear-gradient(155deg,#292936f5,#17171ff8);box-shadow:0 22px 60px #000c}.mufy-model-monitor-row{border-color:#ffffff14;border-radius:12px;background:#ffffff07}.mufy-model-monitor-row:has(input:checked){border-color:#9f8bea55;background:#8d73df18}
       /* Selected theme owns every panel surface; no legacy purple/black mixing. */
-      #mufy-recovery-panel #mufy-recovery-head,#mufy-recovery-panel .mufy-recovery-section-note,#mufy-recovery-panel .mufy-recovery-section-card,#mufy-recovery-panel .mufy-account-card,#mufy-recovery-panel .mufy-material-card,#mufy-recovery-panel .mufy-recovery-row,#mufy-recovery-panel .mufy-model-monitor-row{background:var(--mufy-panel-surface)!important;border-color:var(--mufy-panel-border)!important;color:var(--mufy-panel-text)!important}
+      #mufy-recovery-panel #mufy-recovery-head,#mufy-recovery-panel .mufy-recovery-section-card,#mufy-recovery-panel .mufy-account-card,#mufy-recovery-panel .mufy-material-card,#mufy-recovery-panel .mufy-recovery-row,#mufy-recovery-panel .mufy-model-monitor-row{background:var(--mufy-panel-surface)!important;border-color:var(--mufy-panel-border)!important;color:var(--mufy-panel-text)!important}
       #mufy-recovery-panel #mufy-recovery-head,#mufy-recovery-panel #mufy-recovery-panel-beauty-head,#mufy-recovery-panel .mufy-quote-modal-head,#mufy-recovery-panel #mufy-recovery-material-editor-head,#mufy-recovery-panel #mufy-recovery-model-head{background:var(--mufy-panel-surface-strong)!important;border-color:var(--mufy-panel-border)!important}
       #mufy-recovery-panel #mufy-recovery-panel-beauty-modal,#mufy-recovery-panel #mufy-recovery-model-modal,#mufy-recovery-panel #mufy-recovery-log-modal,#mufy-recovery-panel #mufy-recovery-export-modal,#mufy-recovery-panel #mufy-recovery-material-editor,#mufy-recovery-panel #mufy-recovery-quote-editor-modal,#mufy-recovery-panel #mufy-recovery-quote-library-modal,#mufy-recovery-panel #mufy-recovery-quote-style-modal{background:var(--mufy-panel-bg)!important;border-color:var(--mufy-panel-border)!important;color:var(--mufy-panel-text)!important}
       #mufy-recovery-panel button{color:var(--mufy-panel-text)}#mufy-recovery-panel button.active,#mufy-recovery-panel .mufy-recovery-section-card:first-child{background:var(--mufy-panel-accent-soft)!important;border-color:var(--mufy-panel-accent)!important}
       #mufy-recovery-panel:where([data-panel-tone="light"]) button{color:var(--mufy-panel-text)!important}
       #mufy-recovery-panel[data-panel-tone="light"] .mufy-recovery-row-actions a{color:var(--mufy-panel-accent-text)!important}
-      #mufy-recovery-panel small,#mufy-recovery-panel .mufy-recovery-muted,#mufy-recovery-panel .mufy-recovery-section-card small,#mufy-recovery-panel .mufy-recovery-section-note span,#mufy-recovery-panel-beauty-fields label{color:var(--mufy-panel-muted)!important}
+      #mufy-recovery-panel small,#mufy-recovery-panel .mufy-recovery-muted,#mufy-recovery-panel .mufy-recovery-section-card small,#mufy-recovery-panel-beauty-fields label{color:var(--mufy-panel-muted)!important}
       #mufy-recovery-panel[data-panel-tone="light"]{box-shadow:0 24px 60px #26313a24,inset 0 1px #fff}#mufy-recovery-panel[data-panel-tone="light"] button{box-shadow:inset 0 1px #fff8,0 3px 10px #26313a10}#mufy-recovery-panel[data-panel-tone="light"] #mufy-recovery-title,#mufy-recovery-panel[data-panel-tone="light"] strong{color:var(--mufy-panel-text)}
       #mufy-recovery-panel #mufy-recovery-log-entry,#mufy-recovery-panel #mufy-recovery-history-entry,#mufy-recovery-panel #mufy-recovery-section-back{background:var(--mufy-panel-surface)!important;border-color:var(--mufy-panel-border)!important;color:var(--mufy-panel-text)!important}
       #mufy-recovery-panel #mufy-recovery-status,#mufy-recovery-panel #mufy-recovery-role-read-options,#mufy-recovery-panel #mufy-recovery-auto-switch-label,#mufy-recovery-panel .mufy-recovery-auto-delay{color:var(--mufy-panel-muted)!important}
@@ -11327,7 +12047,7 @@ roleStateReady = true;
       .theme-book .mufy-quote-preview-text p{margin:0 0 .75em;text-indent:2em}
       .mufy-quote-export-options,.mufy-quote-export-options label{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
       .mufy-quote-export-options{justify-content:space-between;padding:8px 12px;border:1px solid var(--mufy-panel-border);border-radius:10px}
-      #mufy-recovery-panel ::-webkit-scrollbar{width:7px;height:7px}#mufy-recovery-panel ::-webkit-scrollbar-track{background:transparent}#mufy-recovery-panel ::-webkit-scrollbar-thumb{border:2px solid transparent;border-radius:999px;background:#82769c;background-clip:padding-box}#mufy-recovery-panel ::-webkit-scrollbar-thumb:hover{background:#a594cb;background-clip:padding-box}
+      #mufy-recovery-panel ::-webkit-scrollbar{width:7px;height:7px}#mufy-recovery-panel ::-webkit-scrollbar-track{background:transparent}#mufy-recovery-panel ::-webkit-scrollbar-thumb{border:2px solid transparent;border-radius:999px}
       #mufy-recovery-panel ::-webkit-scrollbar-thumb{background:var(--mufy-panel-accent)!important;background-clip:padding-box!important}#mufy-recovery-panel ::-webkit-scrollbar-thumb:hover{background:var(--mufy-panel-accent-text)!important;background-clip:padding-box!important}
       @media (max-width:520px){
         #mufy-recovery-panel{right:8px;bottom:58px;width:calc(100vw - 16px);max-width:calc(100vw - 16px)}
@@ -11336,7 +12056,7 @@ roleStateReady = true;
         #mufy-recovery-panel-beauty-fields{grid-template-columns:1fr;gap:8px;padding:11px}
         #mufy-recovery-tabs{grid-template-columns:repeat(2,minmax(0,1fr));gap:5px}#mufy-recovery-favorite-tabs{grid-template-columns:repeat(3,minmax(0,1fr))}
         #mufy-recovery-mask-tabs{grid-template-columns:repeat(3,minmax(0,1fr));gap:5px}
-        #mufy-recovery-mask-actions{grid-template-columns:repeat(3,minmax(0,1fr));gap:5px}
+        #mufy-recovery-mask-actions{gap:5px}
         #mufy-recovery-site-actions{grid-template-columns:repeat(2,minmax(0,1fr));gap:5px}
         #mufy-recovery-manual-auto-actions{grid-template-columns:1fr 1fr}
         #mufy-recovery-manual-auto-message{grid-column:1/-1}
@@ -11479,7 +12199,7 @@ roleStateReady = true;
 <li><strong>收藏作者的全部角色：</strong><ol><li>进入「角色」→「作者合集」，找到作者，点右侧收藏按钮。</li><li>打开作者主页，进入助手「收藏」→「网页」，依次点「获取收藏状态」「全选未收藏」「立即收藏」。</li></ol></li>
 <li><strong>整理或删除收藏夹：</strong>进入「收藏」→「收藏夹」，可按作者整理角色，也可筛选空收藏夹或批量删除。删除收藏夹会保留角色收藏。</li>
 <li><strong>收藏：</strong>点角色卡片上的星星收藏或取消收藏。有分享链接时优先用分享链接收藏。</li>
-<li><strong>普通角色一键扣数：</strong>进入「收藏」→「普通待聊」，可修改发送内容，再点「一键扣数」。任务可以停止、继续或取消，完成后可刷新查看结果。</li>
+<li><strong>普通角色一键扣数：</strong>进入「收藏」→「普通待聊」，可修改发送内容，再点「一键扣数」。接口发送固定使用 MUMU-1.5。发送结果不明确时会暂停，请先核对聊天记录。任务可以停止、继续或取消。</li>
 <li><strong>完整导出当前聊天：</strong>打开要导出的对话，再到助手「聊天记录」点「导出当前聊天」。下载的 ZIP 内含 HTML 和 TXT。再点一次可停止导出。</li>
 <li><strong>根据聊天内容找角色：</strong>进入「聊天记录」，输入关键词后点「搜索」。可选全部或指定角色。单角色至少输入 1 个字，全部角色至少 2 个字。点「打开并定位」回到原对话。</li>
 <li><strong>角色回复摘录：</strong>选中回复里的文字，点该条回复的「⋯」→「摘录」，再点「收藏到牌组」。直接点「摘录」可选中整条回复。进入助手「摘录」可查看、编辑或导出。
@@ -11520,9 +12240,9 @@ roleStateReady = true;
           <label class="mufy-recovery-mask-editor-field is-wide"><span class="mufy-recovery-mask-editor-label"><span>我的描述</span><button type="button" class="mufy-recovery-mask-field-copy" data-copy-mask-field="description" data-copy-mask-label="我的描述" title="复制我的描述" aria-label="复制我的描述">⧉</button></span><textarea name="description"></textarea></label>
           <label class="mufy-recovery-mask-editor-field is-wide"><span class="mufy-recovery-mask-editor-label"><span>我的喜好</span><button type="button" class="mufy-recovery-mask-field-copy" data-copy-mask-field="favorite" data-copy-mask-label="我的喜好" title="复制我的喜好" aria-label="复制我的喜好">⧉</button></span><textarea name="favorite"></textarea></label>
           <label class="mufy-recovery-mask-editor-field is-wide"><span class="mufy-recovery-mask-editor-label"><span>指令</span><button type="button" class="mufy-recovery-mask-field-copy" data-copy-mask-field="command" data-copy-mask-label="指令" title="复制指令" aria-label="复制指令">⧉</button></span><textarea name="command"></textarea></label>
-          <div id="mufy-recovery-mask-editor-hint">编辑的是上方选中的网站面具，但保存只写入浏览器本地面具库。另存会新增一份；替换会删除面具库中的旧副本再写入当前内容，网站原面具不受影响。</div>
+          <div id="mufy-recovery-mask-editor-hint"></div>
         </div>
-        <div id="mufy-recovery-mask-editor-actions"><button id="mufy-recovery-mask-editor-save-as">另存为新面具</button><button id="mufy-recovery-mask-editor-replace">替换本地原面具</button></div>
+        <div id="mufy-recovery-mask-editor-actions"><button id="mufy-recovery-mask-editor-save-as">另存为新面具</button><button id="mufy-recovery-mask-editor-replace">同步替换网站和本地</button></div>
       </div>
       <div id="mufy-recovery-favorite-interrupt-modal" hidden>
         <div id="mufy-recovery-favorite-interrupt-head"><strong>中断收藏任务</strong><button id="mufy-recovery-favorite-interrupt-close" title="继续当前任务">×</button></div>
@@ -11585,7 +12305,7 @@ roleStateReady = true;
           <div id="mufy-recovery-tabs"><button class="active" data-category="allRoles">全部角色 (0)</button><button data-category="chatted">聊过的 (0)</button><button data-category="chattedNotFavorite">聊过未收藏 (0)</button><button data-category="favoriteOnly">收藏未聊 (0)</button><button data-category="authors">作者合集 (0)</button></div>
           <div id="mufy-recovery-role-actions"><button id="mufy-recovery-run">找回角色链接</button><button id="mufy-recovery-refresh-status" title="更新最近一次链接读取到的角色状态和作者名称">更新状态</button><button id="mufy-recovery-role-more" aria-expanded="false" aria-controls="mufy-recovery-role-more-options">▸ 更多</button></div>
           <div id="mufy-recovery-role-more-options" hidden><div id="mufy-recovery-role-read-options"><span>读取方式</span><select id="mufy-recovery-role-read-mode" aria-label="角色读取方式"><option value="full">完整读取</option><option value="latest">查找最新几页</option></select><label>页数 <input id="mufy-recovery-role-latest-pages" type="number" min="1" max="500" value="2" aria-label="读取页数"></label><span>每页 20 个</span></div><button id="mufy-recovery-export-roles" class="mufy-recovery-tab-action">导出角色</button></div>
-          <button id="mufy-recovery-favorite-visible" hidden>收藏当前列表</button><div id="mufy-recovery-share-recovery-controls" hidden><button id="mufy-recovery-share-recovery-one">检测全部收藏未聊</button><button id="mufy-recovery-share-recovery-cancel" hidden>取消任务</button></div>
+          <button id="mufy-recovery-favorite-visible" hidden>收藏当前列表</button><div id="mufy-recovery-share-recovery-controls" hidden><button id="mufy-recovery-queue-old-favorites" hidden title="点管理后勾选角色">加入待聊</button><button id="mufy-recovery-share-recovery-one">检测</button><button id="mufy-recovery-manage-old-favorites" aria-pressed="false" hidden>管理</button><button id="mufy-recovery-share-recovery-cancel" hidden>取消任务</button></div>
         </div>
         <div id="mufy-recovery-favorite-section" hidden>
           <div class="mufy-favorite-nav">
@@ -11593,8 +12313,9 @@ roleStateReady = true;
             <button id="mufy-recovery-site-manage" hidden aria-pressed="false">管理</button>
           </div>
           <div id="mufy-recovery-favorite-actions"><button id="mufy-recovery-folder-organize">按作者整理</button><button id="mufy-recovery-folder-manage">新建 / 删除收藏夹</button><button id="mufy-recovery-stop-action" hidden>停止找回</button></div>
+          <form id="mufy-recovery-folder-search"><input id="mufy-recovery-folder-search-query" type="search" placeholder="搜索收藏夹名称或 ID" aria-label="搜索收藏夹名称或 ID"><button type="submit" disabled>搜索</button></form>
           <label id="mufy-recovery-auto-folder-label"><input id="mufy-recovery-auto-add-favorite-folder" type="checkbox"><span>收藏后自动放入收藏夹<small>关闭后仍会正常收藏角色，只是不再自动按作者归入收藏夹；手动整理功能不受影响。</small></span></label>
-          <div id="mufy-recovery-site-actions"><button id="mufy-recovery-refresh-favorite-states">获取收藏状态</button><button id="mufy-recovery-select-unfavorite-site">全选未收藏</button><button id="mufy-recovery-queue-site-for-chat">加入普通待聊</button><button id="mufy-recovery-clear-site-selection">清空勾选</button><button id="mufy-recovery-refresh-site-rows" title="刷新当前网站页面并重新捕获，之后翻页会继续自动获取">重新获取</button><button id="mufy-recovery-clear-site-rows">清空结果</button></div>
+          <div id="mufy-recovery-site-actions"><button id="mufy-recovery-refresh-favorite-states">获取收藏状态</button><button id="mufy-recovery-select-unfavorite-site">全选未收藏</button><button id="mufy-recovery-queue-site-for-chat">加入普通待聊</button><button id="mufy-recovery-clear-site-selection">全选</button><button id="mufy-recovery-refresh-site-rows" title="刷新当前网站页面并重新捕获，之后翻页会继续自动获取">重新获取</button><button id="mufy-recovery-clear-site-rows">清空结果</button></div>
           <div id="mufy-recovery-manual-auto-actions" hidden><input id="mufy-recovery-manual-auto-message" type="text" maxlength="500" value="${esc(state.manualAutoChatMessage)}" aria-label="一键扣数发送内容"><label class="mufy-recovery-auto-delay">间隔 <input id="mufy-recovery-manual-auto-delay-min" type="number" min="0" max="300" step="1" value="${esc(state.manualAutoChatDelayMin)}" aria-label="随机冷却最短秒数">～<input id="mufy-recovery-manual-auto-delay-max" type="number" min="0" max="300" step="1" value="${esc(state.manualAutoChatDelayMax)}" aria-label="随机冷却最长秒数"> 秒</label><button id="mufy-recovery-manual-auto-start">一键扣数</button><button id="mufy-recovery-manual-auto-cancel" hidden>取消任务</button><button id="mufy-recovery-manual-chat-next" title="按普通待聊列表顺序打开角色；再次点击视为当前角色已处理并前往下一个">下一个</button></div>
         </div>
         <div id="mufy-recovery-chat-section" hidden>
@@ -11634,9 +12355,10 @@ roleStateReady = true;
           <div id="mufy-recovery-mask-tabs"><button data-category="masks">面具 (0)</button><button data-category="library">面具库 (0)</button><button id="mufy-recovery-save-all" class="mufy-recovery-tab-action">全部存入面具库</button></div>
           <input id="mufy-recovery-mask-search" placeholder="搜索面具名或面具 ID" hidden>
           <label id="mufy-recovery-auto-switch-label"><input id="mufy-recovery-auto-switch" type="checkbox"> 自动切换绑定面具</label>
-          <div id="mufy-recovery-mask-actions"><button id="mufy-recovery-import-masks">导入面具</button><button id="mufy-recovery-export-masks">导出面具</button><button id="mufy-recovery-undo" class="mufy-recovery-tab-action" disabled>撤回上次操作</button><input id="mufy-recovery-mask-file" type="file" accept=".json,application/json" hidden></div>
+          <div id="mufy-recovery-mask-actions"><button id="mufy-recovery-import-masks">导入面具</button><button id="mufy-recovery-export-masks">导出面具</button><button id="mufy-recovery-undo" class="mufy-recovery-tab-action" title="撤回上一次可恢复的面具操作" disabled>撤回</button><button id="mufy-recovery-mask-manage" aria-pressed="false">管理</button><input id="mufy-recovery-mask-file" type="file" accept=".json,application/json" hidden></div>
+          <div id="mufy-recovery-mask-selection-bar" hidden><span id="mufy-recovery-mask-selection-count">已选 0 个</span><button id="mufy-recovery-mask-select-all">全选当前</button><button id="mufy-recovery-mask-clear-selection">清空选择</button><button id="mufy-recovery-mask-delete-selected">删除已选 (0)</button></div>
         </div>
-      </div><div id="mufy-recovery-list"></div>
+      </div><div id="mufy-recovery-list"></div><div id="mufy-recovery-folder-search-results" aria-label="收藏夹搜索结果" hidden></div>
       <div id="mufy-recovery-site-selection-bar" hidden><span id="mufy-recovery-site-selection-count">已选 0 项</span><button id="mufy-recovery-favorite-selected-site">立即收藏 (0)</button></div>
       <div id="mufy-recovery-resize-handle-bottom" title="上下拖动调整面板高度" aria-label="上下拖动调整面板高度"></div>`;
     panel.style.display = 'none';
@@ -11962,6 +12684,20 @@ roleStateReady = true;
       createManagedFavoriteFolder();
     };
     const folderDeleteModal = panel.querySelector('#mufy-recovery-folder-delete-modal');
+    panel.querySelector('#mufy-recovery-folder-search-query').oninput = () => renderInlineFavoriteFolderSearch();
+    panel.querySelector('#mufy-recovery-folder-search-results').addEventListener('click', event => {
+      const button = event.target.closest('[data-favorite-folder-jump]');
+      if (!button) return;
+      const folder = state.favoriteFolderSearchRows?.find(row => favoriteFolderId(row) === button.dataset.favoriteFolderJump);
+      if (folder) openFavoriteFolderOnWebsite(folder);
+    });
+    panel.querySelector('#mufy-recovery-folder-search-results').addEventListener('toggle', event => {
+      if (event.target.matches('details[data-favorite-folder-preview]')) expandFavoriteFolder(event.target);
+    }, true);
+    panel.querySelector('#mufy-recovery-folder-search').onsubmit = event => {
+      event.preventDefault();
+      searchFavoriteFoldersInline();
+    };
     panel.querySelector('#mufy-recovery-folder-delete-close').onclick = () => {
       if (!state.favoriteFolderDeleteLoading) folderDeleteModal.hidden = true;
     };
@@ -12024,6 +12760,19 @@ roleStateReady = true;
     panel.querySelector('#mufy-recovery-stop-action').onclick = pauseRoleReading;
     panel.querySelector('#mufy-recovery-auto-add-favorite-folder').onchange = event => setAutoAddFavoriteFolderSetting(event.target.checked);
     panel.querySelector('#mufy-recovery-favorite-visible').onclick = () => favoriteRows(state.visibleRows, '当前列表');
+    panel.querySelector('#mufy-recovery-queue-old-favorites').onclick = queueSelectedOldFavoritesForChat;
+    panel.querySelector('#mufy-recovery-manage-old-favorites').onclick = () => {
+      state.oldFavoritesManaging = !state.oldFavoritesManaging;
+      if (!state.oldFavoritesManaging) state.selectedFavoriteOnlyForChat.clear();
+      render();
+    };
+    panel.querySelector('#mufy-recovery-list').addEventListener('change', event => {
+      const id = event.target.dataset?.queueOldFavorite;
+      if (!id || !state.oldFavoritesManaging || state.section !== 'roles' || state.active !== 'favoriteOnly') return;
+      if (event.target.checked) state.selectedFavoriteOnlyForChat.add(id);
+      else state.selectedFavoriteOnlyForChat.delete(id);
+      render();
+    });
     panel.querySelector('#mufy-recovery-share-recovery-one').onclick = async () => {
       const recoveryTask = loadFavoriteShareRecoveryJob();
       if (state.shareRecoveryLoading && recoveryTask) requestFavoriteShareRecoveryPause();
@@ -12032,6 +12781,28 @@ roleStateReady = true;
     panel.querySelector('#mufy-recovery-share-recovery-cancel').onclick = () => cancelFavoriteShareRecoveryJob();
     panel.querySelector('#mufy-recovery-undo').onclick = undoLastLibraryChange;
     panel.querySelector('#mufy-recovery-save-all').onclick = addAllMasksToLibrary;
+    panel.querySelector('#mufy-recovery-mask-manage').onclick = () => {
+      if (state.maskDeleteRunning) return;
+      state.maskManaging = !state.maskManaging;
+      state.selectedMaskKeys.clear();
+      render();
+    };
+    panel.querySelector('#mufy-recovery-mask-select-all').onclick = () => {
+      state.visibleRows.forEach(row => state.selectedMaskKeys.add(selectedMaskKey(row)));
+      render();
+    };
+    panel.querySelector('#mufy-recovery-mask-clear-selection').onclick = () => {
+      state.selectedMaskKeys.clear();
+      render();
+    };
+    panel.querySelector('#mufy-recovery-mask-delete-selected').onclick = deleteSelectedMasks;
+    panel.querySelector('#mufy-recovery-list').addEventListener('change', event => {
+      const checkbox = event.target.closest?.('[data-mask-select]');
+      if (!checkbox || state.maskDeleteRunning) return;
+      if (checkbox.checked) state.selectedMaskKeys.add(checkbox.dataset.maskSelect);
+      else state.selectedMaskKeys.delete(checkbox.dataset.maskSelect);
+      render();
+    });
     const exportModal = panel.querySelector('#mufy-recovery-export-modal');
     const exportBindingOption = panel.querySelector('#mufy-recovery-export-binding-option');
     const exportBindingHint = panel.querySelector('#mufy-recovery-export-binding-hint');
@@ -12093,7 +12864,7 @@ roleStateReady = true;
     };
     panel.querySelector('#mufy-recovery-select-unfavorite-site').onclick = selectUnfavoriteSiteRows;
     panel.querySelector('#mufy-recovery-favorite-selected-site').onclick = favoriteSelectedSiteRows;
-    panel.querySelector('#mufy-recovery-clear-site-selection').onclick = clearSiteSelection;
+    panel.querySelector('#mufy-recovery-clear-site-selection').onclick = toggleAllSiteRows;
     panel.querySelector('#mufy-recovery-refresh-site-rows').onclick = refreshSiteRows;
     panel.querySelector('#mufy-recovery-clear-site-rows').onclick = clearSiteRows;
     panel.querySelector('#mufy-recovery-mask-search').oninput = event => { state.maskQuery = event.target.value.trim().toLowerCase(); render(); };
@@ -12165,6 +12936,7 @@ roleStateReady = true;
     panel.querySelectorAll('[data-category]').forEach(button => {
       button.onclick = () => {
         if (button.dataset.category !== 'siteSearch') state.siteRoleManaging = false;
+        if (button.dataset.category !== state.active && (button.dataset.category === 'masks' || button.dataset.category === 'library')) state.selectedMaskKeys.clear();
         state.active = button.dataset.category;
         state.section = state.active === 'masks' || state.active === 'library' ? 'masks'
           : state.active === 'siteSearch' || state.active === 'siteAuthors' ? 'favorites'
@@ -12329,9 +13101,15 @@ roleStateReady = true;
     setTimeout(() => {
       const recoveryTask = loadFavoriteShareRecoveryJob();
       if (!recoveryTask) return;
+      const failedRow = recoveryTask.rows[recoveryTask.index];
+      if (recoveryTask.paused && recoveryTask.phase === 'unfavorited' && failedRow?.characterId
+          && (!recoveryTask.pauseReason || recoveryTask.pauseReason === '重新收藏失败')) {
+        cancelFailedFavoriteShareRecovery(recoveryTask, failedRow, new Error('上个版本留下了未确认的收藏恢复记录'));
+        return;
+      }
       const navigationType = pageWindow.performance?.getEntriesByType?.('navigation')?.[0]?.type || '';
       const intentionalShareNavigation = Boolean(
-        recoveryTask.phase === 'unfavorited'
+        !recoveryTask.paused && recoveryTask.phase === 'unfavorited'
         && navigationType === 'navigate'
         && Date.now() - Number(recoveryTask.navigationStartedAt || 0) < 120000
       );
@@ -12374,6 +13152,7 @@ roleStateReady = true;
     }, 1600);
     setTimeout(() => locatePendingChatJump(), 1400);
     setTimeout(() => installExactRoleFallback(), 700);
+    resumeFavoriteFolderJump();
   }
 
   let bootTimer = 0;
@@ -12434,4 +13213,3 @@ roleStateReady = true;
     mountGuard.observe(document.documentElement, { childList: true, subtree: true });
   } catch (_) {}
 })();
-
