@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.138
+// @version      3.0.0-dev.139
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -21,7 +21,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.138';
+    : '3.0.0-dev.139';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -7434,7 +7434,7 @@ roleStateReady = true;
       sessionStorage.setItem(FAVORITE_FOLDER_JUMP_KEY, JSON.stringify({
         id, name: favoriteFolderName(folder), scope: maskAccountScope,
         matchByName: sameName.every(row => favoriteFolderId(row) === id),
-        expiresAt: Date.now() + 30000
+        expiresAt: Date.now() + 90000
       }));
     } catch (_) {
       showRecoveryNotice('浏览器未能保存跳转目标，请手动打开网站收藏夹。', 'warn');
@@ -7492,6 +7492,26 @@ roleStateReady = true;
     return controls.length === 1 ? controls[0] : null;
   }
 
+  function findFavoriteFoldersScroller(tab) {
+    const root = tab.closest('main, [role="main"]') || document.querySelector('main, [role="main"]') || document.body;
+    const canScroll = element => element.clientHeight >= 100 && element.scrollHeight > element.clientHeight + 2
+      && /^(auto|scroll|overlay)$/.test(pageWindow.getComputedStyle(element).overflowY);
+    for (let element = tab.parentElement; element; element = element.parentElement) {
+      if (canScroll(element)) return element;
+    }
+    let best = null;
+    let bestArea = 0;
+    for (const element of root.querySelectorAll('div, section, ul, [role="tabpanel"]')) {
+      if (element.closest('#mufy-recovery-panel') || !isVisibleElement(element) || !canScroll(element)) continue;
+      const area = element.clientWidth * element.clientHeight;
+      if (area > bestArea) {
+        best = element;
+        bestArea = area;
+      }
+    }
+    return best || document.scrollingElement;
+  }
+
   async function resumeFavoriteFolderJump() {
     if (location.pathname.replace(/\/$/, '') !== '/favorites') return;
     let target;
@@ -7500,7 +7520,11 @@ roleStateReady = true;
       if (!target) return;
       sessionStorage.removeItem(FAVORITE_FOLDER_JUMP_KEY);
     } catch (_) { return; }
-    let switchedTab = false;
+    let tab = null;
+    let nextScrollAt = 0;
+    let scrollArea = null;
+    let lastHeight = 0;
+    let bottomSince = null;
     while (Date.now() < target.expiresAt && location.pathname.replace(/\/$/, '') === '/favorites') {
       scanStoredAuthorization();
       if (maskAccountScope && maskAccountScope !== target.scope) break;
@@ -7511,20 +7535,45 @@ roleStateReady = true;
         control.click();
         return;
       }
-      if (!switchedTab && maskAccountScope === target.scope) {
-        const tab = findNativeFavoriteFoldersTab();
+      const now = Date.now();
+      if (!tab && maskAccountScope === target.scope) {
+        tab = findNativeFavoriteFoldersTab();
         if (tab) {
-          switchedTab = true;
+          if (panel) panel.style.display = 'none';
           if (tab.getAttribute('aria-selected') !== 'true') {
-            if (panel) panel.style.display = 'none';
             tab.click();
           }
+          nextScrollAt = now + 1200;
         }
+      } else if (tab && maskAccountScope === target.scope && now >= nextScrollAt) {
+        if (!scrollArea || !scrollArea.isConnected || bottomSince !== null) {
+          const activeTab = findNativeFavoriteFoldersTab() || tab;
+          const nextArea = findFavoriteFoldersScroller(activeTab);
+          if (nextArea !== scrollArea) {
+            scrollArea = nextArea;
+            bottomSince = null;
+            lastHeight = 0;
+          }
+        }
+        if (scrollArea) {
+          const { scrollTop, scrollHeight, clientHeight } = scrollArea;
+          if (scrollHeight !== lastHeight) bottomSince = null;
+          lastHeight = scrollHeight;
+          const bottom = Math.max(0, scrollHeight - clientHeight);
+          if (scrollTop < bottom - 2) {
+            bottomSince = null;
+            scrollArea.scrollTo({ top: Math.min(bottom, scrollTop + Math.max(100, Math.floor(clientHeight * 0.8))), behavior: 'instant' });
+          } else {
+            bottomSince ??= now;
+            if (now - bottomSince >= 7000) break;
+          }
+        }
+        nextScrollAt = now + 600;
       }
       await wait(300);
     }
     if (location.pathname.replace(/\/$/, '') === '/favorites') {
-      showRecoveryNotice('未找到唯一的收藏夹入口，请在网站收藏页手动打开。', 'warn', 7000);
+      showRecoveryNotice('自动查找未找到唯一的收藏夹，请在网站收藏页手动打开。', 'warn', 7000);
     }
   }
 
