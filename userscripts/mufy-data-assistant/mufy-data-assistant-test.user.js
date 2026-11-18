@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.154
+// @version      3.0.0-dev.155
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -22,7 +22,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.154';
+    : '3.0.0-dev.155';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -12540,6 +12540,35 @@ roleStateReady = true;
     });
   }
 
+  function bindModelMonitorEvents(mountedPanel, toggle) {
+    const modelModal = mountedPanel.querySelector('#mufy-recovery-model-modal');
+    const openModelMonitor = () => {
+      mountedPanel.style.display = 'flex';
+      modelModal.hidden = false;
+      renderModelMonitorModal();
+      if (!state.modelMonitorRows.length) checkModelMonitor(true);
+    };
+    mountedPanel.querySelector('#mufy-recovery-model-entry').onclick = openModelMonitor;
+    mountedPanel.querySelector('#mufy-recovery-model-close').onclick = () => { modelModal.hidden = true; };
+    mountedPanel.querySelector('#mufy-recovery-model-refresh').onclick = () => checkModelMonitor(true);
+    mountedPanel.querySelector('#mufy-recovery-model-notify').onchange = event => setModelMonitorNotify(event.target.checked);
+    mountedPanel.querySelector('#mufy-recovery-model-search').oninput = renderModelMonitorModal;
+    mountedPanel.querySelector('#mufy-recovery-model-list').onchange = event => {
+      const checkbox = event.target.closest?.('[data-model-monitor-id]');
+      if (!checkbox) return;
+      const id = String(checkbox.dataset.modelMonitorId || '');
+      if (checkbox.checked) state.modelMonitorSelectedIds.add(id);
+      else state.modelMonitorSelectedIds.delete(id);
+      saveModelMonitorSelection();
+      renderModelMonitorModal();
+    };
+    toggle.querySelector('#mufy-recovery-model-dots').onclick = event => {
+      event.preventDefault();
+      event.stopPropagation();
+      openModelMonitor();
+    };
+  }
+
   function mount() {
     const existingPanel = document.getElementById('mufy-recovery-panel');
     const existingToggle = document.getElementById('mufy-recovery-toggle');
@@ -12775,33 +12804,8 @@ roleStateReady = true;
     panel.querySelector('#mufy-recovery-quote-export').onclick = exportSelectedQuoteImage;
     bindMaterialEvents(panel);
     bindAccountEvents(panel);
-    const modelModal = panel.querySelector('#mufy-recovery-model-modal');
-    const openModelMonitor = () => {
-      panel.style.display = 'flex';
-      modelModal.hidden = false;
-      renderModelMonitorModal();
-      if (!state.modelMonitorRows.length) checkModelMonitor(true);
-    };
-    panel.querySelector('#mufy-recovery-model-entry').onclick = openModelMonitor;
+    bindModelMonitorEvents(panel, toggle);
     panel.querySelector('#mufy-recovery-update-entry').onclick = handleScriptUpdateEntry;
-    panel.querySelector('#mufy-recovery-model-close').onclick = () => { modelModal.hidden = true; };
-    panel.querySelector('#mufy-recovery-model-refresh').onclick = () => checkModelMonitor(true);
-    panel.querySelector('#mufy-recovery-model-notify').onchange = event => setModelMonitorNotify(event.target.checked);
-    panel.querySelector('#mufy-recovery-model-search').oninput = renderModelMonitorModal;
-    panel.querySelector('#mufy-recovery-model-list').onchange = event => {
-      const checkbox = event.target.closest?.('[data-model-monitor-id]');
-      if (!checkbox) return;
-      const id = String(checkbox.dataset.modelMonitorId || '');
-      if (checkbox.checked) state.modelMonitorSelectedIds.add(id);
-      else state.modelMonitorSelectedIds.delete(id);
-      saveModelMonitorSelection();
-      renderModelMonitorModal();
-    };
-    toggle.querySelector('#mufy-recovery-model-dots').onclick = event => {
-      event.preventDefault();
-      event.stopPropagation();
-      openModelMonitor();
-    };
     panel.querySelector('#mufy-recovery-history-entry').onclick = () => {
       const isIndexOpen = state.section === 'roles' && state.active === 'roleHistory';
       state.section = 'roles';
