@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.162
+// @version      3.0.0-dev.163
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -22,7 +22,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.162';
+    : '3.0.0-dev.163';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -12967,6 +12967,89 @@ roleStateReady = true;
     };
   }
 
+  function bindQuoteEvents(mountedPanel) {
+    mountedPanel.querySelector('#mufy-recovery-quote-entry').onclick = openQuoteLibraryModal;
+    const quoteEditorModal = mountedPanel.querySelector('#mufy-recovery-quote-editor-modal');
+    const closeQuoteEditor = () => {
+      quoteEditorModal.hidden = true;
+      quoteDraftContext = null;
+    };
+    mountedPanel.querySelector('#mufy-recovery-quote-editor-close').onclick = closeQuoteEditor;
+    mountedPanel.querySelector('#mufy-recovery-quote-editor-cancel').onclick = closeQuoteEditor;
+    mountedPanel.querySelector('#mufy-recovery-quote-editor-save').onclick = saveQuoteDraft;
+    const quoteLibraryModal = mountedPanel.querySelector('#mufy-recovery-quote-library-modal');
+    mountedPanel.querySelector('#mufy-recovery-quote-library-close').onclick = () => {
+      quoteLibraryModal.hidden = true;
+    };
+    mountedPanel.querySelector('#mufy-recovery-quote-style-entry').onclick = () => {
+      quoteStyleOpen = true;
+      renderQuoteLibraryModal();
+    };
+    mountedPanel.querySelector('#mufy-recovery-quote-list').onclick = event => {
+      const deck = event.target.closest?.('[data-quote-deck]');
+      if (deck) {
+        quoteOpenDeckId = String(deck.dataset.quoteDeck || '');
+        state.quoteSelectedId = '';
+        quoteStageOpen = false;
+        quotePreviewFlipped = false;
+        quoteInlineEditing = false;
+        quoteToolsOpen = false;
+        renderQuoteLibraryModal();
+        return;
+      }
+      const item = event.target.closest?.('[data-quote-id]');
+      if (!item) return;
+      state.quoteSelectedId = String(item.dataset.quoteId || '');
+      quoteStageOpen = true;
+      quotePreviewFlipped = false;
+      quoteInlineEditing = false;
+      quoteToolsOpen = false;
+      renderQuoteLibraryModal();
+    };
+    mountedPanel.querySelector('#mufy-recovery-quote-stage-close').onclick = () => {
+      if (quoteStyleOpen) quoteStyleOpen = false;
+      else if (quoteInlineEditing) quoteInlineEditing = false;
+      else if (quoteToolsOpen) quoteToolsOpen = false;
+      else quoteStageOpen = false;
+      renderQuoteLibraryModal();
+    };
+    mountedPanel.querySelector('#mufy-recovery-quote-tools-toggle').onclick = () => {
+      quoteToolsOpen = true;
+      renderQuoteLibraryModal();
+    };
+    const quotePreview = mountedPanel.querySelector('#mufy-recovery-quote-preview');
+    quotePreview.onclick = () => {
+      quotePreviewFlipped = !quotePreviewFlipped;
+      renderQuoteLibraryModal();
+    };
+    quotePreview.onkeydown = event => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      quotePreview.click();
+    };
+    mountedPanel.querySelectorAll('[data-quote-style]').forEach(control => {
+      const updateQuoteStyle = () => {
+        const key = control.dataset.quoteStyle;
+        const value = control.type === 'checkbox' ? control.checked : control.type === 'range' ? Number(control.value) : control.value;
+        state.quoteStyle = { ...state.quoteStyle, [key]: value };
+        saveQuoteStyle();
+        renderQuoteLibraryModal();
+      };
+      control.addEventListener(control.type === 'range' || control.type === 'color' ? 'input' : 'change', updateQuoteStyle);
+    });
+    mountedPanel.querySelector('#mufy-recovery-quote-delete').onclick = deleteSelectedQuote;
+    mountedPanel.querySelector('#mufy-recovery-quote-source').onclick = openSelectedQuoteSource;
+    mountedPanel.querySelector('#mufy-recovery-quote-update').onclick = () => {
+      const editor = mountedPanel.querySelector('#mufy-recovery-quote-inline-editor');
+      editor.value = selectedQuoteCard()?.text || '';
+      quoteInlineEditing = true;
+      renderQuoteLibraryModal();
+      editor.focus();
+    };
+    mountedPanel.querySelector('#mufy-recovery-quote-save-text').onclick = updateSelectedQuoteText;
+    mountedPanel.querySelector('#mufy-recovery-quote-export').onclick = exportSelectedQuoteImage;
+  }
+
   function mount() {
     const existingPanel = document.getElementById('mufy-recovery-panel');
     const existingToggle = document.getElementById('mufy-recovery-toggle');
@@ -13002,86 +13085,7 @@ roleStateReady = true;
     bindPanelUtilityEvents(panel);
     panel.querySelector('#mufy-recovery-export-chat').onclick = exportCurrentChat;
     installChatBackupControls(panel.querySelector('#mufy-recovery-chat-backup'));
-    panel.querySelector('#mufy-recovery-quote-entry').onclick = openQuoteLibraryModal;
-    const quoteEditorModal = panel.querySelector('#mufy-recovery-quote-editor-modal');
-    const closeQuoteEditor = () => {
-      quoteEditorModal.hidden = true;
-      quoteDraftContext = null;
-    };
-    panel.querySelector('#mufy-recovery-quote-editor-close').onclick = closeQuoteEditor;
-    panel.querySelector('#mufy-recovery-quote-editor-cancel').onclick = closeQuoteEditor;
-    panel.querySelector('#mufy-recovery-quote-editor-save').onclick = saveQuoteDraft;
-    const quoteLibraryModal = panel.querySelector('#mufy-recovery-quote-library-modal');
-    panel.querySelector('#mufy-recovery-quote-library-close').onclick = () => {
-      quoteLibraryModal.hidden = true;
-    };
-    panel.querySelector('#mufy-recovery-quote-style-entry').onclick = () => {
-      quoteStyleOpen = true;
-      renderQuoteLibraryModal();
-    };
-    panel.querySelector('#mufy-recovery-quote-list').onclick = event => {
-      const deck = event.target.closest?.('[data-quote-deck]');
-      if (deck) {
-        quoteOpenDeckId = String(deck.dataset.quoteDeck || '');
-        state.quoteSelectedId = '';
-        quoteStageOpen = false;
-        quotePreviewFlipped = false;
-        quoteInlineEditing = false;
-        quoteToolsOpen = false;
-        renderQuoteLibraryModal();
-        return;
-      }
-      const item = event.target.closest?.('[data-quote-id]');
-      if (!item) return;
-      state.quoteSelectedId = String(item.dataset.quoteId || '');
-      quoteStageOpen = true;
-      quotePreviewFlipped = false;
-      quoteInlineEditing = false;
-      quoteToolsOpen = false;
-      renderQuoteLibraryModal();
-    };
-    panel.querySelector('#mufy-recovery-quote-stage-close').onclick = () => {
-      if (quoteStyleOpen) quoteStyleOpen = false;
-      else if (quoteInlineEditing) quoteInlineEditing = false;
-      else if (quoteToolsOpen) quoteToolsOpen = false;
-      else quoteStageOpen = false;
-      renderQuoteLibraryModal();
-    };
-    panel.querySelector('#mufy-recovery-quote-tools-toggle').onclick = () => {
-      quoteToolsOpen = true;
-      renderQuoteLibraryModal();
-    };
-    const quotePreview = panel.querySelector('#mufy-recovery-quote-preview');
-    quotePreview.onclick = () => {
-      quotePreviewFlipped = !quotePreviewFlipped;
-      renderQuoteLibraryModal();
-    };
-    quotePreview.onkeydown = event => {
-      if (event.key !== 'Enter' && event.key !== ' ') return;
-      event.preventDefault();
-      quotePreview.click();
-    };
-    panel.querySelectorAll('[data-quote-style]').forEach(control => {
-      const updateQuoteStyle = () => {
-        const key = control.dataset.quoteStyle;
-        const value = control.type === 'checkbox' ? control.checked : control.type === 'range' ? Number(control.value) : control.value;
-        state.quoteStyle = { ...state.quoteStyle, [key]: value };
-        saveQuoteStyle();
-        renderQuoteLibraryModal();
-      };
-      control.addEventListener(control.type === 'range' || control.type === 'color' ? 'input' : 'change', updateQuoteStyle);
-    });
-    panel.querySelector('#mufy-recovery-quote-delete').onclick = deleteSelectedQuote;
-    panel.querySelector('#mufy-recovery-quote-source').onclick = openSelectedQuoteSource;
-    panel.querySelector('#mufy-recovery-quote-update').onclick = () => {
-      const editor = panel.querySelector('#mufy-recovery-quote-inline-editor');
-      editor.value = selectedQuoteCard()?.text || '';
-      quoteInlineEditing = true;
-      renderQuoteLibraryModal();
-      editor.focus();
-    };
-    panel.querySelector('#mufy-recovery-quote-save-text').onclick = updateSelectedQuoteText;
-    panel.querySelector('#mufy-recovery-quote-export').onclick = exportSelectedQuoteImage;
+    bindQuoteEvents(panel);
     bindMaterialEvents(panel);
     bindAccountEvents(panel);
     bindModelMonitorEvents(panel, toggle);
