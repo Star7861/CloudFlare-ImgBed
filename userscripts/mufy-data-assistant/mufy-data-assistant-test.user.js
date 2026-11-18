@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.164
+// @version      3.0.0-dev.165
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -22,7 +22,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.164';
+    : '3.0.0-dev.165';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -13095,6 +13095,100 @@ roleStateReady = true;
     });
   }
 
+  function initializeMountedRuntime() {
+    const previousFavoriteResult = takeShareFavoriteResult();
+    if (previousFavoriteResult) {
+      rememberSiteSearchRows(previousFavoriteResult.rows || []);
+      state.favoritePendingIds.clear();
+      (previousFavoriteResult.favoritedIds || []).forEach(id => applyFavoriteState(id, true));
+      state.status = favoriteJobStatus(previousFavoriteResult, `${previousFavoriteResult.label || '批量收藏'}完成`);
+      if (!previousFavoriteResult.completionNotified) pageWindow.alert(state.status);
+    }
+    installAutoMaskSwitch();
+    addMountedGlobalListener(document, 'selectionchange', rememberQuoteSelection);
+    installMessageQuoteButtons();
+    installAccountSwitchLoginAssist();
+    startModelMonitor();
+    startScriptUpdateCheck();
+    render();
+    setTimeout(() => {
+      const manualAutoJob = loadManualAutoChatJob();
+      if (!manualAutoJob) return;
+      state.manualAutoChatRunning = !manualAutoJob.paused;
+      if (manualAutoJob.paused) {
+        state.status = `检测到已暂停的一键扣数任务：已完成 ${Number(manualAutoJob.completed || 0)}/${Number(manualAutoJob.total || 0)} 个。可进入“收藏”→“普通待聊”继续或取消。`;
+        render();
+        return;
+      }
+      const current = currentRoleContext();
+      if (pageWindow.location.pathname === '/chat' && String(current.characterId) === String(manualAutoJob.activeCharacterId || '')) {
+        processManualAutoChatJob();
+        return;
+      }
+      manualAutoJob.paused = true;
+      manualAutoJob.pauseReason = '页面跳转到了任务之外的位置';
+      saveManualAutoChatJob(manualAutoJob);
+      state.manualAutoChatRunning = false;
+      state.status = `一键扣数已暂停：当前页面不是待处理角色。已完成 ${Number(manualAutoJob.completed || 0)}/${Number(manualAutoJob.total || 0)} 个，可手动继续。`;
+      render();
+    }, 900);
+    setTimeout(() => {
+      const recoveryTask = loadFavoriteShareRecoveryJob();
+      if (!recoveryTask) return;
+      const failedRow = recoveryTask.rows[recoveryTask.index];
+      if (recoveryTask.paused && recoveryTask.phase === 'unfavorited' && failedRow?.characterId
+          && (!recoveryTask.pauseReason || recoveryTask.pauseReason === '重新收藏失败')) {
+        cancelFailedFavoriteShareRecovery(recoveryTask, failedRow, new Error('上个版本留下了未确认的收藏恢复记录'));
+        return;
+      }
+      const navigationType = pageWindow.performance?.getEntriesByType?.('navigation')?.[0]?.type || '';
+      const intentionalShareNavigation = Boolean(
+        !recoveryTask.paused && recoveryTask.phase === 'unfavorited'
+        && navigationType === 'navigate'
+        && Date.now() - Number(recoveryTask.navigationStartedAt || 0) < 120000
+      );
+      if (intentionalShareNavigation) {
+        recoveryTask.paused = false;
+        saveFavoriteShareRecoveryJob(recoveryTask);
+        processFavoriteShareRecoveryJob(true);
+        return;
+      }
+      if (!recoveryTask.paused) {
+        recoveryTask.paused = true;
+        recoveryTask.pauseRequested = false;
+        recoveryTask.pauseReason = '页面或脚本意外中断';
+        saveFavoriteShareRecoveryJob(recoveryTask);
+      }
+      state.status = `检测到未完成的链接收藏任务：已完成 ${Number(recoveryTask.index || 0)}/${recoveryTask.rows.length} 个。任务不会自动运行，请手动继续或取消。`;
+      render();
+    }, 700);
+    setTimeout(async () => {
+      await initializeShareFavoriteJobStorage();
+      const pendingFavoriteJob = loadShareFavoriteJob();
+      if (!favoriteJobHasRemaining(pendingFavoriteJob)) return;
+      const navigationType = pageWindow.performance?.getEntriesByType?.('navigation')?.[0]?.type || '';
+      const freshIntentionalNavigation = Boolean(
+        pendingFavoriteJob.activeCharacterId
+        && !pendingFavoriteJob.paused
+        && navigationType === 'navigate'
+        && Date.now() - Number(pendingFavoriteJob.navigationStartedAt || 0) < 120000
+      );
+      if (freshIntentionalNavigation) {
+        processShareFavoriteJob();
+        return;
+      }
+      pendingFavoriteJob.paused = true;
+      pendingFavoriteJob.pauseReason = pendingFavoriteJob.pauseReason || 'interrupted';
+      await saveShareFavoriteJob(pendingFavoriteJob);
+      clearFavoritePendingState(pendingFavoriteJob);
+      state.status = `检测到未完成的收藏任务：已完成 ${Number(pendingFavoriteJob.index || 0)}/${pendingFavoriteJob.rows.length} 个。任务不会自动运行，请手动选择“继续收藏”或“取消任务”。`;
+      render();
+    }, 1600);
+    setTimeout(() => locatePendingChatJump(), 1400);
+    setTimeout(() => installExactRoleFallback(), 700);
+    resumeFavoriteFolderJump();
+  }
+
   function mount() {
     const existingPanel = document.getElementById('mufy-recovery-panel');
     const existingToggle = document.getElementById('mufy-recovery-toggle');
@@ -13248,98 +13342,7 @@ roleStateReady = true;
       };
     });
     bindRoleListInteractionEvents(panel);
-
-    const previousFavoriteResult = takeShareFavoriteResult();
-    if (previousFavoriteResult) {
-      rememberSiteSearchRows(previousFavoriteResult.rows || []);
-      state.favoritePendingIds.clear();
-      (previousFavoriteResult.favoritedIds || []).forEach(id => applyFavoriteState(id, true));
-      state.status = favoriteJobStatus(previousFavoriteResult, `${previousFavoriteResult.label || '批量收藏'}完成`);
-      if (!previousFavoriteResult.completionNotified) pageWindow.alert(state.status);
-    }
-    installAutoMaskSwitch();
-    addMountedGlobalListener(document, 'selectionchange', rememberQuoteSelection);
-    installMessageQuoteButtons();
-    installAccountSwitchLoginAssist();
-    startModelMonitor();
-    startScriptUpdateCheck();
-    render();
-    setTimeout(() => {
-      const manualAutoJob = loadManualAutoChatJob();
-      if (!manualAutoJob) return;
-      state.manualAutoChatRunning = !manualAutoJob.paused;
-      if (manualAutoJob.paused) {
-        state.status = `检测到已暂停的一键扣数任务：已完成 ${Number(manualAutoJob.completed || 0)}/${Number(manualAutoJob.total || 0)} 个。可进入“收藏”→“普通待聊”继续或取消。`;
-        render();
-        return;
-      }
-      const current = currentRoleContext();
-      if (pageWindow.location.pathname === '/chat' && String(current.characterId) === String(manualAutoJob.activeCharacterId || '')) {
-        processManualAutoChatJob();
-        return;
-      }
-      manualAutoJob.paused = true;
-      manualAutoJob.pauseReason = '页面跳转到了任务之外的位置';
-      saveManualAutoChatJob(manualAutoJob);
-      state.manualAutoChatRunning = false;
-      state.status = `一键扣数已暂停：当前页面不是待处理角色。已完成 ${Number(manualAutoJob.completed || 0)}/${Number(manualAutoJob.total || 0)} 个，可手动继续。`;
-      render();
-    }, 900);
-    setTimeout(() => {
-      const recoveryTask = loadFavoriteShareRecoveryJob();
-      if (!recoveryTask) return;
-      const failedRow = recoveryTask.rows[recoveryTask.index];
-      if (recoveryTask.paused && recoveryTask.phase === 'unfavorited' && failedRow?.characterId
-          && (!recoveryTask.pauseReason || recoveryTask.pauseReason === '重新收藏失败')) {
-        cancelFailedFavoriteShareRecovery(recoveryTask, failedRow, new Error('上个版本留下了未确认的收藏恢复记录'));
-        return;
-      }
-      const navigationType = pageWindow.performance?.getEntriesByType?.('navigation')?.[0]?.type || '';
-      const intentionalShareNavigation = Boolean(
-        !recoveryTask.paused && recoveryTask.phase === 'unfavorited'
-        && navigationType === 'navigate'
-        && Date.now() - Number(recoveryTask.navigationStartedAt || 0) < 120000
-      );
-      if (intentionalShareNavigation) {
-        recoveryTask.paused = false;
-        saveFavoriteShareRecoveryJob(recoveryTask);
-        processFavoriteShareRecoveryJob(true);
-        return;
-      }
-      if (!recoveryTask.paused) {
-        recoveryTask.paused = true;
-        recoveryTask.pauseRequested = false;
-        recoveryTask.pauseReason = '页面或脚本意外中断';
-        saveFavoriteShareRecoveryJob(recoveryTask);
-      }
-      state.status = `检测到未完成的链接收藏任务：已完成 ${Number(recoveryTask.index || 0)}/${recoveryTask.rows.length} 个。任务不会自动运行，请手动继续或取消。`;
-      render();
-    }, 700);
-    setTimeout(async () => {
-      await initializeShareFavoriteJobStorage();
-      const pendingFavoriteJob = loadShareFavoriteJob();
-      if (!favoriteJobHasRemaining(pendingFavoriteJob)) return;
-      const navigationType = pageWindow.performance?.getEntriesByType?.('navigation')?.[0]?.type || '';
-      const freshIntentionalNavigation = Boolean(
-        pendingFavoriteJob.activeCharacterId
-        && !pendingFavoriteJob.paused
-        && navigationType === 'navigate'
-        && Date.now() - Number(pendingFavoriteJob.navigationStartedAt || 0) < 120000
-      );
-      if (freshIntentionalNavigation) {
-        processShareFavoriteJob();
-        return;
-      }
-      pendingFavoriteJob.paused = true;
-      pendingFavoriteJob.pauseReason = pendingFavoriteJob.pauseReason || 'interrupted';
-      await saveShareFavoriteJob(pendingFavoriteJob);
-      clearFavoritePendingState(pendingFavoriteJob);
-      state.status = `检测到未完成的收藏任务：已完成 ${Number(pendingFavoriteJob.index || 0)}/${pendingFavoriteJob.rows.length} 个。任务不会自动运行，请手动选择“继续收藏”或“取消任务”。`;
-      render();
-    }, 1600);
-    setTimeout(() => locatePendingChatJump(), 1400);
-    setTimeout(() => installExactRoleFallback(), 700);
-    resumeFavoriteFolderJump();
+    initializeMountedRuntime();
   }
 
   let bootTimer = 0;
