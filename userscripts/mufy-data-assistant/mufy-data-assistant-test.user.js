@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.163
+// @version      3.0.0-dev.164
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -22,7 +22,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.163';
+    : '3.0.0-dev.164';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -13050,6 +13050,51 @@ roleStateReady = true;
     mountedPanel.querySelector('#mufy-recovery-quote-export').onclick = exportSelectedQuoteImage;
   }
 
+  function bindExportEvents(mountedPanel) {
+    const exportModal = mountedPanel.querySelector('#mufy-recovery-export-modal');
+    const exportBindingOption = mountedPanel.querySelector('#mufy-recovery-export-binding-option');
+    const exportBindingHint = mountedPanel.querySelector('#mufy-recovery-export-binding-hint');
+    const exportBindingsCheckbox = mountedPanel.querySelector('#mufy-recovery-export-bindings');
+    const exportShareLinksButton = mountedPanel.querySelector('#mufy-recovery-export-share-links');
+    let exportModalTarget = 'roles';
+    const openExportModal = target => {
+      exportModalTarget = target;
+      const isMasks = target === 'masks';
+      exportBindingOption.hidden = !isMasks;
+      exportBindingHint.hidden = !isMasks;
+      exportShareLinksButton.hidden = isMasks;
+      exportModal.hidden = false;
+    };
+    mountedPanel.querySelector('#mufy-recovery-export-roles').onclick = () => openExportModal('roles');
+    mountedPanel.querySelector('#mufy-recovery-export-masks').onclick = () => openExportModal('masks');
+    mountedPanel.querySelector('#mufy-recovery-export-close').onclick = () => { exportModal.hidden = true; };
+    mountedPanel.querySelectorAll('[data-export-format]').forEach(button => {
+      button.onclick = async () => {
+        exportModal.hidden = true;
+        try {
+          if (exportModalTarget === 'masks') {
+            if (button.dataset.exportFormat === 'csv') {
+              exportMasksCsv();
+              if (exportBindingsCheckbox.checked && state.maskBindings.length) {
+                state.status += ' CSV 不包含绑定信息；如需保留绑定，请选择 JSON。';
+                render();
+              }
+            } else {
+              exportMasksJson(exportBindingsCheckbox.checked);
+            }
+          } else if (button.dataset.exportFormat === 'share-links') exportSavedShareLinks();
+          else if (button.dataset.exportFormat === 'csv') await exportRolesCsv();
+          else await exportRolesJson();
+        } catch (error) {
+          console.error('[Mufy recovery] export failed:', error);
+          appendRunLog('error', '导出失败', error);
+          state.status = `导出失败：${explainFailure(error)}`;
+          render();
+        }
+      };
+    });
+  }
+
   function mount() {
     const existingPanel = document.getElementById('mufy-recovery-panel');
     const existingToggle = document.getElementById('mufy-recovery-toggle');
@@ -13139,48 +13184,7 @@ roleStateReady = true;
     };
     panel.querySelector('#mufy-recovery-share-recovery-cancel').onclick = () => cancelFavoriteShareRecoveryJob();
     bindMaskControlEvents(panel);
-    const exportModal = panel.querySelector('#mufy-recovery-export-modal');
-    const exportBindingOption = panel.querySelector('#mufy-recovery-export-binding-option');
-    const exportBindingHint = panel.querySelector('#mufy-recovery-export-binding-hint');
-    const exportBindingsCheckbox = panel.querySelector('#mufy-recovery-export-bindings');
-    const exportShareLinksButton = panel.querySelector('#mufy-recovery-export-share-links');
-    let exportModalTarget = 'roles';
-    const openExportModal = target => {
-      exportModalTarget = target;
-      const isMasks = target === 'masks';
-      exportBindingOption.hidden = !isMasks;
-      exportBindingHint.hidden = !isMasks;
-      exportShareLinksButton.hidden = isMasks;
-      exportModal.hidden = false;
-    };
-    panel.querySelector('#mufy-recovery-export-roles').onclick = () => openExportModal('roles');
-    panel.querySelector('#mufy-recovery-export-masks').onclick = () => openExportModal('masks');
-    panel.querySelector('#mufy-recovery-export-close').onclick = () => { exportModal.hidden = true; };
-    panel.querySelectorAll('[data-export-format]').forEach(button => {
-      button.onclick = async () => {
-        exportModal.hidden = true;
-        try {
-          if (exportModalTarget === 'masks') {
-            if (button.dataset.exportFormat === 'csv') {
-              exportMasksCsv();
-              if (exportBindingsCheckbox.checked && state.maskBindings.length) {
-                state.status += ' CSV 不包含绑定信息；如需保留绑定，请选择 JSON。';
-                render();
-              }
-            } else {
-              exportMasksJson(exportBindingsCheckbox.checked);
-            }
-          } else if (button.dataset.exportFormat === 'share-links') exportSavedShareLinks();
-          else if (button.dataset.exportFormat === 'csv') await exportRolesCsv();
-          else await exportRolesJson();
-        } catch (error) {
-          console.error('[Mufy recovery] export failed:', error);
-          appendRunLog('error', '导出失败', error);
-          state.status = `导出失败：${explainFailure(error)}`;
-          render();
-        }
-      };
-    });
+    bindExportEvents(panel);
     bindRolePanelEvents(panel);
     panel.querySelectorAll('[data-section]').forEach(button => {
       button.onclick = () => {
