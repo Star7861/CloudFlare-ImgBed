@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.161
+// @version      3.0.0-dev.162
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -22,7 +22,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.161';
+    : '3.0.0-dev.162';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -12931,6 +12931,42 @@ roleStateReady = true;
     roleList.addEventListener('pointerleave', () => clearSiteLongPress(false));
   }
 
+  function bindRolePanelEvents(mountedPanel) {
+    mountedPanel.querySelector('#mufy-recovery-role-search').oninput = event => { state.roleQuery = event.target.value.trim().toLowerCase(); render(); };
+    mountedPanel.querySelector('#mufy-recovery-chat-search-query').value = state.chatSearchQuery;
+    mountedPanel.querySelector('#mufy-recovery-chat-search-scope').value = state.chatSearchScope;
+    refreshChatSearchDialogRoles();
+    mountedPanel.querySelector('#mufy-recovery-chat-search-scope').onchange = refreshChatSearchDialogRoles;
+    mountedPanel.querySelector('#mufy-recovery-chat-search-form').onsubmit = event => {
+      event.preventDefault();
+      searchRolesByChatRecord();
+    };
+    mountedPanel.querySelector('#mufy-recovery-refresh-favorite-states').onclick = refreshCapturedFavoriteStates;
+    mountedPanel.querySelector('#mufy-recovery-queue-site-for-chat').onclick = queueSelectedSiteRowsForChat;
+    mountedPanel.querySelector('#mufy-recovery-site-manage').onclick = () => {
+      state.siteRoleManaging = !state.siteRoleManaging;
+      render();
+    };
+    mountedPanel.querySelector('#mufy-recovery-select-unfavorite-site').onclick = selectUnfavoriteSiteRows;
+    mountedPanel.querySelector('#mufy-recovery-favorite-selected-site').onclick = favoriteSelectedSiteRows;
+    mountedPanel.querySelector('#mufy-recovery-clear-site-selection').onclick = toggleAllSiteRows;
+    mountedPanel.querySelector('#mufy-recovery-refresh-site-rows').onclick = refreshSiteRows;
+    mountedPanel.querySelector('#mufy-recovery-clear-site-rows').onclick = clearSiteRows;
+    mountedPanel.querySelector('#mufy-recovery-status-filter').onchange = event => {
+      state.statusFilter = event.target.value;
+      render();
+    };
+    mountedPanel.querySelector('#mufy-recovery-role-read-mode').onchange = event => {
+      state.roleReadMode = event.target.value === 'latest' ? 'latest' : 'full';
+      render();
+    };
+    mountedPanel.querySelector('#mufy-recovery-role-latest-pages').oninput = event => {
+      const value = Math.max(1, Math.min(500, Number(event.target.value) || 1));
+      state.roleLatestPages = value;
+      event.target.value = String(value);
+    };
+  }
+
   function mount() {
     const existingPanel = document.getElementById('mufy-recovery-panel');
     const existingToggle = document.getElementById('mufy-recovery-toggle');
@@ -13141,39 +13177,7 @@ roleStateReady = true;
         }
       };
     });
-    panel.querySelector('#mufy-recovery-role-search').oninput = event => { state.roleQuery = event.target.value.trim().toLowerCase(); render(); };
-    panel.querySelector('#mufy-recovery-chat-search-query').value = state.chatSearchQuery;
-    panel.querySelector('#mufy-recovery-chat-search-scope').value = state.chatSearchScope;
-    refreshChatSearchDialogRoles();
-    panel.querySelector('#mufy-recovery-chat-search-scope').onchange = refreshChatSearchDialogRoles;
-    panel.querySelector('#mufy-recovery-chat-search-form').onsubmit = event => {
-      event.preventDefault();
-      searchRolesByChatRecord();
-    };
-    panel.querySelector('#mufy-recovery-refresh-favorite-states').onclick = refreshCapturedFavoriteStates;
-    panel.querySelector('#mufy-recovery-queue-site-for-chat').onclick = queueSelectedSiteRowsForChat;
-    panel.querySelector('#mufy-recovery-site-manage').onclick = () => {
-      state.siteRoleManaging = !state.siteRoleManaging;
-      render();
-    };
-    panel.querySelector('#mufy-recovery-select-unfavorite-site').onclick = selectUnfavoriteSiteRows;
-    panel.querySelector('#mufy-recovery-favorite-selected-site').onclick = favoriteSelectedSiteRows;
-    panel.querySelector('#mufy-recovery-clear-site-selection').onclick = toggleAllSiteRows;
-    panel.querySelector('#mufy-recovery-refresh-site-rows').onclick = refreshSiteRows;
-    panel.querySelector('#mufy-recovery-clear-site-rows').onclick = clearSiteRows;
-    panel.querySelector('#mufy-recovery-status-filter').onchange = event => {
-      state.statusFilter = event.target.value;
-      render();
-    };
-    panel.querySelector('#mufy-recovery-role-read-mode').onchange = event => {
-      state.roleReadMode = event.target.value === 'latest' ? 'latest' : 'full';
-      render();
-    };
-    panel.querySelector('#mufy-recovery-role-latest-pages').oninput = event => {
-      const value = Math.max(1, Math.min(500, Number(event.target.value) || 1));
-      state.roleLatestPages = value;
-      event.target.value = String(value);
-    };
+    bindRolePanelEvents(panel);
     panel.querySelectorAll('[data-section]').forEach(button => {
       button.onclick = () => {
         const nextSection = button.dataset.section;
