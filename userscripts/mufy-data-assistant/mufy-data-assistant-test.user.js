@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.152
+// @version      3.0.0-dev.153
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -22,7 +22,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.152';
+    : '3.0.0-dev.153';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -12467,6 +12467,52 @@ roleStateReady = true;
     });
   }
 
+  function bindMaterialEvents(mountedPanel) {
+    mountedPanel.querySelectorAll('[data-material-kind]').forEach(button => {
+      button.onclick = () => {
+        state.materialKind = button.dataset.materialKind === 'extra' ? 'extra' : 'prompt';
+        state.materialEditingId = '';
+        renderMaterialSection();
+      };
+    });
+    mountedPanel.querySelector('#mufy-recovery-material-search').onsubmit = event => {
+      event.preventDefault();
+      state.materialQuery = String(mountedPanel.querySelector('#mufy-recovery-material-search-input').value || '').trim();
+      renderMaterialSection();
+    };
+    mountedPanel.querySelector('#mufy-recovery-material-add').onclick = () => openMaterialEditor();
+    mountedPanel.querySelector('#mufy-recovery-material-export').onclick = exportMaterialLibrary;
+    mountedPanel.querySelector('#mufy-recovery-material-import').onclick = () => mountedPanel.querySelector('#mufy-recovery-material-file').click();
+    mountedPanel.querySelector('#mufy-recovery-material-file').onchange = event => {
+      importMaterialLibrary(event.target.files?.[0]);
+      event.target.value = '';
+    };
+    const materialEditor = mountedPanel.querySelector('#mufy-recovery-material-editor');
+    const closeMaterialEditor = () => { materialEditor.hidden = true; state.materialEditingId = ''; };
+    mountedPanel.querySelector('#mufy-recovery-material-editor-close').onclick = closeMaterialEditor;
+    mountedPanel.querySelector('#mufy-recovery-material-editor-cancel').onclick = closeMaterialEditor;
+    mountedPanel.querySelector('#mufy-recovery-material-editor-save').onclick = saveMaterialEditor;
+    mountedPanel.querySelector('#mufy-recovery-material-list').onclick = event => {
+      const edit = event.target.closest?.('[data-material-edit]');
+      if (edit) { openMaterialEditor(String(edit.dataset.materialEdit || '')); return; }
+      const remove = event.target.closest?.('[data-material-delete]');
+      if (remove) {
+        const id = String(remove.dataset.materialDelete || '');
+        const rows = activeMaterialRows();
+        const row = rows.find(item => item.id === id);
+        if (!row || !pageWindow.confirm(`确定删除“${row.title}”吗？`)) return;
+        rows.splice(rows.indexOf(row), 1);
+        saveMaterialLibraries();
+        state.status = `已删除“${row.title}”。`;
+        showRecoveryNotice(state.status);
+        renderMaterialSection();
+        return;
+      }
+      const card = event.target.closest?.('[data-material-fill]');
+      if (card) fillMaterialIntoComposer(String(card.dataset.materialFill || ''));
+    };
+  }
+
   function mount() {
     const existingPanel = document.getElementById('mufy-recovery-panel');
     const existingToggle = document.getElementById('mufy-recovery-toggle');
@@ -12700,49 +12746,7 @@ roleStateReady = true;
     };
     panel.querySelector('#mufy-recovery-quote-save-text').onclick = updateSelectedQuoteText;
     panel.querySelector('#mufy-recovery-quote-export').onclick = exportSelectedQuoteImage;
-    panel.querySelectorAll('[data-material-kind]').forEach(button => {
-      button.onclick = () => {
-        state.materialKind = button.dataset.materialKind === 'extra' ? 'extra' : 'prompt';
-        state.materialEditingId = '';
-        renderMaterialSection();
-      };
-    });
-    panel.querySelector('#mufy-recovery-material-search').onsubmit = event => {
-      event.preventDefault();
-      state.materialQuery = String(panel.querySelector('#mufy-recovery-material-search-input').value || '').trim();
-      renderMaterialSection();
-    };
-    panel.querySelector('#mufy-recovery-material-add').onclick = () => openMaterialEditor();
-    panel.querySelector('#mufy-recovery-material-export').onclick = exportMaterialLibrary;
-    panel.querySelector('#mufy-recovery-material-import').onclick = () => panel.querySelector('#mufy-recovery-material-file').click();
-    panel.querySelector('#mufy-recovery-material-file').onchange = event => {
-      importMaterialLibrary(event.target.files?.[0]);
-      event.target.value = '';
-    };
-    const materialEditor = panel.querySelector('#mufy-recovery-material-editor');
-    const closeMaterialEditor = () => { materialEditor.hidden = true; state.materialEditingId = ''; };
-    panel.querySelector('#mufy-recovery-material-editor-close').onclick = closeMaterialEditor;
-    panel.querySelector('#mufy-recovery-material-editor-cancel').onclick = closeMaterialEditor;
-    panel.querySelector('#mufy-recovery-material-editor-save').onclick = saveMaterialEditor;
-    panel.querySelector('#mufy-recovery-material-list').onclick = event => {
-      const edit = event.target.closest?.('[data-material-edit]');
-      if (edit) { openMaterialEditor(String(edit.dataset.materialEdit || '')); return; }
-      const remove = event.target.closest?.('[data-material-delete]');
-      if (remove) {
-        const id = String(remove.dataset.materialDelete || '');
-        const rows = activeMaterialRows();
-        const row = rows.find(item => item.id === id);
-        if (!row || !pageWindow.confirm(`确定删除“${row.title}”吗？`)) return;
-        rows.splice(rows.indexOf(row), 1);
-        saveMaterialLibraries();
-        state.status = `已删除“${row.title}”。`;
-        showRecoveryNotice(state.status);
-        renderMaterialSection();
-        return;
-      }
-      const card = event.target.closest?.('[data-material-fill]');
-      if (card) fillMaterialIntoComposer(String(card.dataset.materialFill || ''));
-    };
+    bindMaterialEvents(panel);
     panel.querySelector('#mufy-recovery-account-save').onclick = saveCurrentAccountShortcut;
     panel.querySelector('#mufy-recovery-account-add').onclick = () => openAccountPasswordEditor();
     panel.querySelector('#mufy-recovery-account-list').onclick = event => {
