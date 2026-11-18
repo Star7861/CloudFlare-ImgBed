@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.153
+// @version      3.0.0-dev.154
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -22,7 +22,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.153';
+    : '3.0.0-dev.154';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -12513,6 +12513,33 @@ roleStateReady = true;
     };
   }
 
+  function bindAccountEvents(mountedPanel) {
+    mountedPanel.querySelector('#mufy-recovery-account-save').onclick = saveCurrentAccountShortcut;
+    mountedPanel.querySelector('#mufy-recovery-account-add').onclick = () => openAccountPasswordEditor();
+    mountedPanel.querySelector('#mufy-recovery-account-list').onclick = event => {
+      const markButton = event.target.closest?.('[data-account-mark-current]');
+      if (markButton) { markSavedAccountCurrent(String(markButton.dataset.accountMarkCurrent || '')); return; }
+      const switchButton = event.target.closest?.('[data-account-switch]');
+      if (switchButton) { switchToSavedAccount(String(switchButton.dataset.accountSwitch || ''), switchButton.hasAttribute('data-account-retry')); return; }
+      const modeButton = event.target.closest?.('[data-account-mode]');
+      if (modeButton) { toggleAccountLoginMode(String(modeButton.dataset.accountMode || '')); return; }
+      const editButton = event.target.closest?.('[data-account-edit]');
+      if (editButton) { openAccountPasswordEditor(String(editButton.dataset.accountEdit || '')); return; }
+      const deleteButton = event.target.closest?.('[data-account-delete]');
+      if (deleteButton) deleteSavedAccount(String(deleteButton.dataset.accountDelete || ''));
+    };
+    mountedPanel.querySelector('#mufy-recovery-account-password-save').onclick = commitAccountPasswordEditor;
+    mountedPanel.querySelector('#mufy-recovery-account-password-clear').onclick = clearAccountPasswordEditor;
+    mountedPanel.querySelector('#mufy-recovery-account-password-cancel').onclick = closeAccountPasswordEditor;
+    const handleCredentialKeydown = event => {
+      if (event.key === 'Enter') { event.preventDefault(); commitAccountPasswordEditor(); }
+      if (event.key === 'Escape') closeAccountPasswordEditor();
+    };
+    ['#mufy-recovery-account-email-input', '#mufy-recovery-account-password-input'].forEach(selector => {
+      mountedPanel.querySelector(selector).onkeydown = handleCredentialKeydown;
+    });
+  }
+
   function mount() {
     const existingPanel = document.getElementById('mufy-recovery-panel');
     const existingToggle = document.getElementById('mufy-recovery-toggle');
@@ -12747,29 +12774,7 @@ roleStateReady = true;
     panel.querySelector('#mufy-recovery-quote-save-text').onclick = updateSelectedQuoteText;
     panel.querySelector('#mufy-recovery-quote-export').onclick = exportSelectedQuoteImage;
     bindMaterialEvents(panel);
-    panel.querySelector('#mufy-recovery-account-save').onclick = saveCurrentAccountShortcut;
-    panel.querySelector('#mufy-recovery-account-add').onclick = () => openAccountPasswordEditor();
-    panel.querySelector('#mufy-recovery-account-list').onclick = event => {
-      const markButton = event.target.closest?.('[data-account-mark-current]');
-      if (markButton) { markSavedAccountCurrent(String(markButton.dataset.accountMarkCurrent || '')); return; }
-      const switchButton = event.target.closest?.('[data-account-switch]');
-      if (switchButton) { switchToSavedAccount(String(switchButton.dataset.accountSwitch || ''), switchButton.hasAttribute('data-account-retry')); return; }
-      const modeButton = event.target.closest?.('[data-account-mode]');
-      if (modeButton) { toggleAccountLoginMode(String(modeButton.dataset.accountMode || '')); return; }
-      const editButton = event.target.closest?.('[data-account-edit]');
-      if (editButton) { openAccountPasswordEditor(String(editButton.dataset.accountEdit || '')); return; }
-      const deleteButton = event.target.closest?.('[data-account-delete]');
-      if (deleteButton) deleteSavedAccount(String(deleteButton.dataset.accountDelete || ''));
-    };
-    panel.querySelector('#mufy-recovery-account-password-save').onclick = commitAccountPasswordEditor;
-    panel.querySelector('#mufy-recovery-account-password-clear').onclick = clearAccountPasswordEditor;
-    panel.querySelector('#mufy-recovery-account-password-cancel').onclick = closeAccountPasswordEditor;
-    ['#mufy-recovery-account-email-input', '#mufy-recovery-account-password-input'].forEach(selector => {
-      panel.querySelector(selector).onkeydown = event => {
-        if (event.key === 'Enter') { event.preventDefault(); commitAccountPasswordEditor(); }
-        if (event.key === 'Escape') closeAccountPasswordEditor();
-      };
-    });
+    bindAccountEvents(panel);
     const modelModal = panel.querySelector('#mufy-recovery-model-modal');
     const openModelMonitor = () => {
       panel.style.display = 'flex';
