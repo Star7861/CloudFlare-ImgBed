@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.160
+// @version      3.0.0-dev.161
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -22,7 +22,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.160';
+    : '3.0.0-dev.161';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -12811,6 +12811,126 @@ roleStateReady = true;
     });
   }
 
+  function bindRoleListInteractionEvents(mountedPanel) {
+    const roleList = mountedPanel.querySelector('#mufy-recovery-list');
+    roleList.onclick = event => {
+      if (event.target.closest('.mufy-recovery-card-longpress-consumed')) return;
+      const tagButton = event.target.closest('[data-role-tag]');
+      if (tagButton) {
+        const tag = String(tagButton.dataset.roleTag || '').trim();
+        if (!tag) return;
+        state.roleQuery = `#${tag}`.toLocaleLowerCase('zh-CN');
+        const searchInput = mountedPanel.querySelector('#mufy-recovery-role-search');
+        if (searchInput) searchInput.value = `#${tag}`;
+        render();
+        return;
+      }
+      const selectToggle = event.target.closest('[data-action="toggle-site-select"]');
+      if (selectToggle) {
+        if (!canSelectSiteRoles()) return;
+        const id = String(selectToggle.dataset.characterId || '');
+        if (id) {
+          if (selectToggle.checked) state.selectedSiteCharacterIds.add(id);
+          else state.selectedSiteCharacterIds.delete(id);
+          updateSiteActionButtons();
+          const card = selectToggle.closest('.mufy-recovery-site-role-row');
+          if (card) card.classList.toggle('selected', selectToggle.checked);
+        }
+        return;
+      }
+      const authorFavoriteButton = event.target.closest('[data-action="favorite-author"]');
+      if (authorFavoriteButton) {
+        const group = state.visibleAuthors?.[Number(authorFavoriteButton.dataset.authorFavoriteIndex)];
+        if (group) openAuthorFavoriteDialog(group);
+        return;
+      }
+      const authorButton = event.target.closest('[data-author-index]');
+      if (authorButton) {
+        const group = state.visibleAuthors?.[Number(authorButton.dataset.authorIndex)];
+        if (!group) return;
+        if (state.openAuthors.has(group.key)) state.openAuthors.delete(group.key);
+        else state.openAuthors.add(group.key);
+        render();
+        return;
+      }
+      const button = event.target.closest('button[data-action]');
+      if (!button) return;
+      const row = button.dataset.characterId
+        ? [...state.visibleRows, ...allRoleRows(), ...state.siteSearchRows].find(item => item.characterId === button.dataset.characterId)
+        : state.visibleRows[Number(button.dataset.index)];
+      if (!row) return;
+      if (button.dataset.action === 'manual-chat-done') {
+        state.manualFavoriteChats = state.manualFavoriteChats.filter(item => String(item.characterId) !== String(row.characterId));
+        saveManualFavoriteChats(state.manualFavoriteChats);
+        if (String(state.manualFavoriteChatCurrentId) === String(row.characterId)) {
+          state.manualFavoriteChatCurrentId = '';
+          try { localStorage.removeItem(accountStorageKey(MANUAL_FAVORITE_CHAT_CURRENT_KEY)); } catch (_) {}
+        }
+        render();
+      }
+      if (button.dataset.action === 'jump-chat-match') openChatMatchAndLocate(row);
+      if (button.dataset.action === 'favorite-role') favoriteRole(row);
+      if (button.dataset.action === 'unfavorite-role') unfavoriteRole(row);
+      if (button.dataset.action === 'archive-role') recoverArchivesForCharacter(row);
+      if (button.dataset.action === 'copy-mask') copyMaskInfo(row);
+      if (button.dataset.action === 'edit-site-mask') openSiteMaskEditor(row);
+      if (button.dataset.action === 'edit-library-mask') openLibraryMaskEditor(row);
+      if (button.dataset.action === 'save-mask') addMaskToLibrary(row);
+      if (button.dataset.action === 'swap-mask') swapLibraryMask(row);
+      if (button.dataset.action === 'remove-library') removeLibraryMask(row);
+      if (button.dataset.action === 'bind-mask') bindMaskToCharacter(row);
+      if (button.dataset.action === 'unbind-library-mask') unbindLibraryMask(row);
+      if (button.dataset.action === 'bind-role-mask') bindRoleToMask(row);
+      if (button.dataset.action === 'unbind-role-mask') unbindCharacterMask(row);
+    };
+
+    let siteLongPress = null;
+    const clearSiteLongPress = (commit = false) => {
+      if (!siteLongPress) return;
+      const current = siteLongPress;
+      siteLongPress = null;
+      if (current.timer) clearTimeout(current.timer);
+      current.card?.classList.remove('longpressing');
+      if (commit && current.ready && current.id && canSelectSiteRoles()) {
+        if (state.selectedSiteCharacterIds.has(current.id)) state.selectedSiteCharacterIds.delete(current.id);
+        else state.selectedSiteCharacterIds.add(current.id);
+        current.card?.classList.toggle('selected', state.selectedSiteCharacterIds.has(current.id));
+        const checkbox = current.card?.querySelector('[data-action="toggle-site-select"]');
+        if (checkbox) checkbox.checked = state.selectedSiteCharacterIds.has(current.id);
+        updateSiteActionButtons();
+        state.status = state.selectedSiteCharacterIds.has(current.id)
+          ? '已选中该网站角色；点网页里的“立即收藏”开始按顺序收藏。'
+          : '已取消选中该网站角色。';
+        mountedPanel.querySelector('#mufy-recovery-status').textContent = state.status;
+      }
+    };
+    roleList.addEventListener('pointerdown', event => {
+      if (!canSelectSiteRoles()) return;
+      if (event.target.closest('button,input,label,a')) return;
+      const card = event.target.closest('.mufy-recovery-site-role-row[data-character-id]');
+      const id = String(card?.dataset.characterId || '');
+      if (!card || !id) return;
+      const row = state.siteSearchRows.find(item => String(item?.characterId || '') === id);
+      if (!row || row.favoriteKnown !== true && !row.favoriteNeedsDetail) return;
+      siteLongPress = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, card, id, ready: false, timer: null };
+      siteLongPress.timer = setTimeout(() => {
+        if (!siteLongPress || siteLongPress.pointerId !== event.pointerId) return;
+        siteLongPress.ready = true;
+        card.classList.add('longpressing');
+      }, 520);
+    });
+    roleList.addEventListener('pointermove', event => {
+      if (!siteLongPress || siteLongPress.pointerId !== event.pointerId) return;
+      if (Math.abs(event.clientX - siteLongPress.startX) + Math.abs(event.clientY - siteLongPress.startY) > 14) clearSiteLongPress(false);
+    });
+    roleList.addEventListener('pointerup', event => {
+      if (!siteLongPress || siteLongPress.pointerId !== event.pointerId) return;
+      clearSiteLongPress(true);
+    });
+    roleList.addEventListener('pointercancel', () => clearSiteLongPress(false));
+    roleList.addEventListener('pointerleave', () => clearSiteLongPress(false));
+  }
+
   function mount() {
     const existingPanel = document.getElementById('mufy-recovery-panel');
     const existingToggle = document.getElementById('mufy-recovery-toggle');
@@ -13115,121 +13235,7 @@ roleStateReady = true;
         if (state.active === 'masks') loadCurrentSiteMasks();
       };
     });
-    panel.querySelector('#mufy-recovery-list').onclick = event => {
-      if (event.target.closest('.mufy-recovery-card-longpress-consumed')) return;
-      const tagButton = event.target.closest('[data-role-tag]');
-      if (tagButton) {
-        const tag = String(tagButton.dataset.roleTag || '').trim();
-        if (!tag) return;
-        state.roleQuery = `#${tag}`.toLocaleLowerCase('zh-CN');
-        const searchInput = panel.querySelector('#mufy-recovery-role-search');
-        if (searchInput) searchInput.value = `#${tag}`;
-        render();
-        return;
-      }
-      const selectToggle = event.target.closest('[data-action="toggle-site-select"]');
-      if (selectToggle) {
-        if (!canSelectSiteRoles()) return;
-        const id = String(selectToggle.dataset.characterId || '');
-        if (id) {
-          if (selectToggle.checked) state.selectedSiteCharacterIds.add(id);
-          else state.selectedSiteCharacterIds.delete(id);
-          updateSiteActionButtons();
-          const card = selectToggle.closest('.mufy-recovery-site-role-row');
-          if (card) card.classList.toggle('selected', selectToggle.checked);
-        }
-        return;
-      }
-      const authorFavoriteButton = event.target.closest('[data-action="favorite-author"]');
-      if (authorFavoriteButton) {
-        const group = state.visibleAuthors?.[Number(authorFavoriteButton.dataset.authorFavoriteIndex)];
-        if (group) openAuthorFavoriteDialog(group);
-        return;
-      }
-      const authorButton = event.target.closest('[data-author-index]');
-      if (authorButton) {
-        const group = state.visibleAuthors?.[Number(authorButton.dataset.authorIndex)];
-        if (!group) return;
-        if (state.openAuthors.has(group.key)) state.openAuthors.delete(group.key);
-        else state.openAuthors.add(group.key);
-        render();
-        return;
-      }
-      const button = event.target.closest('button[data-action]');
-      if (!button) return;
-      const row = button.dataset.characterId
-        ? [...state.visibleRows, ...allRoleRows(), ...state.siteSearchRows].find(item => item.characterId === button.dataset.characterId)
-        : state.visibleRows[Number(button.dataset.index)];
-      if (!row) return;
-      if (button.dataset.action === 'manual-chat-done') {
-        state.manualFavoriteChats = state.manualFavoriteChats.filter(item => String(item.characterId) !== String(row.characterId));
-        saveManualFavoriteChats(state.manualFavoriteChats);
-        if (String(state.manualFavoriteChatCurrentId) === String(row.characterId)) {
-          state.manualFavoriteChatCurrentId = '';
-          try { localStorage.removeItem(accountStorageKey(MANUAL_FAVORITE_CHAT_CURRENT_KEY)); } catch (_) {}
-        }
-        render();
-      }
-      if (button.dataset.action === 'jump-chat-match') openChatMatchAndLocate(row);
-      if (button.dataset.action === 'favorite-role') favoriteRole(row);
-      if (button.dataset.action === 'unfavorite-role') unfavoriteRole(row);
-      if (button.dataset.action === 'archive-role') recoverArchivesForCharacter(row);
-      if (button.dataset.action === 'copy-mask') copyMaskInfo(row);
-      if (button.dataset.action === 'edit-site-mask') openSiteMaskEditor(row);
-      if (button.dataset.action === 'edit-library-mask') openLibraryMaskEditor(row);
-      if (button.dataset.action === 'save-mask') addMaskToLibrary(row);
-      if (button.dataset.action === 'swap-mask') swapLibraryMask(row);
-      if (button.dataset.action === 'remove-library') removeLibraryMask(row);
-      if (button.dataset.action === 'bind-mask') bindMaskToCharacter(row);
-      if (button.dataset.action === 'unbind-library-mask') unbindLibraryMask(row);
-      if (button.dataset.action === 'bind-role-mask') bindRoleToMask(row);
-      if (button.dataset.action === 'unbind-role-mask') unbindCharacterMask(row);
-    };
-    let siteLongPress = null;
-    const clearSiteLongPress = (commit = false) => {
-      if (!siteLongPress) return;
-      const current = siteLongPress;
-      siteLongPress = null;
-      if (current.timer) clearTimeout(current.timer);
-      current.card?.classList.remove('longpressing');
-      if (commit && current.ready && current.id && canSelectSiteRoles()) {
-        if (state.selectedSiteCharacterIds.has(current.id)) state.selectedSiteCharacterIds.delete(current.id);
-        else state.selectedSiteCharacterIds.add(current.id);
-        current.card?.classList.toggle('selected', state.selectedSiteCharacterIds.has(current.id));
-        const checkbox = current.card?.querySelector('[data-action="toggle-site-select"]');
-        if (checkbox) checkbox.checked = state.selectedSiteCharacterIds.has(current.id);
-        updateSiteActionButtons();
-        state.status = state.selectedSiteCharacterIds.has(current.id)
-          ? '已选中该网站角色；点网页里的“立即收藏”开始按顺序收藏。'
-          : '已取消选中该网站角色。';
-        panel.querySelector('#mufy-recovery-status').textContent = state.status;
-      }
-    };
-    panel.querySelector('#mufy-recovery-list').addEventListener('pointerdown', event => {
-      if (!canSelectSiteRoles()) return;
-      if (event.target.closest('button,input,label,a')) return;
-      const card = event.target.closest('.mufy-recovery-site-role-row[data-character-id]');
-      const id = String(card?.dataset.characterId || '');
-      if (!card || !id) return;
-      const row = state.siteSearchRows.find(item => String(item?.characterId || '') === id);
-      if (!row || row.favoriteKnown !== true && !row.favoriteNeedsDetail) return;
-      siteLongPress = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, card, id, ready: false, timer: null };
-      siteLongPress.timer = setTimeout(() => {
-        if (!siteLongPress || siteLongPress.pointerId !== event.pointerId) return;
-        siteLongPress.ready = true;
-        card.classList.add('longpressing');
-      }, 520);
-    });
-    panel.querySelector('#mufy-recovery-list').addEventListener('pointermove', event => {
-      if (!siteLongPress || siteLongPress.pointerId !== event.pointerId) return;
-      if (Math.abs(event.clientX - siteLongPress.startX) + Math.abs(event.clientY - siteLongPress.startY) > 14) clearSiteLongPress(false);
-    });
-    panel.querySelector('#mufy-recovery-list').addEventListener('pointerup', event => {
-      if (!siteLongPress || siteLongPress.pointerId !== event.pointerId) return;
-      clearSiteLongPress(true);
-    });
-    panel.querySelector('#mufy-recovery-list').addEventListener('pointercancel', () => clearSiteLongPress(false));
-    panel.querySelector('#mufy-recovery-list').addEventListener('pointerleave', () => clearSiteLongPress(false));
+    bindRoleListInteractionEvents(panel);
 
     const previousFavoriteResult = takeShareFavoriteResult();
     if (previousFavoriteResult) {
