@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.149
+// @version      3.0.0-dev.150
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -22,7 +22,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.149';
+    : '3.0.0-dev.150';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -12169,19 +12169,7 @@ roleStateReady = true;
     document.documentElement.appendChild(style);
   }
 
-  function mount() {
-    const existingPanel = document.getElementById('mufy-recovery-panel');
-    const existingToggle = document.getElementById('mufy-recovery-toggle');
-    const existingNext = document.getElementById('mufy-recovery-next');
-    if (existingPanel && existingToggle && existingNext && pageWindow.__mufyRecoveryPanelVersion === SCRIPT_VERSION) return;
-    clearMountedGlobalListeners();
-    messageQuoteObserver?.disconnect();
-    messageQuoteObserver = null;
-    if (existingPanel) existingPanel.remove();
-    existingToggle?.remove();
-    existingNext?.remove();
-    installPanelStyles();
-
+  function createFloatingControls() {
     const toggle = document.createElement('button');
     toggle.id = 'mufy-recovery-toggle';
     toggle.innerHTML = '<span aria-hidden="true">⌕</span><span id="mufy-recovery-model-dots" hidden></span>';
@@ -12244,6 +12232,24 @@ roleStateReady = true;
       || { side: 'right', top: Math.max(8, window.innerHeight - 150) };
     applyTogglePosition(initialTogglePosition);
     if (!toggleHintSeen) toggle.classList.add('mufy-toggle-onboarding');
+
+    return { toggle, nextButton, autoChatToast, clampToggleTop, applyTogglePosition };
+  }
+
+  function mount() {
+    const existingPanel = document.getElementById('mufy-recovery-panel');
+    const existingToggle = document.getElementById('mufy-recovery-toggle');
+    const existingNext = document.getElementById('mufy-recovery-next');
+    if (existingPanel && existingToggle && existingNext && pageWindow.__mufyRecoveryPanelVersion === SCRIPT_VERSION) return;
+    clearMountedGlobalListeners();
+    messageQuoteObserver?.disconnect();
+    messageQuoteObserver = null;
+    if (existingPanel) existingPanel.remove();
+    existingToggle?.remove();
+    existingNext?.remove();
+    installPanelStyles();
+
+    const { toggle, nextButton, autoChatToast, clampToggleTop, applyTogglePosition } = createFloatingControls();
 
     let drag = null;
     toggle.addEventListener('pointerdown', event => {
