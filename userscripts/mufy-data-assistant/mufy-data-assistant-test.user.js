@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.146
+// @version      3.0.0-dev.147
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -22,7 +22,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.146';
+    : '3.0.0-dev.147';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -11456,7 +11456,6 @@ roleStateReady = true;
     autoSwitchToggle.checked = state.autoSwitch;
     autoSwitchToggle.disabled = state.loading || !maskStorageReady;
     const isMaskView = state.section === 'masks' || state.active === 'masks' || state.active === 'library';
-    const isWebView = state.active === 'siteSearch' || state.active === 'siteAuthors';
     const roleSection = panel.querySelector('#mufy-recovery-role-section');
     const favoriteSection = panel.querySelector('#mufy-recovery-favorite-section');
     const chatSection = panel.querySelector('#mufy-recovery-chat-section');
@@ -11536,7 +11535,10 @@ roleStateReady = true;
               : state.active === 'authors' ? roleRows
               : state.active === 'siteSearch' || state.active === 'siteAuthors' ? state.siteSearchRows
                 : state.active === 'masks' ? state.masks : libraryRows;
-    const statusSource = isMaskView || isWebView || state.active === 'roleHistory' ? source : source.filter(row => matchesStatus(row, state.statusFilter));
+    // 角色状态筛选只属于“角色”栏目；隐藏的筛选值不能继续过滤普通待聊或聊天搜索结果。
+    const statusSource = state.section === 'roles' && !isRoleHistoryView
+      ? source.filter(row => matchesStatus(row, state.statusFilter))
+      : source;
     const rows = state.active === 'authors'
       ? []
       : statusSource.filter(row => isMaskView
