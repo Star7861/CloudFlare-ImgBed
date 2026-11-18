@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.159
+// @version      3.0.0-dev.160
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -22,7 +22,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.159';
+    : '3.0.0-dev.160';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -12745,6 +12745,72 @@ roleStateReady = true;
     });
   }
 
+  function bindPanelResizeEvents({ mountedPanel, toggle, applyTogglePosition }) {
+    const resizeHandle = mountedPanel.querySelector('#mufy-recovery-resize-handle');
+    const resizeHandleBottom = mountedPanel.querySelector('#mufy-recovery-resize-handle-bottom');
+    const minPanelHeight = 300;
+    const maxPanelHeight = () => Math.max(minPanelHeight, Math.floor(window.innerHeight * 0.9));
+    const clampPanelHeight = value => Math.max(minPanelHeight, Math.min(maxPanelHeight(), Number(value) || minPanelHeight));
+    const clampPanelBottom = value => Math.max(8, Math.min(Math.max(8, window.innerHeight - minPanelHeight), Number(value) || 62));
+    let savedPanelSize = null;
+    try { savedPanelSize = JSON.parse(localStorage.getItem(PANEL_HEIGHT_KEY) || 'null'); } catch (_) {}
+    const initialHeight = clampPanelHeight(savedPanelSize?.height || Math.min(Math.max(Math.floor(window.innerHeight * 0.72), 360), maxPanelHeight()));
+    mountedPanel.style.height = `${initialHeight}px`;
+    if (Number.isFinite(Number(savedPanelSize?.bottom))) mountedPanel.style.bottom = `${clampPanelBottom(savedPanelSize.bottom)}px`;
+
+    let panelResize = null;
+    const finishPanelResize = event => {
+      if (!panelResize || (event && event.pointerId !== panelResize.pointerId)) return;
+      const height = clampPanelHeight(mountedPanel.getBoundingClientRect().height);
+      const bottom = clampPanelBottom(parseFloat(getComputedStyle(mountedPanel).bottom));
+      mountedPanel.style.height = `${height}px`;
+      mountedPanel.style.bottom = `${bottom}px`;
+      try { localStorage.setItem(PANEL_HEIGHT_KEY, JSON.stringify({ height, bottom })); } catch (_) {}
+      mountedPanel.classList.remove('is-resizing');
+      panelResize = null;
+    };
+    const startPanelResize = (handle, edge, event) => {
+      panelResize = { pointerId: event.pointerId, edge, startY: event.clientY, startHeight: mountedPanel.getBoundingClientRect().height, startBottom: clampPanelBottom(parseFloat(getComputedStyle(mountedPanel).bottom)) };
+      handle.setPointerCapture?.(event.pointerId);
+      mountedPanel.classList.add('is-resizing');
+      event.preventDefault();
+    };
+    const movePanelResize = event => {
+      if (!panelResize || event.pointerId !== panelResize.pointerId) return;
+      const pointerDelta = panelResize.edge === 'top'
+        ? panelResize.startY - event.clientY
+        : event.clientY - panelResize.startY;
+      const nextHeight = clampPanelHeight(panelResize.startHeight + pointerDelta);
+      mountedPanel.style.height = `${nextHeight}px`;
+      if (panelResize.edge === 'bottom') {
+        const appliedDelta = nextHeight - panelResize.startHeight;
+        mountedPanel.style.bottom = `${clampPanelBottom(panelResize.startBottom - appliedDelta)}px`;
+      }
+      event.preventDefault();
+    };
+    resizeHandle.addEventListener('pointerdown', startPanelResize.bind(null, resizeHandle, 'top'));
+    resizeHandleBottom.addEventListener('pointerdown', startPanelResize.bind(null, resizeHandleBottom, 'bottom'));
+    resizeHandle.addEventListener('pointermove', movePanelResize);
+    resizeHandleBottom.addEventListener('pointermove', movePanelResize);
+    resizeHandle.addEventListener('pointerup', finishPanelResize);
+    resizeHandleBottom.addEventListener('pointerup', finishPanelResize);
+    resizeHandle.addEventListener('pointercancel', finishPanelResize);
+    resizeHandleBottom.addEventListener('pointercancel', finishPanelResize);
+    addMountedGlobalListener(window, 'resize', () => {
+      if (!panelResize) {
+        mountedPanel.style.height = `${clampPanelHeight(mountedPanel.getBoundingClientRect().height)}px`;
+        mountedPanel.style.bottom = `${clampPanelBottom(parseFloat(getComputedStyle(mountedPanel).bottom))}px`;
+      }
+      if (toggle.classList.contains('mufy-toggle-onboarding')) {
+        applyTogglePosition({ side: 'center', top: window.innerHeight / 2 - 23 });
+      } else {
+        const rect = toggle.getBoundingClientRect();
+        const side = rect.left + rect.width / 2 < window.innerWidth / 2 ? 'left' : 'right';
+        applyTogglePosition({ side, top: rect.top });
+      }
+    });
+  }
+
   function mount() {
     const existingPanel = document.getElementById('mufy-recovery-panel');
     const existingToggle = document.getElementById('mufy-recovery-toggle');
@@ -12774,69 +12840,7 @@ roleStateReady = true;
       });
     });
 
-    const resizeHandle = panel.querySelector('#mufy-recovery-resize-handle');
-    const resizeHandleBottom = panel.querySelector('#mufy-recovery-resize-handle-bottom');
-    const minPanelHeight = 300;
-    const maxPanelHeight = () => Math.max(minPanelHeight, Math.floor(window.innerHeight * 0.9));
-    const clampPanelHeight = value => Math.max(minPanelHeight, Math.min(maxPanelHeight(), Number(value) || minPanelHeight));
-    const clampPanelBottom = value => Math.max(8, Math.min(Math.max(8, window.innerHeight - minPanelHeight), Number(value) || 62));
-    let savedPanelSize = null;
-    try { savedPanelSize = JSON.parse(localStorage.getItem(PANEL_HEIGHT_KEY) || 'null'); } catch (_) {}
-    const initialHeight = clampPanelHeight(savedPanelSize?.height || Math.min(Math.max(Math.floor(window.innerHeight * 0.72), 360), maxPanelHeight()));
-    panel.style.height = `${initialHeight}px`;
-    if (Number.isFinite(Number(savedPanelSize?.bottom))) panel.style.bottom = `${clampPanelBottom(savedPanelSize.bottom)}px`;
-
-    let panelResize = null;
-    const finishPanelResize = event => {
-      if (!panelResize || (event && event.pointerId !== panelResize.pointerId)) return;
-      const height = clampPanelHeight(panel.getBoundingClientRect().height);
-      const bottom = clampPanelBottom(parseFloat(getComputedStyle(panel).bottom));
-      panel.style.height = `${height}px`;
-      panel.style.bottom = `${bottom}px`;
-      try { localStorage.setItem(PANEL_HEIGHT_KEY, JSON.stringify({ height, bottom })); } catch (_) {}
-      panel.classList.remove('is-resizing');
-      panelResize = null;
-    };
-    const startPanelResize = (handle, edge, event) => {
-      panelResize = { pointerId: event.pointerId, edge, startY: event.clientY, startHeight: panel.getBoundingClientRect().height, startBottom: clampPanelBottom(parseFloat(getComputedStyle(panel).bottom)) };
-      handle.setPointerCapture?.(event.pointerId);
-      panel.classList.add('is-resizing');
-      event.preventDefault();
-    };
-    const movePanelResize = event => {
-      if (!panelResize || event.pointerId !== panelResize.pointerId) return;
-      const pointerDelta = panelResize.edge === 'top'
-        ? panelResize.startY - event.clientY
-        : event.clientY - panelResize.startY;
-      const nextHeight = clampPanelHeight(panelResize.startHeight + pointerDelta);
-      panel.style.height = `${nextHeight}px`;
-      if (panelResize.edge === 'bottom') {
-        const appliedDelta = nextHeight - panelResize.startHeight;
-        panel.style.bottom = `${clampPanelBottom(panelResize.startBottom - appliedDelta)}px`;
-      }
-      event.preventDefault();
-    };
-    resizeHandle.addEventListener('pointerdown', startPanelResize.bind(null, resizeHandle, 'top'));
-    resizeHandleBottom.addEventListener('pointerdown', startPanelResize.bind(null, resizeHandleBottom, 'bottom'));
-    resizeHandle.addEventListener('pointermove', movePanelResize);
-    resizeHandleBottom.addEventListener('pointermove', movePanelResize);
-    resizeHandle.addEventListener('pointerup', finishPanelResize);
-    resizeHandleBottom.addEventListener('pointerup', finishPanelResize);
-    resizeHandle.addEventListener('pointercancel', finishPanelResize);
-    resizeHandleBottom.addEventListener('pointercancel', finishPanelResize);
-    addMountedGlobalListener(window, 'resize', () => {
-      if (!panelResize) {
-        panel.style.height = `${clampPanelHeight(panel.getBoundingClientRect().height)}px`;
-        panel.style.bottom = `${clampPanelBottom(parseFloat(getComputedStyle(panel).bottom))}px`;
-      }
-      if (toggle.classList.contains('mufy-toggle-onboarding')) {
-        applyTogglePosition({ side: 'center', top: window.innerHeight / 2 - 23 });
-      } else {
-        const rect = toggle.getBoundingClientRect();
-        const side = rect.left + rect.width / 2 < window.innerWidth / 2 ? 'left' : 'right';
-        applyTogglePosition({ side, top: rect.top });
-      }
-    });
+    bindPanelResizeEvents({ mountedPanel: panel, toggle, applyTogglePosition });
 
     bindPanelAppearanceEvents(toggle, panel);
     bindPanelUtilityEvents(panel);
