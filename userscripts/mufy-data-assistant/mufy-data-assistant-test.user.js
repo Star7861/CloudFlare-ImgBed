@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.144
+// @version      3.0.0-dev.145
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -22,7 +22,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.144';
+    : '3.0.0-dev.145';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -11725,8 +11725,8 @@ roleStateReady = true;
       #mufy-recovery-auto-chat-toast.show{opacity:1;transform:translate(-50%,0)}
       #mufy-recovery-auto-chat-toast[data-tone="success"]{border-color:#4d9e78;background:#173528ef;color:#caffdf}
       #mufy-recovery-auto-chat-toast[data-tone="error"]{border-color:#b45f69;background:#421f25ef;color:#ffd1d6}
-      #mufy-recovery-panel{position:fixed;right:16px;bottom:62px;z-index:2147483647;width:480px;max-width:calc(100vw - 32px);height:min(72vh,720px);min-height:300px;max-height:90vh;overflow:hidden;display:flex;flex-direction:column;background:#222228;color:#eee;border:1px solid #555;border-radius:8px;box-shadow:0 12px 35px #0008;font:13px system-ui}
-      #mufy-recovery-head{display:flex;align-items:center;justify-content:flex-start;gap:4px;font-weight:700;flex:none}
+      #mufy-recovery-panel{position:fixed;right:16px;bottom:62px;z-index:2147483647;width:480px;max-width:calc(100vw - 32px);height:min(72vh,720px);min-height:300px;max-height:90vh;overflow:hidden;display:flex;flex-direction:column;background:var(--mufy-panel-bg,#17151f);color:#eee;border:1px solid var(--mufy-panel-border,#ffffff24);border-radius:18px;box-shadow:0 24px 70px #0008,inset 0 1px #ffffff14;backdrop-filter:blur(22px) saturate(1.08);font:13px system-ui}
+      #mufy-recovery-head{display:flex;align-items:center;justify-content:flex-start;gap:4px;min-height:38px;padding:10px 13px 8px;background:linear-gradient(90deg,#ffffff0d,#8f7bff12,#ffffff08);border-bottom:1px solid #ffffff12;border-radius:18px 18px 0 0;font-weight:700;flex:none}
       #mufy-recovery-title{display:flex;align-items:center;gap:6px;min-width:0}
       #mufy-recovery-title>span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
       #mufy-recovery-head button{background:none;border:0;color:#bbb;font-size:20px;cursor:pointer}
@@ -11825,7 +11825,7 @@ roleStateReady = true;
       #mufy-recovery-resize-handle-bottom{bottom:0}
       #mufy-recovery-resize-handle::after,#mufy-recovery-resize-handle-bottom::after{content:'';width:48px;height:4px;border-radius:3px;background:#777;box-shadow:0 1px 2px #0007}
       #mufy-recovery-panel.is-resizing{user-select:none}
-      #mufy-recovery-controls{display:grid;flex:none;overflow:auto;max-height:55%}
+      #mufy-recovery-controls{display:grid;flex:none;overflow:auto;max-height:55%;gap:10px;padding:12px 13px;background:linear-gradient(180deg,#ffffff03,transparent)}
       #mufy-recovery-controls.is-section-home,#mufy-recovery-controls.is-standalone-section{flex:1;min-height:0;max-height:none;align-content:start}
       #mufy-recovery-role-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;align-items:stretch}
       #mufy-recovery-favorite-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;align-items:stretch}
@@ -11880,7 +11880,7 @@ roleStateReady = true;
       #mufy-recovery-panel [hidden]{display:none!important}
       #mufy-recovery-auto-switch-label{display:flex;align-items:center;gap:6px;color:#bbb;font-size:11px;user-select:none}
       #mufy-recovery-auto-switch-label input{accent-color:#786bd4}
-      #mufy-recovery-status{line-height:1.45}
+      #mufy-recovery-status{line-height:1.45;border-radius:11px;color:#c6bfdc}
       #mufy-recovery-favorite-task-controls{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:6px;padding:7px;border:1px solid #665d35;border-radius:7px;background:#2c281d}
       #mufy-recovery-favorite-task-main{background:#735f22!important;border-color:#b69637!important;color:#fff0b0!important;font-weight:700}
       #mufy-recovery-favorite-task-cancel{background:#572b30!important;border-color:#945059!important;color:#ffc6cb!important}
@@ -12024,10 +12024,8 @@ roleStateReady = true;
       #mufy-recovery-quote-preview.theme-rose .mufy-quote-card-content{background:radial-gradient(circle at 15% 15%,color-mix(in srgb,var(--quote-accent) 32%,transparent),transparent 36%),radial-gradient(circle at 85% 85%,color-mix(in srgb,var(--quote-accent) 20%,transparent),transparent 35%),var(--quote-bg)}
       #mufy-recovery-quote-inline-editor{box-sizing:border-box;width:100%;min-height:0;resize:none;padding:12px;font:inherit;line-height:1.65}
       /* 3.0 premium visual layer */
-      #mufy-recovery-panel{background:var(--mufy-panel-bg,#17151f);border-color:var(--mufy-panel-border,#ffffff24);border-radius:18px;box-shadow:0 24px 70px #0008,inset 0 1px #ffffff14;backdrop-filter:blur(22px) saturate(1.08)}
-      #mufy-recovery-head{min-height:38px;padding:10px 13px 8px;background:linear-gradient(90deg,#ffffff0d,#8f7bff12,#ffffff08);border-bottom:1px solid #ffffff12;border-radius:18px 18px 0 0}#mufy-recovery-title>span{font-size:14px;letter-spacing:.01em}.mufy-recovery-version{color:#d9c7ff}
+      #mufy-recovery-title>span{font-size:14px;letter-spacing:.01em}.mufy-recovery-version{color:#d9c7ff}
       #mufy-recovery-head #mufy-recovery-log-entry,#mufy-recovery-head #mufy-recovery-history-entry{border-color:#ffffff24!important;border-radius:999px!important;background:#ffffff0a!important;color:#d9d6e7!important;box-shadow:inset 0 1px #ffffff12}
-      #mufy-recovery-controls{gap:10px;padding:12px 13px;background:linear-gradient(180deg,#ffffff03,transparent)}
       #mufy-recovery-panel button{border-color:var(--mufy-panel-border);border-radius:10px;background:var(--mufy-panel-surface);box-shadow:0 1px 3px #0001;transition:transform .16s ease,border-color .16s ease,background .16s ease,box-shadow .16s ease}#mufy-recovery-panel button:hover{border-color:var(--mufy-panel-accent);background:var(--mufy-panel-accent-soft)}#mufy-recovery-panel button:active{transform:translateY(1px) scale(.99)}
       #mufy-recovery-panel #mufy-recovery-head{border-bottom-color:color-mix(in srgb,var(--mufy-panel-accent,#8f7be8) 24%,transparent)}
       #mufy-recovery-panel #mufy-recovery-title>span,#mufy-recovery-panel #mufy-recovery-section-title,#mufy-recovery-panel .mufy-recovery-row>div>strong{color:var(--mufy-panel-text,#f2efff)!important}
@@ -12053,7 +12051,7 @@ roleStateReady = true;
       #mufy-recovery-panel .mufy-account-card > span button { background: var(--mufy-panel-surface-strong) !important; border-color: var(--mufy-panel-border) !important; color: var(--mufy-panel-text) !important; }
       #mufy-recovery-panel .mufy-account-card > span button:hover,
       #mufy-recovery-panel .mufy-account-card [data-account-switch] { background: var(--mufy-panel-accent-soft) !important; border-color: var(--mufy-panel-accent) !important; }
-      #mufy-recovery-status{border-radius:11px;color:#c6bfdc}#mufy-recovery-list{border-color:#ffffff12}.mufy-recovery-row{margin:5px 0;padding:10px 9px;border:1px solid #ffffff0d;border-radius:13px;background:#ffffff05}.mufy-recovery-row:hover{border-color:#a995ff28;background:#ffffff08}.mufy-recovery-row img{border-radius:12px;box-shadow:0 5px 13px #0007}
+      #mufy-recovery-list{border-color:#ffffff12}.mufy-recovery-row{margin:5px 0;padding:10px 9px;border:1px solid #ffffff0d;border-radius:13px;background:#ffffff05}.mufy-recovery-row:hover{border-color:#a995ff28;background:#ffffff08}.mufy-recovery-row img{border-radius:12px;box-shadow:0 5px 13px #0007}
       #mufy-recovery-model-modal,#mufy-recovery-log-modal,#mufy-recovery-export-modal{border-color:#ffffff24;border-radius:16px;background:linear-gradient(155deg,#292936f5,#17171ff8);box-shadow:0 22px 60px #000c}.mufy-model-monitor-row{border-color:#ffffff14;border-radius:12px;background:#ffffff07}.mufy-model-monitor-row:has(input:checked){border-color:#9f8bea55;background:#8d73df18}
       /* Selected theme owns every panel surface; no legacy purple/black mixing. */
       #mufy-recovery-panel #mufy-recovery-head,#mufy-recovery-panel .mufy-recovery-section-card,#mufy-recovery-panel .mufy-account-card,#mufy-recovery-panel .mufy-material-card,#mufy-recovery-panel .mufy-recovery-row,#mufy-recovery-panel .mufy-model-monitor-row{background:var(--mufy-panel-surface)!important;border-color:var(--mufy-panel-border)!important;color:var(--mufy-panel-text)!important}
