@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.155
+// @version      3.0.0-dev.156
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -22,7 +22,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.155';
+    : '3.0.0-dev.156';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -12569,6 +12569,59 @@ roleStateReady = true;
     };
   }
 
+  function bindFavoriteFolderEvents(mountedPanel) {
+    mountedPanel.querySelector('#mufy-recovery-folder-organize').onclick = organizeAuthorFoldersNow;
+    mountedPanel.querySelector('#mufy-recovery-folder-manage').onclick = openFavoriteFolderDeleteModal;
+    mountedPanel.querySelector('#mufy-recovery-folder-create-form').onsubmit = event => {
+      event.preventDefault();
+      createManagedFavoriteFolder();
+    };
+    const folderDeleteModal = mountedPanel.querySelector('#mufy-recovery-folder-delete-modal');
+    mountedPanel.querySelector('#mufy-recovery-folder-search-query').oninput = () => renderInlineFavoriteFolderSearch();
+    const folderSearchResults = mountedPanel.querySelector('#mufy-recovery-folder-search-results');
+    folderSearchResults.addEventListener('click', event => {
+      const button = event.target.closest('[data-favorite-folder-jump]');
+      if (!button) return;
+      const folder = state.favoriteFolderSearchRows?.find(row => favoriteFolderId(row) === button.dataset.favoriteFolderJump);
+      if (folder) openFavoriteFolderOnWebsite(folder);
+    });
+    folderSearchResults.addEventListener('toggle', event => {
+      if (event.target.matches('details[data-favorite-folder-preview]')) expandFavoriteFolder(event.target);
+    }, true);
+    mountedPanel.querySelector('#mufy-recovery-folder-search').onsubmit = event => {
+      event.preventDefault();
+      searchFavoriteFoldersInline();
+    };
+    mountedPanel.querySelector('#mufy-recovery-folder-delete-close').onclick = () => {
+      if (!state.favoriteFolderDeleteLoading) folderDeleteModal.hidden = true;
+    };
+    mountedPanel.querySelector('#mufy-recovery-folder-delete-select-all').onclick = () => {
+      state.favoriteFolderDeleteRows
+        .filter(folder => !state.favoriteFolderDeleteEmptyOnly || (folder?._countVerified === true && favoriteFolderCount(folder) === 0))
+        .forEach(folder => state.selectedFavoriteFolderIds.add(favoriteFolderId(folder)));
+      renderFavoriteFolderDeleteModal();
+    };
+    mountedPanel.querySelector('#mufy-recovery-folder-delete-clear').onclick = () => {
+      state.selectedFavoriteFolderIds.clear();
+      renderFavoriteFolderDeleteModal();
+    };
+    mountedPanel.querySelector('#mufy-recovery-folder-delete-empty-only').onchange = event => {
+      state.favoriteFolderDeleteEmptyOnly = Boolean(event.target.checked);
+      renderFavoriteFolderDeleteModal();
+    };
+    mountedPanel.querySelector('#mufy-recovery-folder-delete-empty').onclick = deleteEmptyFavoriteFolders;
+    mountedPanel.querySelector('#mufy-recovery-folder-delete-confirm').onclick = deleteSelectedFavoriteFolders;
+    mountedPanel.querySelector('#mufy-recovery-folder-delete-list').onchange = event => {
+      const checkbox = event.target.closest?.('[data-folder-delete-id]');
+      if (!checkbox) return;
+      const id = String(checkbox.dataset.folderDeleteId || '');
+      if (checkbox.checked) state.selectedFavoriteFolderIds.add(id);
+      else state.selectedFavoriteFolderIds.delete(id);
+      renderFavoriteFolderDeleteModal();
+    };
+    mountedPanel.querySelector('#mufy-recovery-auto-add-favorite-folder').onchange = event => setAutoAddFavoriteFolderSetting(event.target.checked);
+  }
+
   function mount() {
     const existingPanel = document.getElementById('mufy-recovery-panel');
     const existingToggle = document.getElementById('mufy-recovery-toggle');
@@ -12818,54 +12871,7 @@ roleStateReady = true;
     panel.querySelector('#mufy-recovery-help-close').onclick = () => { helpModal.hidden = true; };
     const authorFavoriteModal = panel.querySelector('#mufy-recovery-author-favorite-modal');
     panel.querySelector('#mufy-recovery-author-favorite-close').onclick = () => { authorFavoriteModal.hidden = true; state.authorFavoriteGroup = null; };
-    panel.querySelector('#mufy-recovery-folder-organize').onclick = organizeAuthorFoldersNow;
-    panel.querySelector('#mufy-recovery-folder-manage').onclick = openFavoriteFolderDeleteModal;
-    panel.querySelector('#mufy-recovery-folder-create-form').onsubmit = event => {
-      event.preventDefault();
-      createManagedFavoriteFolder();
-    };
-    const folderDeleteModal = panel.querySelector('#mufy-recovery-folder-delete-modal');
-    panel.querySelector('#mufy-recovery-folder-search-query').oninput = () => renderInlineFavoriteFolderSearch();
-    panel.querySelector('#mufy-recovery-folder-search-results').addEventListener('click', event => {
-      const button = event.target.closest('[data-favorite-folder-jump]');
-      if (!button) return;
-      const folder = state.favoriteFolderSearchRows?.find(row => favoriteFolderId(row) === button.dataset.favoriteFolderJump);
-      if (folder) openFavoriteFolderOnWebsite(folder);
-    });
-    panel.querySelector('#mufy-recovery-folder-search-results').addEventListener('toggle', event => {
-      if (event.target.matches('details[data-favorite-folder-preview]')) expandFavoriteFolder(event.target);
-    }, true);
-    panel.querySelector('#mufy-recovery-folder-search').onsubmit = event => {
-      event.preventDefault();
-      searchFavoriteFoldersInline();
-    };
-    panel.querySelector('#mufy-recovery-folder-delete-close').onclick = () => {
-      if (!state.favoriteFolderDeleteLoading) folderDeleteModal.hidden = true;
-    };
-    panel.querySelector('#mufy-recovery-folder-delete-select-all').onclick = () => {
-      state.favoriteFolderDeleteRows
-        .filter(folder => !state.favoriteFolderDeleteEmptyOnly || (folder?._countVerified === true && favoriteFolderCount(folder) === 0))
-        .forEach(folder => state.selectedFavoriteFolderIds.add(favoriteFolderId(folder)));
-      renderFavoriteFolderDeleteModal();
-    };
-    panel.querySelector('#mufy-recovery-folder-delete-clear').onclick = () => {
-      state.selectedFavoriteFolderIds.clear();
-      renderFavoriteFolderDeleteModal();
-    };
-    panel.querySelector('#mufy-recovery-folder-delete-empty-only').onchange = event => {
-      state.favoriteFolderDeleteEmptyOnly = Boolean(event.target.checked);
-      renderFavoriteFolderDeleteModal();
-    };
-    panel.querySelector('#mufy-recovery-folder-delete-empty').onclick = deleteEmptyFavoriteFolders;
-    panel.querySelector('#mufy-recovery-folder-delete-confirm').onclick = deleteSelectedFavoriteFolders;
-    panel.querySelector('#mufy-recovery-folder-delete-list').onchange = event => {
-      const checkbox = event.target.closest?.('[data-folder-delete-id]');
-      if (!checkbox) return;
-      const id = String(checkbox.dataset.folderDeleteId || '');
-      if (checkbox.checked) state.selectedFavoriteFolderIds.add(id);
-      else state.selectedFavoriteFolderIds.delete(id);
-      renderFavoriteFolderDeleteModal();
-    };
+    bindFavoriteFolderEvents(panel);
     const logModal = panel.querySelector('#mufy-recovery-log-modal');
     panel.querySelector('#mufy-recovery-log-entry').onclick = openRunLogModal;
     panel.querySelector('#mufy-recovery-log-close').onclick = () => { logModal.hidden = true; };
@@ -12907,7 +12913,6 @@ roleStateReady = true;
       else refreshRoleStatuses();
     };
     panel.querySelector('#mufy-recovery-stop-action').onclick = pauseRoleReading;
-    panel.querySelector('#mufy-recovery-auto-add-favorite-folder').onchange = event => setAutoAddFavoriteFolderSetting(event.target.checked);
     panel.querySelector('#mufy-recovery-favorite-visible').onclick = () => favoriteRows(state.visibleRows, '当前列表');
     panel.querySelector('#mufy-recovery-queue-old-favorites').onclick = queueSelectedOldFavoritesForChat;
     panel.querySelector('#mufy-recovery-manage-old-favorites').onclick = () => {
