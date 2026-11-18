@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.157
+// @version      3.0.0-dev.158
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -22,7 +22,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.157';
+    : '3.0.0-dev.158';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -12666,6 +12666,32 @@ roleStateReady = true;
     };
   }
 
+  function bindPanelUtilityEvents(mountedPanel) {
+    const roleMore = mountedPanel.querySelector('#mufy-recovery-role-more');
+    const roleMoreOptions = mountedPanel.querySelector('#mufy-recovery-role-more-options');
+    roleMore.onclick = () => {
+      roleMoreOptions.hidden = !roleMoreOptions.hidden;
+      roleMore.setAttribute('aria-expanded', String(!roleMoreOptions.hidden));
+      roleMore.textContent = roleMoreOptions.hidden ? '▸ 更多' : '▾ 更多';
+    };
+    mountedPanel.querySelector('#mufy-recovery-update-entry').onclick = handleScriptUpdateEntry;
+    mountedPanel.querySelector('#mufy-recovery-history-entry').onclick = () => {
+      const isIndexOpen = state.section === 'roles' && state.active === 'roleHistory';
+      state.section = 'roles';
+      state.active = isIndexOpen ? 'allRoles' : 'roleHistory';
+      state.roleQuery = '';
+      render();
+    };
+    const helpModal = mountedPanel.querySelector('#mufy-recovery-help-modal');
+    mountedPanel.querySelector('#mufy-recovery-help').onclick = () => { helpModal.hidden = false; };
+    mountedPanel.querySelector('#mufy-recovery-help-close').onclick = () => { helpModal.hidden = true; };
+    const logModal = mountedPanel.querySelector('#mufy-recovery-log-modal');
+    mountedPanel.querySelector('#mufy-recovery-log-entry').onclick = openRunLogModal;
+    mountedPanel.querySelector('#mufy-recovery-log-close').onclick = () => { logModal.hidden = true; };
+    mountedPanel.querySelector('#mufy-recovery-clear-logs').onclick = clearRunLogs;
+    mountedPanel.querySelector('#mufy-recovery-copy-error-logs').onclick = copyErrorLogs;
+  }
+
   function mount() {
     const existingPanel = document.getElementById('mufy-recovery-panel');
     const existingToggle = document.getElementById('mufy-recovery-toggle');
@@ -12810,13 +12836,7 @@ roleStateReady = true;
     });
 
     bindPanelAppearanceEvents(toggle, panel);
-    const roleMore = panel.querySelector('#mufy-recovery-role-more');
-    const roleMoreOptions = panel.querySelector('#mufy-recovery-role-more-options');
-    roleMore.onclick = () => {
-      roleMoreOptions.hidden = !roleMoreOptions.hidden;
-      roleMore.setAttribute('aria-expanded', String(!roleMoreOptions.hidden));
-      roleMore.textContent = roleMoreOptions.hidden ? '▸ 更多' : '▾ 更多';
-    };
+    bindPanelUtilityEvents(panel);
     panel.querySelector('#mufy-recovery-export-chat').onclick = exportCurrentChat;
     installChatBackupControls(panel.querySelector('#mufy-recovery-chat-backup'));
     panel.querySelector('#mufy-recovery-quote-entry').onclick = openQuoteLibraryModal;
@@ -12902,25 +12922,9 @@ roleStateReady = true;
     bindMaterialEvents(panel);
     bindAccountEvents(panel);
     bindModelMonitorEvents(panel, toggle);
-    panel.querySelector('#mufy-recovery-update-entry').onclick = handleScriptUpdateEntry;
-    panel.querySelector('#mufy-recovery-history-entry').onclick = () => {
-      const isIndexOpen = state.section === 'roles' && state.active === 'roleHistory';
-      state.section = 'roles';
-      state.active = isIndexOpen ? 'allRoles' : 'roleHistory';
-      state.roleQuery = '';
-      render();
-    };
-    const helpModal = panel.querySelector('#mufy-recovery-help-modal');
-    panel.querySelector('#mufy-recovery-help').onclick = () => { helpModal.hidden = false; };
-    panel.querySelector('#mufy-recovery-help-close').onclick = () => { helpModal.hidden = true; };
     const authorFavoriteModal = panel.querySelector('#mufy-recovery-author-favorite-modal');
     panel.querySelector('#mufy-recovery-author-favorite-close').onclick = () => { authorFavoriteModal.hidden = true; state.authorFavoriteGroup = null; };
     bindFavoriteFolderEvents(panel);
-    const logModal = panel.querySelector('#mufy-recovery-log-modal');
-    panel.querySelector('#mufy-recovery-log-entry').onclick = openRunLogModal;
-    panel.querySelector('#mufy-recovery-log-close').onclick = () => { logModal.hidden = true; };
-    panel.querySelector('#mufy-recovery-clear-logs').onclick = clearRunLogs;
-    panel.querySelector('#mufy-recovery-copy-error-logs').onclick = copyErrorLogs;
     const favoriteInterruptModal = panel.querySelector('#mufy-recovery-favorite-interrupt-modal');
     panel.querySelector('#mufy-recovery-favorite-interrupt-close').onclick = () => { favoriteInterruptModal.hidden = true; };
     panel.querySelector('#mufy-recovery-favorite-pause').onclick = () => requestFavoriteInterruption('pause');
