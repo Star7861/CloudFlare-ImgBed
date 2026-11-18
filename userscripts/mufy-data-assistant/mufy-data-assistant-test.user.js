@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.151
+// @version      3.0.0-dev.152
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -22,7 +22,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.151';
+    : '3.0.0-dev.152';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -12414,6 +12414,59 @@ roleStateReady = true;
     return createdPanel;
   }
 
+  function bindPanelAppearanceEvents(toggle, mountedPanel) {
+    toggle.onclick = () => {
+      if (toggle.classList.contains('mufy-just-dragged')) {
+        toggle.classList.remove('mufy-just-dragged');
+        return;
+      }
+      if (toggle.classList.contains('mufy-toggle-onboarding')) {
+        toggle.classList.remove('mufy-toggle-onboarding');
+        try { localStorage.setItem(TOGGLE_HINT_KEY, '1'); } catch (_) {}
+      }
+      const opening = mountedPanel.style.display === 'none';
+      if (opening) {
+        state.section = 'home';
+        render();
+      }
+      mountedPanel.style.display = opening ? 'flex' : 'none';
+    };
+    mountedPanel.querySelector('#mufy-recovery-close').onclick = () => { mountedPanel.style.display = 'none'; };
+
+    const panelBeautyModal = mountedPanel.querySelector('#mufy-recovery-panel-beauty-modal');
+    const closePanelBeauty = () => { panelBeautyModal.hidden = true; };
+    mountedPanel.querySelector('#mufy-recovery-panel-beauty-entry').onclick = () => {
+      renderPanelBeautyControls();
+      panelBeautyModal.hidden = false;
+    };
+    mountedPanel.querySelector('#mufy-recovery-panel-beauty-close').onclick = closePanelBeauty;
+    mountedPanel.querySelector('#mufy-recovery-panel-beauty-done').onclick = closePanelBeauty;
+    mountedPanel.querySelector('#mufy-recovery-panel-beauty-reset').onclick = () => {
+      state.panelTheme = defaultPanelTheme();
+      savePanelTheme();
+      applyPanelTheme();
+      renderPanelBeautyControls();
+      showRecoveryNotice('已恢复默认面板样式。');
+    };
+    mountedPanel.querySelectorAll('[data-panel-theme]').forEach(control => {
+      const updatePanelTheme = () => {
+        const key = String(control.dataset.panelTheme || '');
+        if (key === 'preset') {
+          const requestedPreset = String(control.value || 'midnight');
+          const presetName = Object.prototype.hasOwnProperty.call(PANEL_THEME_PRESETS, requestedPreset) ? requestedPreset : 'midnight';
+          state.panelTheme = normalizePanelTheme({ ...state.panelTheme, ...PANEL_THEME_PRESETS[presetName], preset: presetName });
+        } else {
+          const value = control.type === 'range' ? Number(control.value) : control.value;
+          state.panelTheme = normalizePanelTheme({ ...state.panelTheme, [key]: value });
+        }
+        savePanelTheme();
+        applyPanelTheme();
+        renderPanelBeautyControls();
+      };
+      control.addEventListener(control.type === 'range' || control.type === 'color' ? 'input' : 'change', updatePanelTheme);
+    });
+  }
+
   function mount() {
     const existingPanel = document.getElementById('mufy-recovery-panel');
     const existingToggle = document.getElementById('mufy-recovery-toggle');
@@ -12557,23 +12610,7 @@ roleStateReady = true;
       }
     });
 
-    toggle.onclick = () => {
-      if (toggle.classList.contains('mufy-just-dragged')) {
-        toggle.classList.remove('mufy-just-dragged');
-        return;
-      }
-      if (toggle.classList.contains('mufy-toggle-onboarding')) {
-        toggle.classList.remove('mufy-toggle-onboarding');
-        try { localStorage.setItem(TOGGLE_HINT_KEY, '1'); } catch (_) {}
-      }
-      const opening = panel.style.display === 'none';
-      if (opening) {
-        state.section = 'home';
-        render();
-      }
-      panel.style.display = opening ? 'flex' : 'none';
-    };
-    panel.querySelector('#mufy-recovery-close').onclick = () => { panel.style.display = 'none'; };
+    bindPanelAppearanceEvents(toggle, panel);
     const roleMore = panel.querySelector('#mufy-recovery-role-more');
     const roleMoreOptions = panel.querySelector('#mufy-recovery-role-more-options');
     roleMore.onclick = () => {
@@ -12584,38 +12621,6 @@ roleStateReady = true;
     panel.querySelector('#mufy-recovery-export-chat').onclick = exportCurrentChat;
     installChatBackupControls(panel.querySelector('#mufy-recovery-chat-backup'));
     panel.querySelector('#mufy-recovery-quote-entry').onclick = openQuoteLibraryModal;
-    const panelBeautyModal = panel.querySelector('#mufy-recovery-panel-beauty-modal');
-    const closePanelBeauty = () => { panelBeautyModal.hidden = true; };
-    panel.querySelector('#mufy-recovery-panel-beauty-entry').onclick = () => {
-      renderPanelBeautyControls();
-      panelBeautyModal.hidden = false;
-    };
-    panel.querySelector('#mufy-recovery-panel-beauty-close').onclick = closePanelBeauty;
-    panel.querySelector('#mufy-recovery-panel-beauty-done').onclick = closePanelBeauty;
-    panel.querySelector('#mufy-recovery-panel-beauty-reset').onclick = () => {
-      state.panelTheme = defaultPanelTheme();
-      savePanelTheme();
-      applyPanelTheme();
-      renderPanelBeautyControls();
-      showRecoveryNotice('已恢复默认面板样式。');
-    };
-    panel.querySelectorAll('[data-panel-theme]').forEach(control => {
-      const updatePanelTheme = () => {
-        const key = String(control.dataset.panelTheme || '');
-        if (key === 'preset') {
-          const requestedPreset = String(control.value || 'midnight');
-          const presetName = Object.prototype.hasOwnProperty.call(PANEL_THEME_PRESETS, requestedPreset) ? requestedPreset : 'midnight';
-          state.panelTheme = normalizePanelTheme({ ...state.panelTheme, ...PANEL_THEME_PRESETS[presetName], preset: presetName });
-        } else {
-          const value = control.type === 'range' ? Number(control.value) : control.value;
-          state.panelTheme = normalizePanelTheme({ ...state.panelTheme, [key]: value });
-        }
-        savePanelTheme();
-        applyPanelTheme();
-        renderPanelBeautyControls();
-      };
-      control.addEventListener(control.type === 'range' || control.type === 'color' ? 'input' : 'change', updatePanelTheme);
-    });
     const quoteEditorModal = panel.querySelector('#mufy-recovery-quote-editor-modal');
     const closeQuoteEditor = () => {
       quoteEditorModal.hidden = true;
