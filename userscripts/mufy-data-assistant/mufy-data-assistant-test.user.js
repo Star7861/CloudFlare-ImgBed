@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.150
+// @version      3.0.0-dev.151
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -22,7 +22,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.150';
+    : '3.0.0-dev.151';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -12236,75 +12236,10 @@ roleStateReady = true;
     return { toggle, nextButton, autoChatToast, clampToggleTop, applyTogglePosition };
   }
 
-  function mount() {
-    const existingPanel = document.getElementById('mufy-recovery-panel');
-    const existingToggle = document.getElementById('mufy-recovery-toggle');
-    const existingNext = document.getElementById('mufy-recovery-next');
-    if (existingPanel && existingToggle && existingNext && pageWindow.__mufyRecoveryPanelVersion === SCRIPT_VERSION) return;
-    clearMountedGlobalListeners();
-    messageQuoteObserver?.disconnect();
-    messageQuoteObserver = null;
-    if (existingPanel) existingPanel.remove();
-    existingToggle?.remove();
-    existingNext?.remove();
-    installPanelStyles();
-
-    const { toggle, nextButton, autoChatToast, clampToggleTop, applyTogglePosition } = createFloatingControls();
-
-    let drag = null;
-    toggle.addEventListener('pointerdown', event => {
-      drag = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, moved: false };
-      toggle.setPointerCapture?.(event.pointerId);
-      toggle.classList.add('mufy-dragging');
-    });
-    toggle.addEventListener('pointermove', event => {
-      if (!drag || drag.pointerId !== event.pointerId) return;
-      const dx = event.clientX - drag.startX;
-      const dy = event.clientY - drag.startY;
-      if (Math.abs(dx) + Math.abs(dy) < 4) return;
-      drag.moved = true;
-      toggle.style.left = `${Math.max(8, Math.min(window.innerWidth - 54, event.clientX - 23))}px`;
-      toggle.style.top = `${Math.max(8, Math.min(window.innerHeight - 54, event.clientY - 23))}px`;
-      toggle.style.right = 'auto';
-      toggle.style.bottom = 'auto';
-      toggle.classList.remove('mufy-docked-left', 'mufy-docked-right');
-    });
-    const finishToggleDrag = event => {
-      if (!drag || (event && event.pointerId != null && drag.pointerId !== event.pointerId)) return;
-      const wasDragged = drag.moved;
-      drag = null;
-      toggle.classList.remove('mufy-dragging');
-      if (!wasDragged) return;
-      toggle.classList.add('mufy-just-dragged');
-      const rect = toggle.getBoundingClientRect();
-      const side = rect.left + rect.width / 2 < window.innerWidth / 2 ? 'left' : 'right';
-      const top = clampToggleTop(rect.top);
-      applyTogglePosition({ side, top });
-      try { localStorage.setItem(TOGGLE_POSITION_KEY, JSON.stringify({ side, top })); } catch (_) {}
-    };
-    toggle.addEventListener('pointerup', finishToggleDrag);
-    toggle.addEventListener('pointercancel', finishToggleDrag);
-    toggle.addEventListener('lostpointercapture', finishToggleDrag);
-    nextButton.onclick = event => {
-      const close = event.target.closest?.('[data-close-next]');
-      if (close) {
-        event.preventDefault();
-        event.stopPropagation();
-        dismissManualFavoriteNext();
-        return;
-      }
-      goToNextManualFavoriteChat();
-    };
-    nextButton.querySelector('[data-close-next]')?.addEventListener('keydown', event => {
-      if (event.key !== 'Enter' && event.key !== ' ') return;
-      event.preventDefault();
-      event.stopPropagation();
-      dismissManualFavoriteNext();
-    });
-
-    panel = document.createElement('div');
-    panel.id = 'mufy-recovery-panel';
-    panel.innerHTML = `<div id="mufy-recovery-resize-handle" title="上下拖动调整面板高度" aria-label="上下拖动调整面板高度"></div>
+  function createPanel() {
+    const createdPanel = document.createElement('div');
+    createdPanel.id = 'mufy-recovery-panel';
+    createdPanel.innerHTML = `<div id="mufy-recovery-resize-handle" title="上下拖动调整面板高度" aria-label="上下拖动调整面板高度"></div>
       <div id="mufy-recovery-head"><span id="mufy-recovery-title"><span id="mufy-recovery-section-nav" hidden><button id="mufy-recovery-section-back" aria-label="返回功能分区" title="返回功能分区">‹</button><strong id="mufy-recovery-section-title"></strong></span><span><span id="mufy-recovery-brand">Mufy 数据助手 <small class="mufy-recovery-version">v${DISPLAY_VERSION}</small></span> <small id="mufy-recovery-count">0/0</small></span><button id="mufy-recovery-help" title="使用说明" aria-label="使用说明">?</button></span><button id="mufy-recovery-log-entry" title="查看运行日志">日志</button><button id="mufy-recovery-history-entry" title="查看本账号历史角色索引">索引</button><button id="mufy-recovery-export-chat" hidden>导出聊天</button><button id="mufy-recovery-close">×</button></div>
       <div id="mufy-recovery-help-modal" hidden><div id="mufy-recovery-help-head"><strong>使用说明</strong><button id="mufy-recovery-help-close" title="关闭说明">×</button></div><div id="mufy-recovery-help-body"><ol>
 <li><strong>找回聊过的角色：</strong>进入「角色」→「找回角色链接」，选择完整读取或只查最近几页。可随时停止，下次继续。</li>
@@ -12474,8 +12409,78 @@ roleStateReady = true;
       </div><div id="mufy-recovery-list"></div><div id="mufy-recovery-folder-search-results" aria-label="收藏夹搜索结果" hidden></div>
       <div id="mufy-recovery-site-selection-bar" hidden><span id="mufy-recovery-site-selection-count">已选 0 项</span><button id="mufy-recovery-favorite-selected-site">立即收藏 (0)</button></div>
       <div id="mufy-recovery-resize-handle-bottom" title="上下拖动调整面板高度" aria-label="上下拖动调整面板高度"></div>`;
-    panel.style.display = 'none';
-    document.body.appendChild(panel);
+    createdPanel.style.display = 'none';
+    document.body.appendChild(createdPanel);
+    return createdPanel;
+  }
+
+  function mount() {
+    const existingPanel = document.getElementById('mufy-recovery-panel');
+    const existingToggle = document.getElementById('mufy-recovery-toggle');
+    const existingNext = document.getElementById('mufy-recovery-next');
+    if (existingPanel && existingToggle && existingNext && pageWindow.__mufyRecoveryPanelVersion === SCRIPT_VERSION) return;
+    clearMountedGlobalListeners();
+    messageQuoteObserver?.disconnect();
+    messageQuoteObserver = null;
+    if (existingPanel) existingPanel.remove();
+    existingToggle?.remove();
+    existingNext?.remove();
+    installPanelStyles();
+
+    const { toggle, nextButton, autoChatToast, clampToggleTop, applyTogglePosition } = createFloatingControls();
+
+    let drag = null;
+    toggle.addEventListener('pointerdown', event => {
+      drag = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, moved: false };
+      toggle.setPointerCapture?.(event.pointerId);
+      toggle.classList.add('mufy-dragging');
+    });
+    toggle.addEventListener('pointermove', event => {
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      const dx = event.clientX - drag.startX;
+      const dy = event.clientY - drag.startY;
+      if (Math.abs(dx) + Math.abs(dy) < 4) return;
+      drag.moved = true;
+      toggle.style.left = `${Math.max(8, Math.min(window.innerWidth - 54, event.clientX - 23))}px`;
+      toggle.style.top = `${Math.max(8, Math.min(window.innerHeight - 54, event.clientY - 23))}px`;
+      toggle.style.right = 'auto';
+      toggle.style.bottom = 'auto';
+      toggle.classList.remove('mufy-docked-left', 'mufy-docked-right');
+    });
+    const finishToggleDrag = event => {
+      if (!drag || (event && event.pointerId != null && drag.pointerId !== event.pointerId)) return;
+      const wasDragged = drag.moved;
+      drag = null;
+      toggle.classList.remove('mufy-dragging');
+      if (!wasDragged) return;
+      toggle.classList.add('mufy-just-dragged');
+      const rect = toggle.getBoundingClientRect();
+      const side = rect.left + rect.width / 2 < window.innerWidth / 2 ? 'left' : 'right';
+      const top = clampToggleTop(rect.top);
+      applyTogglePosition({ side, top });
+      try { localStorage.setItem(TOGGLE_POSITION_KEY, JSON.stringify({ side, top })); } catch (_) {}
+    };
+    toggle.addEventListener('pointerup', finishToggleDrag);
+    toggle.addEventListener('pointercancel', finishToggleDrag);
+    toggle.addEventListener('lostpointercapture', finishToggleDrag);
+    nextButton.onclick = event => {
+      const close = event.target.closest?.('[data-close-next]');
+      if (close) {
+        event.preventDefault();
+        event.stopPropagation();
+        dismissManualFavoriteNext();
+        return;
+      }
+      goToNextManualFavoriteChat();
+    };
+    nextButton.querySelector('[data-close-next]')?.addEventListener('keydown', event => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      event.stopPropagation();
+      dismissManualFavoriteNext();
+    });
+
+    panel = createPanel();
     pageWindow.__mufyRecoveryPanelVersion = SCRIPT_VERSION;
     applyPanelTheme();
     panel.querySelectorAll('.mufy-recovery-tutorial').forEach(tutorial => {
