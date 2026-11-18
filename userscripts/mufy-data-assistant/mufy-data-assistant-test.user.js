@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.141
+// @version      3.0.0-dev.142
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -12,6 +12,7 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
+// @grant        GM_download
 // @run-at       document-start
 // ==/UserScript==
 
@@ -21,7 +22,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.141';
+    : '3.0.0-dev.142';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -1556,11 +1557,19 @@
       return;
     }
     panel.querySelectorAll('[data-material-kind]').forEach(button => button.classList.toggle('active', button.dataset.materialKind === state.materialKind));
-    const rows = activeMaterialRows();
+    const searchInput = panel.querySelector('#mufy-recovery-material-search-input');
+    if (searchInput && document.activeElement !== searchInput) searchInput.value = state.materialQuery;
+    const query = String(state.materialQuery || '').trim().toLocaleLowerCase('zh-CN');
+    const allRows = activeMaterialRows();
+    const rows = query
+      ? allRows.filter(row => `${row.title || ''}\n${row.content || ''}`.toLocaleLowerCase('zh-CN').includes(query))
+      : allRows;
     const label = state.materialKind === 'extra' ? '番外' : '指令';
     const add = panel.querySelector('#mufy-recovery-material-add');
     if (add) add.textContent = `新增${label}`;
-    list.innerHTML = rows.map(row => `<article class="mufy-material-card" data-material-fill="${esc(row.id)}" title="点击填入聊天输入框"><div><strong>${esc(row.title)}</strong><small>${esc(contentPreview(row.content, 260))}</small></div><span><button data-material-edit="${esc(row.id)}">编辑</button><button data-material-delete="${esc(row.id)}">删除</button></span></article>`).join('') || `<div class="mufy-recovery-empty">还没有${label}。点击“新增${label}”保存常用内容。</div>`;
+    list.innerHTML = rows.map(row => `<article class="mufy-material-card" data-material-fill="${esc(row.id)}" title="点击追加到聊天输入框"><div><strong>${esc(row.title)}</strong><small>${esc(contentPreview(row.content, 260))}</small></div><span><button data-material-edit="${esc(row.id)}">编辑</button><button data-material-delete="${esc(row.id)}">删除</button></span></article>`).join('') || (query
+      ? `<div class="mufy-recovery-empty">没有找到包含“${esc(state.materialQuery)}”的${label}。</div>`
+      : `<div class="mufy-recovery-empty">还没有${label}。点击“新增${label}”保存常用内容。</div>`);
   }
 
   function renderAccountSection() {
@@ -1822,9 +1831,12 @@
       render();
       return;
     }
-    setManualChatTextareaValue(composer.textarea, row.content);
+    const current = String(composer.textarea.value || '');
+    const separator = current && !/\n\s*$/.test(current) ? '\n\n' : '';
+    setManualChatTextareaValue(composer.textarea, `${current}${separator}${row.content}`);
     composer.textarea.focus();
-    state.status = `已将“${row.title}”填入聊天输入框，尚未发送。`;
+    composer.textarea.setSelectionRange?.(composer.textarea.value.length, composer.textarea.value.length);
+    state.status = `已将“${row.title}”追加到聊天输入框，原有内容已保留，尚未发送。`;
     showRecoveryNotice(state.status);
     render();
   }
@@ -1966,6 +1978,7 @@
     extraLibrary: [],
     materialKind: 'prompt',
     materialEditingId: '',
+    materialQuery: '',
     accountSwitchProfiles: loadAccountSwitchProfiles(),
     modelMonitorRows: initialModelMonitorSnapshot.rows || [],
     modelMonitorSelectedIds: loadModelMonitorSelection(),
@@ -3286,6 +3299,13 @@ roleStateReady = true;
     constructor(message) {
       super(message);
       this.name = 'FavoriteStorageError';
+    }
+  }
+
+  class CharacterUnavailableError extends Error {
+    constructor(message = '角色已删除或不存在') {
+      super(message);
+      this.name = 'CharacterUnavailableError';
     }
   }
 
@@ -6645,6 +6665,9 @@ roleStateReady = true;
     const { raw, body } = await readJsonResponseText(response);
     if (response.status === 429) throw new RateLimitError('收藏请求');
     if (response.status === 401 || response.status === 403) throw new Error(loginErrorMessage(response.status, '收藏操作'));
+    if (response.status === 404 || explicitCharacterDeleted(body, raw)) {
+      throw new CharacterUnavailableError(body?.message || body?.reason || `角色 ${characterId} 已删除或不存在`);
+    }
     if (!response.ok || (body?.code != null && body.code !== 200)) throw new Error(body?.message || body?.reason || raw || `HTTP ${response.status}`);
   }
 
@@ -6747,6 +6770,9 @@ roleStateReady = true;
     };
     const detail = await requestCharacterDetail(String(characterId));
     assertAccount();
+    if (detail?.availability === '角色已删除' || Number(detail?.metadataErrorCode) === 404) {
+      throw new CharacterUnavailableError(`“${row?.name || characterId}”已删除或不存在`);
+    }
     if (detail?.favoriteKnown === true && detail.isFavorite) return true;
 
     let control = null;
@@ -8292,6 +8318,8 @@ roleStateReady = true;
     state.favoriteInterruptMode = '';
     clearFavoritePendingState(job);
     if (mode === 'cancel') {
+      // 再清一次持久队列，覆盖“用户取消时恰好有旧检查点写入尚未结束”的竞态。
+      void clearShareFavoriteJob();
       state.status = `已彻底取消本次收藏任务；已完成的收藏保留，剩余 ${Math.max(0, job.rows.length - Number(job.index || 0))} 个已从队列清除。`;
       appendRunLog('info', '用户彻底取消收藏任务', { completed: Number(job.index || 0), total: job.rows.length });
     } else {
@@ -8394,6 +8422,26 @@ roleStateReady = true;
     render();
   }
 
+  async function skipUnavailableFavoriteRow(job, row, error) {
+    const id = String(row?.characterId || '');
+    const name = row?.name || id || '当前角色';
+    const reason = `“${name}”已删除或不存在，已跳过并继续后续收藏`;
+    (job.failures ||= []).push(`${name}：角色已删除或不存在，已跳过`);
+    if (id) {
+      state.favoritePendingIds.delete(id);
+      shareCodeCache.delete(id);
+      saveShareCodeCache();
+    }
+    job.index += 1;
+    job.activeCharacterId = '';
+    job.activeShareCode = '';
+    job.navigationStartedAt = 0;
+    await persistFavoriteCheckpoint(job);
+    appendRunLog('warn', reason, error);
+    state.status = `${reason}（${job.index}/${job.rows.length}）。`;
+    render();
+  }
+
   async function finishShareFavoriteJob(job) {
     const normalIds = new Set((job.normalFallback || []).map(item => String(item.characterId)));
     const favoritedIds = new Set((job.favoritedIds || []).map(String));
@@ -8477,10 +8525,14 @@ roleStateReady = true;
           if (applyFavoriteInterruption(job)) return;
           await persistFavoriteCheckpoint(job);
         } catch (error) {
-            if (applyFavoriteInterruption(job)) return;
-            if (error instanceof FavoriteStorageError) throw error;
+          if (applyFavoriteInterruption(job)) return;
+          if (error instanceof FavoriteStorageError) throw error;
+          if (error instanceof CharacterUnavailableError) {
+            await skipUnavailableFavoriteRow(job, activeRow, error);
+          } else {
             await cancelFailedShareFavoriteJob(job, activeRow, error);
             return;
+          }
         }
       }
 
@@ -8532,6 +8584,7 @@ roleStateReady = true;
           // 无分享链接时只走一次接口收藏；不再打开角色页面，也不点击网页按钮，
           // 避免同一角色同时发生两次收藏操作。
           await requestFavorite(row.characterId, true);
+          if (applyFavoriteInterruption(job)) return;
           applyFavoriteState(row.characterId, true);
           job.favoritedIds = [...new Set([...(job.favoritedIds || []), String(row.characterId)])];
           job.normalSuccess = (job.normalSuccess || 0) + 1;
@@ -8546,9 +8599,15 @@ roleStateReady = true;
           if (applyFavoriteInterruption(job)) return;
           await wait(250);
         } catch (error) {
+          if (applyFavoriteInterruption(job)) return;
           if (error instanceof FavoriteStorageError) throw error;
-          await cancelFailedShareFavoriteJob(job, row, error);
-          return;
+          if (error instanceof CharacterUnavailableError) {
+            await skipUnavailableFavoriteRow(job, row, error);
+            await wait(100);
+          } else {
+            await cancelFailedShareFavoriteJob(job, row, error);
+            return;
+          }
         }
       }
       if (applyFavoriteInterruption(job)) return;
@@ -9408,16 +9467,18 @@ roleStateReady = true;
     const context = chatBackupContext();
     if (!context || chatBackupBusy) return;
     const locks = pageWindow.navigator.locks;
-    if (!locks) {
-      if (showErrors) setChatBackupNotice(context, '这个浏览器无法安全协调多个标签页，当前无法启用自动分卷。');
-      return;
-    }
     chatBackupBusy = true;
     try {
-      await locks.request('mufy-chat-backup:' + context.key, async () => {
+      const run = async () => {
         if (chatBackupContext()?.key !== context.key) return;
         await task(context, await chatBackupRecord(context));
-      });
+      };
+      if (locks?.request) await locks.request('mufy-chat-backup:' + context.key, run);
+      else {
+        // Safari 锁定模式、旧版 WebKit 或部分用户脚本沙盒可能不暴露 Web Locks。
+        // 仍允许当前标签页备份，由 chatBackupBusy 防止本页重入；仅失去跨标签页互斥。
+        await run();
+      }
     } catch (error) {
       if (showErrors) setChatBackupNotice(context, '备份操作未完成。请确认仍在登录，并检查保存目录。');
       appendRunLog('warn', '自动聊天备份操作未完成', error);
@@ -10008,6 +10069,29 @@ roleStateReady = true;
     }
   }
 
+  function isSafariBrowser() {
+    const userAgent = String(pageWindow.navigator?.userAgent || '');
+    return /Safari/i.test(userAgent) && !/(?:Chrome|Chromium|CriOS|Edg|OPR|FxiOS)/i.test(userAgent);
+  }
+
+  function clickDownloadLink(name, href, pageDoc, pageURL) {
+    const link = pageDoc.createElement('a');
+    link.href = href;
+    link.download = name;
+    link.rel = 'noopener';
+    link.style.cssText = 'position:fixed;left:-10000px;top:0;';
+    (pageDoc.body || pageDoc.documentElement).appendChild(link);
+    try {
+      link.click();
+    } catch (error) {
+      const MouseEventCtor = pageWindow.MouseEvent || MouseEvent;
+      link.dispatchEvent(new MouseEventCtor('click', { bubbles: true, cancelable: true, view: pageWindow }));
+      if (!link.isConnected) throw error;
+    }
+    setTimeout(() => link.remove(), 1500);
+    setTimeout(() => pageURL.revokeObjectURL(href), 30000);
+  }
+
   function downloadBlob(name, blob) {
     // Userscript 管理器可能把脚本放在隔离世界中；Blob URL 与页面 DOM 必须来自同一页面上下文，
     // 否则页面里的 <a> 可能无法解析脚本沙盒创建的 URL，表现为点击后毫无反应。
@@ -10019,21 +10103,32 @@ roleStateReady = true;
     }
     const pageBlob = blob instanceof PageBlob ? blob : new PageBlob([blob], { type: blob?.type || 'application/octet-stream' });
     const href = pageURL.createObjectURL(pageBlob);
-    const link = pageDoc.createElement('a');
-    link.href = href;
-    link.download = name;
-    link.style.cssText = 'position:fixed;left:-10000px;top:0;';
-    (pageDoc.body || pageDoc.documentElement).appendChild(link);
-    try {
-      link.click();
-    } catch (error) {
-      // 某些页面封装会屏蔽 HTMLAnchorElement.click；退回派发页面原生点击事件。
-      const MouseEventCtor = pageWindow.MouseEvent || MouseEvent;
-      link.dispatchEvent(new MouseEventCtor('click', { bubbles: true, cancelable: true, view: pageWindow }));
-      if (!link.isConnected) throw error;
+    if (isSafariBrowser() && typeof GM_download === 'function') {
+      const gmURL = globalThis.URL || pageURL;
+      const GmBlob = globalThis.Blob || PageBlob;
+      const gmBlob = blob instanceof GmBlob ? blob : new GmBlob([blob], { type: blob?.type || 'application/octet-stream' });
+      const gmHref = gmURL.createObjectURL(gmBlob);
+      let fallbackStarted = false;
+      const cleanup = () => setTimeout(() => {
+        gmURL.revokeObjectURL(gmHref);
+        pageURL.revokeObjectURL(href);
+      }, 30000);
+      const fallback = error => {
+        if (fallbackStarted) return;
+        fallbackStarted = true;
+        gmURL.revokeObjectURL(gmHref);
+        appendRunLog('warn', `Safari 脚本下载通道失败，改用页面下载：${name}`, error);
+        clickDownloadLink(name, href, pageDoc, pageURL);
+      };
+      try {
+        GM_download({ url: gmHref, name, saveAs: false, onload: cleanup, onerror: fallback, ontimeout: fallback });
+        return;
+      } catch (error) {
+        fallback(error);
+        return;
+      }
     }
-    setTimeout(() => link.remove(), 1500);
-    setTimeout(() => pageURL.revokeObjectURL(href), 30000);
+    clickDownloadLink(name, href, pageDoc, pageURL);
   }
 
   function download(name, content, type) {
@@ -11221,8 +11316,9 @@ roleStateReady = true;
         ? (state.favoriteInterruptMode ? '正在停止…' : '中断收藏')
         : `继续收藏（剩余 ${Math.max(0, (savedFavoriteJob?.rows?.length || 0) - Number(savedFavoriteJob?.index || 0))}）`;
       favoriteTaskMain.disabled = Boolean(state.favoriteInterruptMode);
-      favoriteTaskCancel.hidden = state.favoriteRunning;
-      favoriteTaskCancel.disabled = state.favoriteRunning;
+      favoriteTaskCancel.hidden = false;
+      favoriteTaskCancel.disabled = Boolean(state.favoriteInterruptMode);
+      favoriteTaskCancel.textContent = state.favoriteRunning ? '强制取消任务' : '取消任务';
     }
     const floatingNext = document.getElementById('mufy-recovery-next');
     if (floatingNext) {
@@ -11807,7 +11903,7 @@ roleStateReady = true;
       #mufy-recovery-tabs .mufy-recovery-tab-action,#mufy-recovery-mask-tabs .mufy-recovery-tab-action{background:#453d69;border-color:#8578c8;color:#f4efff}
       #mufy-recovery-role-section,#mufy-recovery-favorite-section,#mufy-recovery-chat-section,#mufy-recovery-account-section,#mufy-recovery-material-section,#mufy-recovery-mask-section{display:flex;flex-direction:column;gap:8px}
       #mufy-recovery-account-current{display:grid;gap:3px;padding:12px;border:1px solid #766bb155;border-radius:12px;background:linear-gradient(145deg,#4c407055,#24232d)}#mufy-recovery-account-current strong{font-size:11px;color:#aaa3c6}#mufy-recovery-account-current span{font-size:15px;color:#f5f2ff;font-weight:700}#mufy-recovery-account-current small{color:#aaa;overflow-wrap:anywhere}#mufy-recovery-account-mode-guide{display:grid;grid-template-columns:1fr 1fr;gap:6px}#mufy-recovery-account-mode-guide>div{display:grid;gap:4px;padding:9px;border:1px solid #494653;border-radius:9px;background:#24232b}#mufy-recovery-account-mode-guide strong{font-size:11px;color:#eeeaff}#mufy-recovery-account-mode-guide small{color:#9993a6;font-size:9px;line-height:1.45}#mufy-recovery-account-tools{display:grid;grid-template-columns:1fr;gap:6px}#mufy-recovery-account-save{background:#6654a4!important;border-color:#927fd3!important;font-weight:700}#mufy-recovery-account-list{display:grid;align-content:start;gap:7px;overflow:auto;padding-bottom:12px}.mufy-account-card{display:flex;align-items:center;justify-content:space-between;gap:9px;padding:10px 11px;border:1px solid #494653;border-radius:11px;background:#272630}.mufy-account-card.is-current{border-color:#68ba8a88;box-shadow:inset 3px 0 #59b17f}.mufy-account-card>div{display:grid;min-width:0;gap:3px}.mufy-account-card strong{color:#f0edff}.mufy-account-card small{color:#aaa;overflow-wrap:anywhere}.mufy-account-badges{display:flex;gap:4px;flex-wrap:wrap}.mufy-account-card em{width:max-content;padding:2px 6px;border-radius:9px;background:#24553a;color:#a8e7bd;font-size:9px;font-style:normal}.mufy-account-card em.has-password{background:#4b3f72;color:#ddd3ff}.mufy-account-card em.login-mode.native{background:#394554;color:#c5d9ed}.mufy-account-card em.login-mode.direct{background:#5b3f70;color:#ead5ff}.mufy-account-card>span{display:flex;flex:none;gap:4px;flex-wrap:wrap;justify-content:flex-end}.mufy-account-card button{padding:4px 7px!important;font-size:10px!important}#mufy-recovery-account-password-modal{position:absolute;inset:92px 18px auto;z-index:18;display:grid;gap:11px;padding:14px;border:1px solid #8c7bd1;border-radius:13px;background:#292930;box-shadow:0 18px 50px #000d}#mufy-recovery-account-password-modal[hidden]{display:none}#mufy-recovery-account-password-modal h3{margin:0;color:#f5f2ff;font-size:15px}#mufy-recovery-account-password-summary{color:#aaa;line-height:1.55}#mufy-recovery-account-password-warning{padding:8px;border:1px solid #a7774766;border-radius:8px;background:#5e3d2633;color:#e5bd91;font-size:10px;line-height:1.5}#mufy-recovery-account-password-input{box-sizing:border-box;width:100%;border:1px solid #655c83;border-radius:9px;background:#17171c;color:#fff;padding:10px;font-size:14px;outline:none}#mufy-recovery-account-password-actions{display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px}#mufy-recovery-account-password-save{background:#6654a4!important;border-color:#927fd3!important}
-      #mufy-recovery-material-tabs{display:grid;grid-template-columns:1fr 1fr;gap:6px}#mufy-recovery-material-tabs button.active{background:#786bd4;border-color:#8f84dd;color:#fff}#mufy-recovery-material-tools{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}#mufy-recovery-material-add{background:#5e4f91!important;border-color:#8373bb!important;font-weight:700}
+      #mufy-recovery-material-tabs{display:grid;grid-template-columns:1fr 1fr;gap:6px}#mufy-recovery-material-tabs button.active{background:#786bd4;border-color:#8f84dd;color:#fff}#mufy-recovery-material-search{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px}#mufy-recovery-material-search-input{box-sizing:border-box;min-width:0;width:100%;border:1px solid #555;border-radius:6px;background:#18181c;color:#fff;padding:7px 9px;font:inherit}#mufy-recovery-material-tools{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}#mufy-recovery-material-add{background:#5e4f91!important;border-color:#8373bb!important;font-weight:700}
       #mufy-recovery-material-list{display:grid;align-content:start;gap:7px;overflow:auto;padding-bottom:20px}.mufy-material-card{display:flex;align-items:flex-start;justify-content:space-between;gap:9px;padding:10px 11px;border:1px solid #4c485d;border-radius:10px;background:#272630;cursor:pointer}.mufy-material-card:hover{border-color:#8c7bd1;background:#302d40}.mufy-material-card>div{min-width:0;display:grid;gap:4px}.mufy-material-card strong{color:#f0edff}.mufy-material-card small{display:-webkit-box;overflow:hidden;color:#aaa;font-size:10px;line-height:1.5;-webkit-line-clamp:4;-webkit-box-orient:vertical;white-space:pre-wrap;overflow-wrap:anywhere}.mufy-material-card>span{display:flex;flex:none;gap:5px}.mufy-material-card>span button{padding:4px 7px!important;font-size:10px!important}
       #mufy-recovery-material-editor{position:absolute;inset:48px 10px 10px;z-index:14;display:flex;flex-direction:column;overflow:hidden;border:1px solid #766bb1;border-radius:12px;background:#292930;box-shadow:0 16px 45px #000c}#mufy-recovery-material-editor[hidden]{display:none}#mufy-recovery-material-editor-head{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid #4b4b55;background:#35353e}#mufy-recovery-material-editor-head button{padding:1px 7px!important;font-size:20px!important}#mufy-recovery-material-editor-body{flex:1;min-height:0;display:grid;grid-template-rows:auto minmax(0,1fr);gap:10px;padding:12px}#mufy-recovery-material-editor-body label{display:grid;grid-template-rows:auto auto;align-content:start;min-height:0;gap:5px;color:#bbb;font-size:11px}#mufy-recovery-material-editor-body label:last-child{grid-template-rows:auto minmax(180px,1fr)}#mufy-recovery-material-editor-body input,#mufy-recovery-material-editor-body textarea{box-sizing:border-box;width:100%;border:1px solid #555;border-radius:8px;background:#18181c;color:#fff;padding:9px;font:13px/1.55 system-ui;outline:none}#mufy-recovery-material-editor-body textarea{height:100%;min-height:180px;resize:none}#mufy-recovery-material-editor-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:0 12px 12px}#mufy-recovery-material-editor-save{background:#62539a!important;border-color:#8878c5!important}
       #mufy-recovery-list{flex:1 1 auto;min-height:0;overflow:auto;border-top:1px solid #444;padding:0 10px 16px}
@@ -12350,7 +12446,7 @@ roleStateReady = true;
             <div><small>改用表单、删除快捷账号或在编辑里点“清除已存”，都会清除对应的本机保存密码。</small></div>
           </details>
         </div>
-        <div id="mufy-recovery-material-section" hidden><div id="mufy-recovery-material-tabs"><button data-material-kind="prompt">指令库</button><button data-material-kind="extra">番外库</button></div><div id="mufy-recovery-material-tools"><button id="mufy-recovery-material-add">新增指令</button><button id="mufy-recovery-material-import">导入 JSON</button><button id="mufy-recovery-material-export">导出 JSON</button><input id="mufy-recovery-material-file" type="file" accept=".json,application/json" hidden></div><div id="mufy-recovery-material-list"></div></div>
+        <div id="mufy-recovery-material-section" hidden><div id="mufy-recovery-material-tabs"><button data-material-kind="prompt">指令库</button><button data-material-kind="extra">番外库</button></div><form id="mufy-recovery-material-search"><input id="mufy-recovery-material-search-input" type="search" maxlength="500" placeholder="搜索标题或内容" aria-label="搜索指令或番外"><button type="submit">搜索</button></form><div id="mufy-recovery-material-tools"><button id="mufy-recovery-material-add">新增指令</button><button id="mufy-recovery-material-import">导入 JSON</button><button id="mufy-recovery-material-export">导出 JSON</button><input id="mufy-recovery-material-file" type="file" accept=".json,application/json" hidden></div><div id="mufy-recovery-material-list"></div></div>
         <div id="mufy-recovery-mask-section" hidden>
           <div id="mufy-recovery-mask-tabs"><button data-category="masks">面具 (0)</button><button data-category="library">面具库 (0)</button><button id="mufy-recovery-save-all" class="mufy-recovery-tab-action">全部存入面具库</button></div>
           <input id="mufy-recovery-mask-search" placeholder="搜索面具名或面具 ID" hidden>
@@ -12584,6 +12680,11 @@ roleStateReady = true;
         renderMaterialSection();
       };
     });
+    panel.querySelector('#mufy-recovery-material-search').onsubmit = event => {
+      event.preventDefault();
+      state.materialQuery = String(panel.querySelector('#mufy-recovery-material-search-input').value || '').trim();
+      renderMaterialSection();
+    };
     panel.querySelector('#mufy-recovery-material-add').onclick = () => openMaterialEditor();
     panel.querySelector('#mufy-recovery-material-export').onclick = exportMaterialLibrary;
     panel.querySelector('#mufy-recovery-material-import').onclick = () => panel.querySelector('#mufy-recovery-material-file').click();
@@ -12748,7 +12849,15 @@ roleStateReady = true;
       if (state.favoriteRunning) favoriteInterruptModal.hidden = false;
       else resumeFavoriteJob();
     };
-    panel.querySelector('#mufy-recovery-favorite-task-cancel').onclick = cancelPausedFavoriteJob;
+    panel.querySelector('#mufy-recovery-favorite-task-cancel').onclick = () => {
+      if (state.favoriteRunning) {
+        if (pageWindow.confirm('确定强制取消当前收藏任务吗？\n\n已完成的收藏不会撤销，当前已经发出的请求可能完成，但不会再开始下一个。')) {
+          requestFavoriteInterruption('cancel');
+        }
+        return;
+      }
+      cancelPausedFavoriteJob();
+    };
     panel.querySelectorAll('[data-author-favorite-mode]').forEach(button => {
       button.onclick = () => chooseAuthorFavoriteMode(button.dataset.authorFavoriteMode);
     });
