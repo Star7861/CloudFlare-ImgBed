@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.158
+// @version      3.0.0-dev.159
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -22,7 +22,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.158';
+    : '3.0.0-dev.159';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -12692,21 +12692,7 @@ roleStateReady = true;
     mountedPanel.querySelector('#mufy-recovery-copy-error-logs').onclick = copyErrorLogs;
   }
 
-  function mount() {
-    const existingPanel = document.getElementById('mufy-recovery-panel');
-    const existingToggle = document.getElementById('mufy-recovery-toggle');
-    const existingNext = document.getElementById('mufy-recovery-next');
-    if (existingPanel && existingToggle && existingNext && pageWindow.__mufyRecoveryPanelVersion === SCRIPT_VERSION) return;
-    clearMountedGlobalListeners();
-    messageQuoteObserver?.disconnect();
-    messageQuoteObserver = null;
-    if (existingPanel) existingPanel.remove();
-    existingToggle?.remove();
-    existingNext?.remove();
-    installPanelStyles();
-
-    const { toggle, nextButton, autoChatToast, clampToggleTop, applyTogglePosition } = createFloatingControls();
-
+  function bindFloatingControlEvents({ toggle, nextButton, clampToggleTop, applyTogglePosition }) {
     let drag = null;
     toggle.addEventListener('pointerdown', event => {
       drag = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, moved: false };
@@ -12757,6 +12743,23 @@ roleStateReady = true;
       event.stopPropagation();
       dismissManualFavoriteNext();
     });
+  }
+
+  function mount() {
+    const existingPanel = document.getElementById('mufy-recovery-panel');
+    const existingToggle = document.getElementById('mufy-recovery-toggle');
+    const existingNext = document.getElementById('mufy-recovery-next');
+    if (existingPanel && existingToggle && existingNext && pageWindow.__mufyRecoveryPanelVersion === SCRIPT_VERSION) return;
+    clearMountedGlobalListeners();
+    messageQuoteObserver?.disconnect();
+    messageQuoteObserver = null;
+    if (existingPanel) existingPanel.remove();
+    existingToggle?.remove();
+    existingNext?.remove();
+    installPanelStyles();
+
+    const { toggle, nextButton, autoChatToast, clampToggleTop, applyTogglePosition } = createFloatingControls();
+    bindFloatingControlEvents({ toggle, nextButton, clampToggleTop, applyTogglePosition });
 
     panel = createPanel();
     pageWindow.__mufyRecoveryPanelVersion = SCRIPT_VERSION;
