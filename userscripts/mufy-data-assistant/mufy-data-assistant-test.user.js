@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.145
+// @version      3.0.0-dev.146
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -22,7 +22,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.145';
+    : '3.0.0-dev.146';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -11694,17 +11694,7 @@ roleStateReady = true;
     }
   }
 
-  function mount() {
-    const existingPanel = document.getElementById('mufy-recovery-panel');
-    const existingToggle = document.getElementById('mufy-recovery-toggle');
-    const existingNext = document.getElementById('mufy-recovery-next');
-    if (existingPanel && existingToggle && existingNext && pageWindow.__mufyRecoveryPanelVersion === SCRIPT_VERSION) return;
-    clearMountedGlobalListeners();
-    messageQuoteObserver?.disconnect();
-    messageQuoteObserver = null;
-    if (existingPanel) existingPanel.remove();
-    existingToggle?.remove();
-    existingNext?.remove();
+  function installPanelStyles() {
     document.querySelectorAll('style[data-mufy-recovery-style="mufy-recovery"]').forEach(item => item.remove());
     const style = document.createElement('style');
     style.dataset.mufyRecoveryStyle = 'mufy-recovery';
@@ -12167,6 +12157,20 @@ roleStateReady = true;
         #mufy-recovery-quote-list{padding:10px 8px 30px}.mufy-quote-deck-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:18px 14px;padding-left:12px;padding-right:12px}.mufy-quote-stack{height:205px}.mufy-quote-deck{min-height:195px;padding-left:8px;padding-right:8px}.mufy-quote-deck-card{width:86px;height:132px;margin-left:-48px!important}#mufy-recovery-quote-stage{padding:12px}.mufy-quote-card-content{padding:23px 18px}
       }`;
     document.documentElement.appendChild(style);
+  }
+
+  function mount() {
+    const existingPanel = document.getElementById('mufy-recovery-panel');
+    const existingToggle = document.getElementById('mufy-recovery-toggle');
+    const existingNext = document.getElementById('mufy-recovery-next');
+    if (existingPanel && existingToggle && existingNext && pageWindow.__mufyRecoveryPanelVersion === SCRIPT_VERSION) return;
+    clearMountedGlobalListeners();
+    messageQuoteObserver?.disconnect();
+    messageQuoteObserver = null;
+    if (existingPanel) existingPanel.remove();
+    existingToggle?.remove();
+    existingNext?.remove();
+    installPanelStyles();
 
     const toggle = document.createElement('button');
     toggle.id = 'mufy-recovery-toggle';
