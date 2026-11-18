@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.148
+// @version      3.0.0-dev.149
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -22,7 +22,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.148';
+    : '3.0.0-dev.149';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -9746,8 +9746,6 @@ roleStateReady = true;
           ...row,
           lastSessionId: context.sessionId,
           chatMatchDialogId: String(dialog.dialogsId || dialog.dialogId || dialog.id || ''),
-          chatMatchPage: page,
-          chatMatchPageSize: CHAT_EXPORT_FAST_PAGE_SIZE,
           chatMatchSnippet: dialogMatchSnippet(dialog, query),
           chatMatchAnchor: dialogMatchAnchor(dialog, query),
           chatMatchRole: String(dialog.role || ''),
@@ -9869,8 +9867,6 @@ roleStateReady = true;
         characterId: String(row.characterId),
         sessionId: String(row.lastSessionId),
         dialogId: String(row.chatMatchDialogId || ''),
-        pageNum: Math.max(1, Number(row.chatMatchPage || 1)),
-        pageSize: Math.max(1, Number(row.chatMatchPageSize || CHAT_EXPORT_FAST_PAGE_SIZE)),
         query: String(state.chatSearchQuery || ''),
         anchor: String(row.chatMatchAnchor || row.chatMatchSnippet || ''),
         createdAt: Date.now()
@@ -9919,21 +9915,6 @@ roleStateReady = true;
     return candidates.sort((a, b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight))[0] || null;
   }
 
-  function clickChatHistoryLoader(container) {
-    if (!container) return false;
-    const loader = [...container.querySelectorAll('button,[role="button"]')].find(element =>
-      element.getClientRects().length
-      && !element.disabled
-      && element.dataset.mufyChatHistoryLoading !== '1'
-      && /加载(?:更多|更早|历史)|查看(?:更早|历史)|上一页|更早消息/.test(String(element.textContent || '').replace(/\s+/g, ''))
-    );
-    if (!loader) return false;
-    loader.dataset.mufyChatHistoryLoading = '1';
-    loader.click();
-    setTimeout(() => { delete loader.dataset.mufyChatHistoryLoading; }, 1500);
-    return true;
-  }
-
   async function locatePendingChatJump() {
     let target = null;
     try { target = JSON.parse(localStorage.getItem(CHAT_JUMP_KEY) || 'null'); } catch (_) {}
@@ -9943,18 +9924,11 @@ roleStateReady = true;
     }
     const context = currentRoleContext();
     if (context.characterId !== String(target.characterId) || context.sessionId !== String(target.sessionId)) return;
-    const targetPage = Math.max(1, Number(target.pageNum || 1));
-    const targetPageSize = Math.max(1, Number(target.pageSize || CHAT_EXPORT_FAST_PAGE_SIZE));
-    const estimatedNewerMessages = Math.max(0, (targetPage - 1) * targetPageSize);
-    const maxAttempts = Math.min(360, Math.max(180, 120 + targetPage * 24));
-    const unchangedLimit = Math.min(36, 12 + Math.max(0, targetPage - 1) * 4);
-    state.status = targetPage > 1
-      ? `已打开匹配会话，正在自动加载到目标所在的第 ${targetPage} 页并定位……`
-      : '已打开匹配会话，正在定位目标消息……';
+    state.status = '已打开匹配会话，正在自动加载并定位目标消息……';
     render();
     let unchanged = 0;
     let previousHeight = -1;
-    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    for (let attempt = 0; attempt < 180; attempt += 1) {
       const match = matchingChatElement(target);
       if (match) {
         const highlight = match.closest('[data-dialog-id],[data-message-id],[class*="message"],[class*="dialog"]') || match;
@@ -9974,14 +9948,9 @@ roleStateReady = true;
       const height = container.scrollHeight;
       unchanged = height === previousHeight && container.scrollTop <= 1 ? unchanged + 1 : 0;
       previousHeight = height;
-      const clickedLoader = clickChatHistoryLoader(container);
       container.scrollTop = 0;
       container.dispatchEvent(new pageWindow.Event('scroll', { bubbles: true }));
-      if (targetPage > 1 && attempt > 0 && attempt % 12 === 0) {
-        state.status = `正在自动加载目标第 ${targetPage} 页（约有 ${estimatedNewerMessages} 条较新消息）……`;
-        render();
-      }
-      if (!clickedLoader && unchanged >= unchangedLimit) break;
+      if (unchanged >= 12) break;
       await wait(700);
     }
     try { localStorage.removeItem(CHAT_JUMP_KEY); } catch (_) {}
