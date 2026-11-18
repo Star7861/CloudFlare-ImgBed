@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mufy 角色与面具找回助手 3.0 开发版
 // @namespace    local.mufy.session-recovery.test
-// @version      3.0.0-dev.156
+// @version      3.0.0-dev.157
 // @description  Mufy 角色、聊天与面具管理工具的 3.0 开发版本。
 // 来源：小红薯廿叁，仅供交流和学习，禁止二传。
 // @match        https://chat.mufy.ai/*
@@ -22,7 +22,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info?.script?.version
     ? String(GM_info.script.version)
-    : '3.0.0-dev.156';
+    : '3.0.0-dev.157';
   const DISPLAY_VERSION = (SCRIPT_VERSION.match(/^\d+(?:\.\d+)*/) || [SCRIPT_VERSION])[0];
   const TEST_UPDATE_URL = 'https://raw.githubusercontent.com/Star7861/CloudFlare-ImgBed/main/userscripts/mufy-data-assistant/mufy-data-assistant-test.user.js';
   const UPDATE_CHECK_KEY = 'mufy-recovery-update-check-v2';
@@ -12622,6 +12622,50 @@ roleStateReady = true;
     mountedPanel.querySelector('#mufy-recovery-auto-add-favorite-folder').onchange = event => setAutoAddFavoriteFolderSetting(event.target.checked);
   }
 
+  function bindMaskControlEvents(mountedPanel) {
+    mountedPanel.querySelector('#mufy-recovery-mask-editor-close').onclick = closeMaskEditor;
+    mountedPanel.querySelector('#mufy-recovery-mask-editor-save-as').onclick = () => saveMaskEditor('save-as');
+    mountedPanel.querySelector('#mufy-recovery-mask-editor-replace').onclick = () => saveMaskEditor('replace');
+    mountedPanel.querySelectorAll('[data-copy-mask-field]').forEach(button => {
+      button.onclick = event => {
+        event.preventDefault();
+        event.stopPropagation();
+        copyMaskEditorField(button.dataset.copyMaskField, button.dataset.copyMaskLabel || '当前字段');
+      };
+    });
+    mountedPanel.querySelector('#mufy-recovery-undo').onclick = undoLastLibraryChange;
+    mountedPanel.querySelector('#mufy-recovery-save-all').onclick = addAllMasksToLibrary;
+    mountedPanel.querySelector('#mufy-recovery-mask-manage').onclick = () => {
+      if (state.maskDeleteRunning) return;
+      state.maskManaging = !state.maskManaging;
+      state.selectedMaskKeys.clear();
+      render();
+    };
+    mountedPanel.querySelector('#mufy-recovery-mask-select-all').onclick = () => {
+      state.visibleRows.forEach(row => state.selectedMaskKeys.add(selectedMaskKey(row)));
+      render();
+    };
+    mountedPanel.querySelector('#mufy-recovery-mask-clear-selection').onclick = () => {
+      state.selectedMaskKeys.clear();
+      render();
+    };
+    mountedPanel.querySelector('#mufy-recovery-mask-delete-selected').onclick = deleteSelectedMasks;
+    mountedPanel.querySelector('#mufy-recovery-list').addEventListener('change', event => {
+      const checkbox = event.target.closest?.('[data-mask-select]');
+      if (!checkbox || state.maskDeleteRunning) return;
+      if (checkbox.checked) state.selectedMaskKeys.add(checkbox.dataset.maskSelect);
+      else state.selectedMaskKeys.delete(checkbox.dataset.maskSelect);
+      render();
+    });
+    mountedPanel.querySelector('#mufy-recovery-import-masks').onclick = () => mountedPanel.querySelector('#mufy-recovery-mask-file').click();
+    mountedPanel.querySelector('#mufy-recovery-mask-file').onchange = event => importMasks(event.target.files?.[0]);
+    mountedPanel.querySelector('#mufy-recovery-mask-search').oninput = event => { state.maskQuery = event.target.value.trim().toLowerCase(); render(); };
+    mountedPanel.querySelector('#mufy-recovery-auto-switch').onchange = event => setAutoSwitchSetting(event.target.checked);
+    mountedPanel.querySelector('#mufy-recovery-mask-search').onkeydown = event => {
+      if (event.key === 'Enter' && state.section === 'masks') recoverMasks();
+    };
+  }
+
   function mount() {
     const existingPanel = document.getElementById('mufy-recovery-panel');
     const existingToggle = document.getElementById('mufy-recovery-toggle');
@@ -12877,16 +12921,6 @@ roleStateReady = true;
     panel.querySelector('#mufy-recovery-log-close').onclick = () => { logModal.hidden = true; };
     panel.querySelector('#mufy-recovery-clear-logs').onclick = clearRunLogs;
     panel.querySelector('#mufy-recovery-copy-error-logs').onclick = copyErrorLogs;
-    panel.querySelector('#mufy-recovery-mask-editor-close').onclick = closeMaskEditor;
-    panel.querySelector('#mufy-recovery-mask-editor-save-as').onclick = () => saveMaskEditor('save-as');
-    panel.querySelector('#mufy-recovery-mask-editor-replace').onclick = () => saveMaskEditor('replace');
-    panel.querySelectorAll('[data-copy-mask-field]').forEach(button => {
-      button.onclick = event => {
-        event.preventDefault();
-        event.stopPropagation();
-        copyMaskEditorField(button.dataset.copyMaskField, button.dataset.copyMaskLabel || '当前字段');
-      };
-    });
     const favoriteInterruptModal = panel.querySelector('#mufy-recovery-favorite-interrupt-modal');
     panel.querySelector('#mufy-recovery-favorite-interrupt-close').onclick = () => { favoriteInterruptModal.hidden = true; };
     panel.querySelector('#mufy-recovery-favorite-pause').onclick = () => requestFavoriteInterruption('pause');
@@ -12933,30 +12967,7 @@ roleStateReady = true;
       else await startFavoriteShareRecoveryJob();
     };
     panel.querySelector('#mufy-recovery-share-recovery-cancel').onclick = () => cancelFavoriteShareRecoveryJob();
-    panel.querySelector('#mufy-recovery-undo').onclick = undoLastLibraryChange;
-    panel.querySelector('#mufy-recovery-save-all').onclick = addAllMasksToLibrary;
-    panel.querySelector('#mufy-recovery-mask-manage').onclick = () => {
-      if (state.maskDeleteRunning) return;
-      state.maskManaging = !state.maskManaging;
-      state.selectedMaskKeys.clear();
-      render();
-    };
-    panel.querySelector('#mufy-recovery-mask-select-all').onclick = () => {
-      state.visibleRows.forEach(row => state.selectedMaskKeys.add(selectedMaskKey(row)));
-      render();
-    };
-    panel.querySelector('#mufy-recovery-mask-clear-selection').onclick = () => {
-      state.selectedMaskKeys.clear();
-      render();
-    };
-    panel.querySelector('#mufy-recovery-mask-delete-selected').onclick = deleteSelectedMasks;
-    panel.querySelector('#mufy-recovery-list').addEventListener('change', event => {
-      const checkbox = event.target.closest?.('[data-mask-select]');
-      if (!checkbox || state.maskDeleteRunning) return;
-      if (checkbox.checked) state.selectedMaskKeys.add(checkbox.dataset.maskSelect);
-      else state.selectedMaskKeys.delete(checkbox.dataset.maskSelect);
-      render();
-    });
+    bindMaskControlEvents(panel);
     const exportModal = panel.querySelector('#mufy-recovery-export-modal');
     const exportBindingOption = panel.querySelector('#mufy-recovery-export-binding-option');
     const exportBindingHint = panel.querySelector('#mufy-recovery-export-binding-hint');
@@ -12999,8 +13010,6 @@ roleStateReady = true;
         }
       };
     });
-    panel.querySelector('#mufy-recovery-import-masks').onclick = () => panel.querySelector('#mufy-recovery-mask-file').click();
-    panel.querySelector('#mufy-recovery-mask-file').onchange = event => importMasks(event.target.files?.[0]);
     panel.querySelector('#mufy-recovery-role-search').oninput = event => { state.roleQuery = event.target.value.trim().toLowerCase(); render(); };
     panel.querySelector('#mufy-recovery-chat-search-query').value = state.chatSearchQuery;
     panel.querySelector('#mufy-recovery-chat-search-scope').value = state.chatSearchScope;
@@ -13021,7 +13030,6 @@ roleStateReady = true;
     panel.querySelector('#mufy-recovery-clear-site-selection').onclick = toggleAllSiteRows;
     panel.querySelector('#mufy-recovery-refresh-site-rows').onclick = refreshSiteRows;
     panel.querySelector('#mufy-recovery-clear-site-rows').onclick = clearSiteRows;
-    panel.querySelector('#mufy-recovery-mask-search').oninput = event => { state.maskQuery = event.target.value.trim().toLowerCase(); render(); };
     panel.querySelector('#mufy-recovery-status-filter').onchange = event => {
       state.statusFilter = event.target.value;
       render();
@@ -13034,10 +13042,6 @@ roleStateReady = true;
       const value = Math.max(1, Math.min(500, Number(event.target.value) || 1));
       state.roleLatestPages = value;
       event.target.value = String(value);
-    };
-    panel.querySelector('#mufy-recovery-auto-switch').onchange = event => setAutoSwitchSetting(event.target.checked);
-    panel.querySelector('#mufy-recovery-mask-search').onkeydown = event => {
-      if (event.key === 'Enter' && state.section === 'masks') recoverMasks();
     };
     panel.querySelectorAll('[data-section]').forEach(button => {
       button.onclick = () => {
